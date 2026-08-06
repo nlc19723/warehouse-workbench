@@ -1,0 +1,10 @@
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+
+# Node (not used, but safe)
+node_modules/
+
+# Local-only / large working assets not needed for the live site
+screenshots/

@@ -1,0 +1,11 @@
+# GitLab Pages 部署配置 —— 把静态文件发布为网站
+pages:
+  stage: deploy
+  script:
+    - echo "静态站点，无需构建，直接发布"
+  artifacts:
+    paths:
+      - .
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

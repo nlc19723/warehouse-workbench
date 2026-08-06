@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="库管工作台">
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 120'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%237A9CA5'/%3E%3Cstop offset='100%25' style='stop-color:%238CC0A8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='120' height='120' rx='28' fill='url(%23g)'/%3E%3Ctext x='60' y='78' text-anchor='middle' fill='white' font-size='52' font-weight='bold'%3E库%3C/text%3E%3C/svg%3E">
+  <title>库管系统工作台</title>
+  <link rel="stylesheet" href="css/style.css?v=6">
+  <script defer src="lib/dexie.min.js?v=6"></script>
+  <script defer src="lib/chart.min.js?v=6"></script>
+  <script defer src="lib/xlsx.full.min.js?v=6"></script>
+  <script defer src="lib/supabase.min.js?v=6"></script>
+</head>
+<body>
+  <div class="app-container" id="appContainer">
+    <!-- 固定左侧功能栏 -->
+    <aside class="sidebar-panel" id="sidebarPanel">
+      <div class="sidebar-header">
+        <div class="sidebar-logo-icon" id="sidebarAvatar" title="点击更换头像">库</div>
+        <div class="sidebar-header-info">
+          <div class="sidebar-title" id="sidebarTitle" title="点击修改名称">库管工作台</div>
+          <div class="sidebar-subtitle" id="sidebarSubtitle">
+            <input type="text" class="sidebar-mood-input" id="sidebarMood" placeholder="写点什么（如：今日心情、当班备注）" maxlength="30">
+          </div>
+        </div>
+        <button class="sidebar-toggle-btn" id="sidebarToggleBtn" title="收起/展开边栏">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 4L6 8L10 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+
+      <div class="sidebar-section">
+        <a class="sidebar-item active" data-module="dashboard" href="#dashboard">
+          <span class="item-icon" style="background:var(--accent-lavender-light);">📊</span>
+          <span class="item-text">首页仪表盘</span>
+        </a>
+        <a class="sidebar-item" data-module="query" href="#query">
+          <span class="item-icon" style="background:var(--accent-lavender-light);">🔍</span>
+          <span class="item-text">查询系统</span>
+          <span class="item-badge tag-info">热</span>
+        </a>
+        <a class="sidebar-item" data-module="inventoryAlert" href="#inventoryAlert">
+          <span class="item-icon" style="background:var(--accent-coral-light);">⚠️</span>
+          <span class="item-text">库存预警</span>
+          <span class="item-badge tag-danger" id="badgeAlert">--</span>
+        </a>
+        <a class="sidebar-item" data-module="orderTrack" href="#orderTrack">
+          <span class="item-icon" style="background:var(--accent-coral-light);">📦</span>
+          <span class="item-text">订单跟踪</span>
+        </a>
+      </div>
+
+      <div class="sidebar-section">
+        <a class="sidebar-item" data-module="stock" href="#stock">
+          <span class="item-icon" style="background:var(--accent-mint-light);">🏪</span>
+          <span class="item-text">现存量</span>
+        </a>
+        <a class="sidebar-item" data-module="orders" href="#orders">
+          <span class="item-icon" style="background:var(--status-info-bg);">📝</span>
+          <span class="item-text">订单列表</span>
+        </a>
+        <a class="sidebar-item" data-module="inbound" href="#inbound">
+          <span class="item-icon" style="background:var(--accent-mint-light);">📥</span>
+          <span class="item-text">入库列表</span>
+        </a>
+        <a class="sidebar-item" data-module="pricing" href="#pricing">
+          <span class="item-icon">💰</span><span class="item-text">合同价格</span>
+        </a>
+        <a class="sidebar-item" data-module="reconciliation" href="#reconciliation">
+          <span class="item-icon">📋</span><span class="item-text">对账功能</span>
+        </a>
+      </div>
+
+      <div class="sidebar-section">
+        <a class="sidebar-item" data-module="supplier" href="#supplier">
+          <span class="item-icon" style="background:var(--accent-warm-light);">🏭</span>
+          <span class="item-text">供应商管理</span>
+        </a>
+        <a class="sidebar-item" data-module="lowTurnover" href="#lowTurnover">
+          <span class="item-icon">🐢</span><span class="item-text">低周转材料</span>
+        </a>
+        <a class="sidebar-item" data-module="breach" href="#breach">
+          <span class="item-icon">❌</span><span class="item-text">违约台账</span>
+        </a>
+      </div>
+
+      <div class="sidebar-footer">
+        <a class="sidebar-item" onclick="SyncManager.showConfigDialog()">
+          <span class="item-icon">☁️</span><span class="item-text">数据源配置</span>
+        </a>
+        <a class="sidebar-item" onclick="DataLoader.reimport()">
+          <span class="item-icon">🔄</span><span class="item-text">重新导入数据</span>
+        </a>
+        <a class="sidebar-item" id="sidebarSettingsBtn">
+          <span class="item-icon">⚙️</span><span class="item-text">设置</span>
+        </a>
+      </div>
+    </aside>
+
+    <!-- 移动端汉堡菜单遮罩 -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <!-- 主内容区 -->
+    <main class="main-content">
+      <!-- 顶部导航栏 -->
+      <header class="top-bar">
+        <div class="top-bar-left">
+          <button class="hamburger-btn mobile-only" id="hamburgerBtn">
+            <span></span><span></span><span></span>
+          </button>
+          <strong style="font-size:16px;color:var(--text-primary);white-space:nowrap;">库管工作台</strong>
+        </div>
+        <div class="search-box">
+          <input type="text" id="globalSearch" placeholder="搜索订单/物料/供应商..." autocomplete="off">
+          <span class="search-icon">🔍</span>
+        </div>
+        <div class="top-bar-right">
+          <button class="theme-toggle" id="themeToggle" title="切换主题">🌙</button>
+          <span class="current-time" id="currentTime">--:--</span>
+          <div class="sync-status" id="syncStatus" title="点击配置云端同步">
+            <span class="status-dot"></span>
+            <span id="syncStatusText">未连接</span>
+          </div>
+          <div class="user-avatar">管</div>
+        </div>
+      </header>
+
+      <!-- 内容滚动区 -->
+      <div class="content-scroll" id="contentArea">
+        <!-- 动态渲染 -->
+      </div>
+    </main>
+  </div>
+
+  <!-- 加载遮罩 -->
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-text" id="loadingText">正在初始化...</div>
+  </div>
+
+  <!-- 详情模态框 -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal" id="modal">
+      <div class="modal-header">
+        <span class="modal-title" id="modalTitle">详情</span>
+        <button class="modal-close" id="modalClose">&times;</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <!-- 全屏磨砂弹窗 -->
+  <div class="panel-overlay" id="panelOverlay"></div>
+  <div class="panel-dialog" id="panelDialog">
+    <div class="panel-dialog-header">
+      <span class="panel-dialog-title" id="panelTitle">模块名</span>
+      <button class="panel-dialog-close" id="panelClose">&times;</button>
+    </div>
+    <div class="panel-dialog-body" id="panelBody">
+      <!-- 弹窗内容动态渲染 -->
+    </div>
+  </div>
+
+  <script defer src="js/table-utils.js?v=6"></script>
+  <script defer src="js/db.js?v=6"></script>
+  <script defer src="js/sync.js?v=6"></script>
+  <script defer src="js/data-loader.js?v=6"></script>
+  <script defer src="js/dashboard.js?v=6"></script>
+  <script defer src="js/supplier.js?v=6"></script>
+  <script defer src="js/query.js?v=6"></script>
+  <script defer src="js/reconciliation.js?v=6"></script>
+  <script defer src="js/order-track.js?v=6"></script>
+  <script defer src="js/inventory-alert.js?v=6"></script>
+  <script defer src="js/orders.js?v=6"></script>
+  <script defer src="js/inbound.js?v=6"></script>
+  <script defer src="js/stock.js?v=6"></script>
+  <script defer src="js/pricing.js?v=6"></script>
+  <script defer src="js/low-turnover.js?v=6"></script>
+  <script defer src="js/breach.js?v=6"></script>
+  <script defer src="js/app.js?v=6"></script>
+</body>
+</html>
