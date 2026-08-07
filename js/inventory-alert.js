@@ -39,6 +39,62 @@ const InventoryAlertModule = {
 
   async loadData() {
     let alerts = await db.inventoryAlerts.toArray();
+
+    // ===== 兼容层：旧数据有"是否需补货"(字符串)，新数据有"补货值"(数值) =====
+    // 统一转换为 补货值 数值字段，同时从 stock 表交叉获取真实现存量
+    alerts.forEach(a => {
+      // 若没有补货值但有旧的"是否需补货"字段 → 计算补货值
+      if ((!a.补货值 && a.补货值 !== 0) && (a.是否需补货 === '是' || a.是否需补货 === true)) {
+        const minStock = parseFloat(a.最低库存预警) || 0;
+        const curStock = parseFloat(a.现存量) || 0;
+        a.补货值 = Math.max(0, minStock - curStock);
+      }
+      // 若补货值仍为空/undefined，设为 0
+      if (!a.补货值 && a.补货值 !== 0) a.补货值 = 0;
+    });
+
+    // 从 stock（中心库房现存量）表交叉获取真实现存量
+    try {
+      const stockRows = await db.stock.toArray();
+      const stockByCode = new Map();
+      const stockByNameSpec = new Map();
+      stockRows.forEach(s => {
+        if (s.存货编码) stockByCode.set(String(s.存货编码), s.现存数量);
+        if (s.存货名称) {
+          const key = (s.存货名称 + '|' + (s.规格型号 || '')).replace(/\s+/g, '');
+          stockByNameSpec.set(key, s.现存数量);
+        }
+      });
+      let fixedCount = 0;
+      alerts.forEach(a => {
+        if (!a.现存量 || a.现存量 === 0) {
+          if (a.存货编码 && stockByCode.has(String(a.存货编码))) {
+            a.现存量 = stockByCode.get(String(a.存货编码)); fixedCount++;
+          }
+          else if (a.存货名称) {
+            const key = (a.存货名称 + '|' + (a.规格型号 || '')).replace(/\s+/g, '');
+            if (stockByNameSpec.has(key)) { a.现存量 = stockByNameSpec.get(key); fixedCount++; }
+            else {
+              for (const [k, v] of stockByNameSpec) {
+                if (k.startsWith((a.存货名称 || '').replace(/\s+/g, ''))) { a.现存量 = v; fixedCount++; break; }
+              }
+            }
+          }
+        }
+        // 补货值也重新计算（基于修正后的现存量）
+        if (a.补货值 > 0 || a.是否需补货 === '是') {
+          const minStock = parseFloat(a.最低库存预警) || 0;
+          const curStock = parseFloat(a.现存量) || 0;
+          if (minStock > 0 && curStock < minStock) {
+            a.补货值 = Math.max(0, minStock - curStock);
+          } else {
+            a.补货值 = 0;
+          }
+        }
+      });
+      if (fixedCount > 0) console.log(`[inventory-alert] 从库存表补全 ${fixedCount}/${alerts.length} 条现存量`);
+    } catch(e) { console.warn('[inventory-alert] 库存表关联失败:', e); }
+
     const kw = document.getElementById('alertKw')?.value.trim().toLowerCase();
     const category = document.getElementById('alertCategory')?.value;
     const status = document.getElementById('alertStatus')?.value;
@@ -53,13 +109,13 @@ const InventoryAlertModule = {
       alerts = alerts.filter(a => a.分类 === category);
     }
     if (status === 'yes') {
-      alerts = alerts.filter(a => a.是否需补货 === '是' || a.是否需补货 === true);
+      alerts = alerts.filter(a => (a.补货值 && a.补货值 > 0));
     } else if (status === 'no') {
-      alerts = alerts.filter(a => a.是否需补货 !== '是' && a.是否需补货 !== true);
+      alerts = alerts.filter(a => !a.补货值 || a.补货值 <= 0);
     }
 
-    const needRestock = alerts.filter(a => a.是否需补货 === '是' || a.是否需补货 === true);
-    const totalNeedQty = needRestock.reduce((s, a) => s + (parseFloat(a.在途订单) || 0), 0);
+    const needRestock = alerts.filter(a => a.补货值 && a.补货值 > 0);
+    const totalNeedQty = needRestock.reduce((s, a) => s + (parseFloat(a.补货值) || 0), 0);
 
     document.getElementById('alertSummary').innerHTML = `
       <div class="kpi-grid">
@@ -115,6 +171,7 @@ const InventoryAlertModule = {
               <th>最低库存</th>
               <th>最高库存</th>
               <th>现存量</th>
+              <th>补货值</th>
               <th>在途订单</th>
               <th>状态</th>
               <th>仓库/项目</th>
@@ -122,7 +179,7 @@ const InventoryAlertModule = {
           </thead>
           <tbody>
             ${items.map(a => {
-              const needRestock = a.是否需补货 === '是' || a.是否需补货 === true;
+              const needRestock = (a.补货值 && a.补货值 > 0) ? true : false;
               return `
                 <tr class="${needRestock ? 'row-warning' : ''}">
                   <td>${a.存货编码 || '-'}</td>
@@ -133,6 +190,7 @@ const InventoryAlertModule = {
                   <td>${this.formatNum(a.最低库存预警)}</td>
                   <td>${this.formatNum(a.最高库存)}</td>
                   <td>${this.formatNum(a.现存量)}</td>
+                  <td style="${needRestock ? 'color:var(--status-danger);font-weight:600;' : ''}">${this.formatNum(a.补货值)}</td>
                   <td>${this.formatNum(a.在途订单)}</td>
                   <td>${needRestock ? '<span class="tag tag-danger">需补货</span>' : '<span class="tag tag-success">正常</span>'}</td>
                   <td>${String(a.所上或库房 || '-').substring(0, 15)}${String(a.所上或库房 || '').length > 15 ? '...' : ''}</td>

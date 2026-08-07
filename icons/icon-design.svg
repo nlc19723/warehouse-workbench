@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- ============ 梦幻蓝紫渐变（通透玻璃） ============ -->
+    <linearGradient id="glassGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="#E8E6FE"/>
+      <stop offset="28%"  stop-color="#CDD4F5"/>
+      <stop offset="55%"  stop-color="#A8B2E6"/>
+      <stop offset="80%"  stop-color="#8892D8"/>
+      <stop offset="100%" stop-color="#6872C4"/>
+    </linearGradient>
+
+    <!-- 玻璃顶部光泽 -->
+    <linearGradient id="glassGloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.72"/>
+      <stop offset="36%"  stop-color="#FFFFFF" stop-opacity="0.0"/>
+    </linearGradient>
+
+    <!-- 底部内阴影（体积感） -->
+    <linearGradient id="glassInner" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="52%"  stop-color="#241A68" stop-opacity="0.0"/>
+      <stop offset="100%" stop-color="#241A68" stop-opacity="0.30"/>
+    </linearGradient>
+
+    <!-- 剪贴板主体（白→极淡紫，亚克力感） -->
+    <linearGradient id="clipBody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F2F3FB"/>
+    </linearGradient>
+    <!-- 剪贴板厚度/投影 -->
+    <linearGradient id="clipDepth" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#C4C0EE"/>
+      <stop offset="100%" stop-color="#A8A4E0"/>
+    </linearGradient>
+    <!-- 剪夹顶部横条 -->
+    <linearGradient id="clipBar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#E8E6FE"/>
+      <stop offset="100%" stop-color="#D0CCF0"/>
+    </linearGradient>
+
+    <!-- 重影模糊 -->
+    <filter id="blurGhost" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+    <!-- 底部漫反射阴影 -->
+    <filter id="blurShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <!-- 边缘光晕 -->
+    <filter id="blurRim" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.8"/>
+    </filter>
+    <!-- 图标内部微投影 -->
+    <filter id="iconShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3.5"/>
+      <feOffset dx="0" dy="2.5"/>
+    </filter>
+
+    <!-- 裁剪到主 squircle 内 -->
+    <clipPath id="squircleClip">
+      <rect x="38" y="52" width="436" height="400" rx="95" ry="95"/>
+    </clipPath>
+  </defs>
+
+  <!-- ============ 背景：纯白极淡灰 ============ -->
+  <rect width="512" height="512" fill="#FCFCFE"/>
+
+  <!-- ============ 底部柔和漫反射倒影/投影（悬浮感） ============ -->
+  <ellipse cx="256" cy="472" rx="195" ry="24" fill="#7078C4" opacity="0.22" filter="url(#blurShadow)"/>
+  <ellipse cx="256" cy="464" rx="158" ry="15" fill="#4A4098" opacity="0.14" filter="url(#blurShadow)"/>
+
+  <!-- ============ 后层 Ghost / Echo（错位半透明同形层） ============ -->
+  <rect x="56" y="36" width="436" height="400" rx="95" ry="95"
+        fill="#8892DC" opacity="0.42" filter="url(#blurGhost)"/>
+
+  <!-- ============ 主玻璃 Squircle 底座（占画布 ~85%） ============ -->
+  <rect x="38" y="52" width="436" height="400" rx="95" ry="95" fill="url(#glassGrad)"/>
+
+  <!-- ============ 玻璃内部通透感（果冻/磨砂效果） ============ -->
+  <g clip-path="url(#squircleClip)">
+    <!-- 中心大面积提亮 -->
+    <ellipse cx="256" cy="248" rx="205" ry="185" fill="#FFFFFF" opacity="0.16"/>
+    <!-- 顶部强光泽带 -->
+    <rect x="38" y="52" width="436" height="220" fill="url(#glassGloss)"/>
+    <!-- 底部内阴影（体积/厚度） -->
+    <rect x="38" y="52" width="436" height="400" fill="url(#glassInner)"/>
+    <!-- 左侧通透高光条 -->
+    <rect x="38" y="52" width="68" height="400" fill="#FFFFFF" opacity="0.09"/>
+    <!-- 右下角微弱反光 -->
+    <rect x="370" y="290" width="104" height="162" fill="#FFFFFF" opacity="0.05"/>
+  </g>
+
+  <!-- ============ Rim Light 边缘光（清晰轮廓） ============ -->
+  <!-- 外发光晕 -->
+  <rect x="36" y="50" width="440" height="404" rx="97" ry="97"
+        fill="none" stroke="#FFFFFF" stroke-width="7" opacity="0.68" filter="url(#blurRim)"/>
+  <!-- 清晰细腻高光描边（双层） -->
+  <rect x="38.5" y="52.5" width="435" height="399" rx="94" ry="94"
+        fill="none" stroke="#FFFFFF" stroke-width="2.4" opacity="0.93"/>
+  <rect x="41" y="55" width="430" height="394" rx="91" ry="91"
+        fill="none" stroke="#C8D0F0" stroke-width="1.1" opacity="0.48"/>
+  <!-- 右上冷色弧线高光 -->
+  <path d="M380 88 Q450 135 454 225" fill="none" stroke="#B8C4F8" stroke-width="3.2" opacity="0.55" stroke-linecap="round"/>
+  <!-- 左下暖弧线 -->
+  <path d="M62 420 Q105 458 195 456" fill="none" stroke="#D0CAEF" stroke-width="2.2" opacity="0.34" stroke-linecap="round"/>
+
+  <!-- ============ 白色圆润立体剪贴板+对勾（库管主题） ============ -->
+
+  <!-- 剪贴板厚度/底部投影偏移 -->
+  <path d="M178 308 L178 372 Q178 382 188 382 L324 382 Q334 382 334 372 L334 308 Z"
+        fill="url(#clipDepth)" opacity="0.92"/>
+
+  <!-- 剪贴板主体（圆角矩形） -->
+  <rect x="176" y="198" width="160" height="174" rx="18" fill="url(#clipBody)"
+        filter="url(#iconShadow)"/>
+  <rect x="176" y="198" width="160" height="174" rx="18" fill="url(#clipBody)"/>
+  <rect x="176" y="198" width="160" height="174" rx="18"
+        fill="none" stroke="#C4C0EE" stroke-width="1.4" opacity="0.38"/>
+
+  <!-- 剪夹顶部横条（圆角胶囊形） -->
+  <rect x="212" y="186" width="88" height="22" rx="11" fill="url(#clipBar)"/>
+  <rect x="214" y="188" width="84" height="18" rx="9"
+        fill="none" stroke="#B0ACE4" stroke-width="1" opacity="0.3"/>
+  <!-- 横条高光线 -->
+  <rect x="216" y="190" width="80" height="6" rx="3" fill="#FFFFFF" opacity="0.45"/>
+
+  <!-- 对勾 ✓（圆润粗线条，浮雕感） -->
+  <!-- 对勾投影 -->
+  <path d="M222 288 L248 316 L296 254"
+        fill="none" stroke="#A8A4E0" stroke-width="15" stroke-linecap="round"
+        stroke-linejoin="round" opacity="0.35"
+        transform="translate(2,3)"/>
+  <!-- 对勾主体（白色） -->
+  <path d="M222 288 L248 316 L296 254"
+        fill="none" stroke="#FFFFFF" stroke-width="15" stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <!-- 对勾内部高光（增加立体/软胶感） -->
+  <path d="M222 288 L248 316 L296 254"
+        fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"
+        stroke-linejoin="round" opacity="0.55"
+        transform="translate(-1.5,-1.5)"/>
+
+  <!-- 剪贴板上装饰线条（模拟纸张/列表感） -->
+  <line x1="196" y1="240" x2="316" y2="240" stroke="#E8E6FE" stroke-width="4" stroke-linecap="round" opacity="0.6"/>
+  <line x1="196" y1="260" x2="296" y2="260" stroke="#EEEAF8" stroke-width="4" stroke-linecap="round" opacity="0.45"/>
+</svg>

@@ -46,6 +46,17 @@ const SupplierModule = {
   async loadTable() {
     let suppliers = await DataStore.getSuppliers(this.currentFilter);
 
+    // 运行时补全：若已入库金额全为0，从入库表汇总
+    const allZero = suppliers.length > 0 && suppliers.every(s => !s.年度已供入库金额 || s.年度已供入库金额 === 0);
+    if (allZero) {
+      try {
+        const inbound = await db.inbound.toArray();
+        const map = new Map();
+        inbound.forEach(row => { const sup=row.供应商; if(sup) map.set(sup, (map.get(sup)||0)+(parseFloat(row.原币价税合计)||0)); });
+        suppliers.forEach(s => { if(map.has(s.供应商)) { s.年度已供入库金额=map.get(s.供应商); if(s.年度合同金额>0) s.年度已供入库金额占比=s.年度已供入库金额/s.年度合同金额; }});
+      } catch(e){/*ignore*/}
+    }
+
     const contractWarn = document.getElementById('contractWarn')?.value;
     if (contractWarn) {
       const now = new Date();

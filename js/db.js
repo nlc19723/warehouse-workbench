@@ -50,8 +50,8 @@ db.version(DB_VERSION).stores({
   inbound: '++id, 入库单号, 存货编码, 供应商',
   // 现存量 - 按存货编码查询
   stock: '++id, 存货编码, 存货名称',
-  // 库存预警 - 按是否需补货、存货编码查询
-  inventoryAlerts: '++id, 是否需补货, 存货编码',
+  // 库存预警 - 按补货值、存货编码查询
+  inventoryAlerts: '++id, 补货值, 存货编码',
   // 订货核对 - 按存货编码查询
   orderChecks: '++id, 存货编码',
   // 供应商价格 - 按供应商、存货编码查询
@@ -208,8 +208,8 @@ const DataStore = {
   // ===== 库存预警 =====
   async getInventoryAlerts(filter = {}) {
     let query = db.inventoryAlerts.toCollection();
-    if (filter.是否需补货 !== undefined) {
-      query = query.filter(a => a.是否需补货 === filter.是否需补货);
+    if (filter.补货值 !== undefined) {
+      query = query.filter(a => (filter.补货值 ? (a.补货值 && a.补货值 > 0) : (!a.补货值 || a.补货值 <= 0)));
     }
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
@@ -221,7 +221,7 @@ const DataStore = {
 
   async getAlertStats() {
     const all = await db.inventoryAlerts.toArray();
-    const needRestock = all.filter(a => a.是否需补货 === '是' || a.是否需补货 === true).length;
+    const needRestock = all.filter(a => a.补货值 && a.补货值 > 0).length;
     const total = all.length;
     return { needRestock, total };
   },
@@ -287,7 +287,48 @@ const DataStore = {
       db.lowTurnover.count()
     ]);
 
-    const needRestock = alerts.filter(a => a.是否需补货 === '是' || a.是否需补货 === true);
+    // 兼容层：旧数据有"是否需补货"(字符串)，新数据有"补货值"(数值)
+    alerts.forEach(a => {
+      if ((!a.补货值 && a.补货值 !== 0) && (a.是否需补货 === '是' || a.是否需补货 === true)) {
+        const minStock = parseFloat(a.最低库存预警) || 0;
+        const curStock = parseFloat(a.现存量) || 0;
+        a.补货值 = Math.max(0, minStock - curStock);
+      }
+      if (!a.补货值 && a.补货值 !== 0) a.补货值 = 0;
+    });
+
+    // 从 stock 表交叉获取真实现存量（与 inventory-alert 模块保持一致）
+    try {
+      const stockRows = await db.stock.toArray();
+      const stockByCode = new Map();
+      const stockByNameSpec = new Map();
+      stockRows.forEach(s => {
+        if (s.存货编码) stockByCode.set(String(s.存货编码), s.现存数量);
+        if (s.存货名称) {
+          const key = (s.存货名称 + '|' + (s.规格型号 || '')).replace(/\s+/g, '');
+          stockByNameSpec.set(key, s.现存数量);
+        }
+      });
+      alerts.forEach(a => {
+        if (!a.现存量 || a.现存量 === 0) {
+          if (a.存货编码 && stockByCode.has(String(a.存货编码))) a.现存量 = stockByCode.get(String(a.存货编码));
+          else if (a.存货名称) {
+            const key = (a.存货名称 + '|' + (a.规格型号 || '')).replace(/\s+/g, '');
+            if (stockByNameSpec.has(key)) a.现存量 = stockByNameSpec.get(key);
+            else for (const [k, v] of stockByNameSpec) { if (k.startsWith((a.存货名称 || '').replace(/\s+/g, ''))) { a.现存量 = v; break; } }
+          }
+        }
+        // 基于修正后的现存量重新计算补货值
+        if (a.补货值 > 0 || a.是否需补货 === '是') {
+          const minStock = parseFloat(a.最低库存预警) || 0;
+          const curStock = parseFloat(a.现存量) || 0;
+          if (minStock > 0 && curStock < minStock) a.补货值 = Math.max(0, minStock - curStock);
+          else a.补货值 = 0;
+        }
+      });
+    } catch(e) { /* ignore */ }
+
+    const needRestock = alerts.filter(a => a.补货值 && a.补货值 > 0);
     const needRestockCount = needRestock.length;
     const needRestockQty = needRestock.reduce((sum, a) => sum + (parseFloat(a.在途订单) || 0), 0);
 

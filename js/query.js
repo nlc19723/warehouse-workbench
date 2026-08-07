@@ -76,18 +76,47 @@ const QueryModule = {
     switch (this.currentTab) {
       case 'stock': {
         const alerts = await db.inventoryAlerts.toArray();
-        return alerts.map((a, idx) => ({
-          '序号': idx + 1,
-          '存货编码': a.存货编码 || '',
-          '存货名称': a.存货名称 || '',
-          '规格型号': a.规格型号 || '',
-          '月均入库量': a.近一年月均入库量 || 0,
-          '现存量': a.现存量 || 0,
-          '是否需补货': a.是否需补货 || '',
-          '在途订单': a.在途订单 || 0,
-          '所上或库房': a.所上或库房 || '',
-          '工程项目': a.工程项目 || '',
-        }));
+        // 从 stock（中心库房现存量）表获取真实库存数据
+        const stockRows = await db.stock.toArray();
+        const stockByCode = new Map();
+        const stockByNameSpec = new Map();
+        stockRows.forEach(s => {
+          if (s.存货编码) stockByCode.set(String(s.存货编码), s.现存数量);
+          if (s.存货名称) {
+            const key = (s.存货名称 + '|' + (s.规格型号 || '')).replace(/\s+/g, '');
+            stockByNameSpec.set(key, s.现存数量);
+          }
+        });
+
+        return alerts.map((a, idx) => {
+          // 交叉获取真实现存量
+          let realStock = a.现存量 || 0;
+          if (!realStock || realStock === 0) {
+            if (a.存货编码 && stockByCode.has(String(a.存货编码))) {
+              realStock = stockByCode.get(String(a.存货编码));
+            } else if (a.存货名称) {
+              const key = (a.存货名称 + '|' + (a.规格型号 || '')).replace(/\s+/g, '');
+              if (stockByNameSpec.has(key)) realStock = stockByNameSpec.get(key);
+              else {
+                for (const [k, v] of stockByNameSpec) {
+                  if (k.startsWith((a.存货名称 || '').replace(/\s+/g, ''))) { realStock = v; break; }
+                }
+              }
+            }
+          }
+          return {
+            '序号': idx + 1,
+            '存货编码': a.存货编码 || '',
+            '存货名称': a.存货名称 || '',
+            '规格型号': a.规格型号 || '',
+            '月均入库量': a.近一年月均入库量 || 0,
+            '现存量': realStock,
+            '是否需补货': a.是否需补货 || '',
+            '在途订单': a.在途订单 || 0,
+            '所上或库房': a.所上或库房 || '',
+            '工程项目': a.工程项目 || '',
+          };
+        });
       }
       case 'orders': {
         const orders = await db.orders.toArray();

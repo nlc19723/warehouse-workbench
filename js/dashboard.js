@@ -367,9 +367,49 @@ const DashboardModule = {
     let title = '', headers = [], rows = [];
     if (type === 'restock') {
       title = '需补货物料明细';
-      const list = (await db.inventoryAlerts.toArray()).filter(a => a.是否需补货 === '是' || a.是否需补货 === true);
-      headers = ['存货名称', '规格', '现存量'];
-      rows = list.slice(0, 300).map(a => [a.存货名称 || '-', a.规格型号 || '-', this.fmt(a.现存量)]);
+      let list = await db.inventoryAlerts.toArray();
+
+      // 兼容层：旧数据"是否需补货"→"补货值"
+      list.forEach(a => {
+        if ((!a.补货值 && a.补货值 !== 0) && (a.是否需补货 === '是' || a.是否需补货 === true)) {
+          const minStock = parseFloat(a.最低库存预警) || 0;
+          const curStock = parseFloat(a.现存量) || 0;
+          a.补货值 = Math.max(0, minStock - curStock);
+        }
+        if (!a.补货值 && a.补货值 !== 0) a.补货值 = 0;
+      });
+
+      // 从库存表交叉补全现存量 + 重算补货值
+      try {
+        const stockRows = await db.stock.toArray();
+        const stockByCode = new Map();
+        const stockByNameSpec = new Map();
+        stockRows.forEach(s => {
+          if (s.存货编码) stockByCode.set(String(s.存货编码), s.现存数量);
+          if (s.存货名称) { const k=(s.存货名称+'|'+(s.规格型号||'')).replace(/\s+/g,''); stockByNameSpec.set(k,s.现存数量); }
+        });
+        list.forEach(a => {
+          if (!a.现存量 || a.现存量===0) {
+            if (a.存货编码 && stockByCode.has(String(a.存货编码))) a.现存量=stockByCode.get(String(a.存货编码));
+            else if (a.存货名称) {
+              const k=(a.存货名称+'|'+(a.规格型号||'')).replace(/\s+/g,'');
+              if (stockByNameSpec.has(k)) a.现存量=stockByNameSpec.get(k);
+              else for(const [kk,vv]of stockByNameSpec){if(kk.startsWith((a.存货名称||'').replace(/\s+/g,''))){a.现存量=vv;break;}}
+            }
+          }
+          // 基于修正后的现存量重算补货值
+          if (a.补货值 > 0 || a.是否需补货 === '是') {
+            const minStock = parseFloat(a.最低库存预警) || 0;
+            const curStock = parseFloat(a.现存量) || 0;
+            if (minStock > 0 && curStock < minStock) a.补货值 = Math.max(0, minStock - curStock);
+            else a.补货值 = 0;
+          }
+        });
+      }catch(e){/*ignore*/}
+
+      list = list.filter(a => a.补货值 && a.补货值 > 0);
+      headers = ['存货名称', '规格', '现存量', '补货值', '最低库存'];
+      rows = list.slice(0, 300).map(a => [a.存货名称 || '-', a.规格型号 || '-', this.fmt(a.现存量), this.fmt(a.补货值), this.fmt(a.最低库存预警)]);
     } else if (type === 'pendingInbound') {
       title = '未完成入库订单';
       const list = (await db.orders.toArray()).filter(o => parseFloat(o.未入库量) > 0);
@@ -669,20 +709,20 @@ const DashboardModule = {
     let expiringSoon = 0; // 30天内到期
     let expiringLater = 0; // 30-90天到期
     let safe = 0; // 90天以上
-    let noContract = 0; // 无到期时间
+    let expired = 0; // 已过期（合同已到期）
+    let noInfo = 0; // 无到期时间信息
 
     suppliers.forEach(s => {
       const endDate = s.最终到期时间 || s.年度合同到期时间;
       if (!endDate) {
-        noContract++;
+        noInfo++;
         return;
       }
       const end = new Date(endDate);
       const diffDays = Math.ceil((end - now) / (1000 * 60 * 60 * 24));
-      // 已过期的供应商不计入"即将到期"（只统计未来30天内到期的）
       if (diffDays < 0) {
-        // 已过期：归入临近到期或单独分类，此处归入 noContract 类别
-        noContract++;
+        // 已过期 → 单独显示为"已到期"
+        expired++;
         return;
       }
       if (diffDays <= thirtyDays) {
@@ -700,7 +740,8 @@ const DashboardModule = {
         <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#D49595;"></span>即将到期(≤30天) ${expiringSoon} 家</div>
         <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#D4A870;"></span>临近到期(30-90天) ${expiringLater} 家</div>
         <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#6DBF9F;"></span>合同安全(>90天) ${safe} 家</div>
-        ${noContract > 0 ? `<div class="donut-legend-item"><span class="donut-legend-dot" style="background:#94A3B8;"></span>无到期信息 ${noContract} 家</div>` : ''}
+        ${expired > 0 ? `<div class="donut-legend-item"><span class="donut-legend-dot" style="background:#EF4444;"></span>已到期 ${expired} 家</div>` : ''}
+        ${noInfo > 0 ? `<div class="donut-legend-item"><span class="donut-legend-dot" style="background:#94A3B8;"></span>无到期信息 ${noInfo} 家</div>` : ''}
       `;
     }
 
@@ -709,10 +750,10 @@ const DashboardModule = {
       type: 'doughnut',
       data: {
         datasets: [{
-          data: [expiringSoon, expiringLater, safe, noContract].filter(v => v > 0),
+          data: [expiringSoon, expiringLater, safe, expired, noInfo].filter(v => v > 0),
           backgroundColor: isDark
-            ? ['#FB7185', '#FBBF24', '#34D399', '#64748B']
-            : ['#D49595', '#D4A870', '#6DBF9F', '#94A3B8'],
+            ? ['#FB7185', '#FBBF24', '#34D399', '#EF4444', '#64748B']
+            : ['#D49595', '#D4A870', '#6DBF9F', '#EF4444', '#94A3B8'],
           borderColor: isDark ? '#0F172A' : '#FFFFFF',
           borderWidth: 2,
           hoverOffset: 8,
@@ -739,12 +780,23 @@ const DashboardModule = {
     if (this.restockChart) { this.restockChart.destroy(); this.restockChart = null; }
 
     const alerts = await db.inventoryAlerts.toArray();
-    const needRestock = alerts.filter(a => a.是否需补货 === '是').length;
+
+    // 兼容层：旧数据"是否需补货"→"补货值"
+    alerts.forEach(a => {
+      if ((!a.补货值 && a.补货值 !== 0) && (a.是否需补货 === '是' || a.是否需补货 === true)) {
+        const minStock = parseFloat(a.最低库存预警) || 0;
+        const curStock = parseFloat(a.现存量) || 0;
+        a.补货值 = Math.max(0, minStock - curStock);
+      }
+      if (!a.补货值 && a.补货值 !== 0) a.补货值 = 0;
+    });
+
+    const needRestock = alerts.filter(a => a.补货值 && a.补货值 > 0).length;
     const onTheWay = alerts.filter(a => parseFloat(a.在途订单) > 0).length;
     const safe = alerts.length - needRestock;
 
     // 在途和需补货可能有重叠，计算独立值
-    const both = alerts.filter(a => a.是否需补货 === '是' && parseFloat(a.在途订单) > 0).length;
+    const both = alerts.filter(a => (a.补货值 && a.补货值 > 0) && parseFloat(a.在途订单) > 0).length;
     const onlyNeedRestock = needRestock - both;
     const onlyOnTheWay = onTheWay - both;
 

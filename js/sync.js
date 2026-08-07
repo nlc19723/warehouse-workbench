@@ -101,27 +101,29 @@ const SyncManager = {
     modalTitle.textContent = '云端同步配置';
     modalBody.innerHTML = `
       <div style="max-width:400px;">
-        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">
+        <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:14px;line-height:1.5;">
           配置 Supabase 项目信息以启用云端数据同步。所有数据将在本地和云端之间自动双向同步。
         </p>
-        <div style="margin-bottom:12px;">
-          <label style="display:block;font-size:12px;color:var(--text-secondary);margin-bottom:4px;">Project URL</label>
+        <div style="margin-bottom:10px;">
+          <label style="display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:3px;">Project URL</label>
           <input type="text" id="sbUrl" placeholder="https://xxxx.supabase.co" value="${this.config?.url || ''}"
-            style="width:100%;height:36px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;">
+            style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;">
         </div>
-        <div style="margin-bottom:16px;">
-          <label style="display:block;font-size:12px;color:var(--text-secondary);margin-bottom:4px;">Anon Key</label>
+        <div style="margin-bottom:14px;">
+          <label style="display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:3px;">Anon Key</label>
           <input type="password" id="sbKey" placeholder="eyJ..." value="${this.config?.key || ''}"
-            style="width:100%;height:36px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;">
+            style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;">
         </div>
-        <div class="btn-group" style="border-top:none;margin-top:18px;padding-top:0;display:flex;gap:8px;justify-content:flex-end;">
-          <button onclick="SyncManager.hideConfigDialog()" class="btn-secondary" style="padding:8px 20px;font-size:13px;">取消</button>
-          ${this.isOnline ? `<button onclick="SyncManager.disconnect();SyncManager.hideConfigDialog();" style="padding:8px 16px;border:none;border-radius:10px;background:linear-gradient(135deg,rgba(212,149,149,0.6),rgba(212,149,149,0.25));color:#993333;cursor:pointer;font-size:12.5px;font-weight:600;backdrop-filter:blur(8px);transition:all 0.2s;" onmouseover="this.style.transform='translateY(-1px)'" onmouseout="this.style.transform=''">断开连接</button>` : ''}
-          ${this.isOnline ? `<button onclick="SyncManager.manualPush()" class="btn-primary" style="padding:8px 18px;">📤 上传数据</button>` : ''}
-          <button onclick="SyncManager.saveConfig()" class="btn-primary" style="padding:8px 20px;">保存并连接</button>
+        <div class="btn-group" style="border-top:none;margin-top:14px;padding-top:0;display:flex;gap:8px;justify-content:flex-end;">
+          <button onclick="SyncManager.hideConfigDialog()" class="btn-secondary" style="padding:7px 18px;font-size:12.5px;">取消</button>
+          ${this.isOnline ? `<button onclick="SyncManager.disconnect();SyncManager.hideConfigDialog();" style="padding:7px 14px;border:none;border-radius:10px;background:linear-gradient(135deg,rgba(212,149,149,0.6),rgba(212,149,149,0.25));color:#993333;cursor:pointer;font-size:12px;font-weight:600;backdrop-filter:blur(8px);transition:all 0.2s;" onmouseover="this.style.transform='translateY(-1px)'" onmouseout="this.style.transform=''">断开连接</button>` : ''}
+          ${this.isOnline ? `<button onclick="SyncManager.manualPush()" class="btn-primary" style="padding:7px 16px;">📤 上传数据</button>` : ''}
+          <button onclick="SyncManager.saveConfig()" class="btn-primary" style="padding:7px 18px;">保存并连接</button>
         </div>
       </div>
     `;
+    // 使用紧凑弹窗宽度
+    document.getElementById('modal').classList.add('modal-compact');
     modalOverlay.classList.add('show');
   },
 

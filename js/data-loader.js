@@ -234,12 +234,12 @@ const DataLoader = {
 
     modalTitle.textContent = '重新导入数据';
     modalBody.innerHTML = `
-      <div style="max-width:420px;">
-        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;line-height:1.6;">
+      <div style="max-width:400px;">
+        <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:14px;line-height:1.5;">
           支持 <b>.xlsx</b>、<b>.xls</b> 与 <b>.xlsm</b> 格式。可上传新的数据文件覆盖当前数据，或重新导入系统内置的数据。
         </p>
-        <div style="margin-bottom:16px;">
-          <label style="display:block;font-size:12px;color:var(--text-secondary);margin-bottom:8px;">上传 Excel 文件（.xlsx / .xls / .xlsm）</label>
+        <div style="margin-bottom:14px;">
+          <label style="display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:4px;">上传 Excel 文件（.xlsx / .xls / .xlsm）</label>
           <div class="file-input-wrapper">
             <input type="file" id="reimportFile" accept=".xlsx,.xls,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.ms-excel.sheet.macroEnabled.12"
               onchange="document.getElementById('reimportFileName').textContent=this.files[0]?this.files[0].name:'未选择文件'">
@@ -247,13 +247,15 @@ const DataLoader = {
             <span id="reimportFileName" class="file-input-name">未选择文件</span>
           </div>
         </div>
-        <div class="btn-group" style="border-top:none;margin-top:16px;padding-top:0;">
-          <button onclick="document.getElementById('modalOverlay').classList.remove('show')" class="btn-secondary">取消</button>
-          <button onclick="DataLoader.reimportFromDefault()" class="btn-secondary">🔄 重新导入内置数据</button>
-          <button onclick="DataLoader.reimportFromFile()" class="btn-primary">📤 上传并导入</button>
+        <div class="btn-group" style="border-top:none;margin-top:14px;padding-top:0;">
+          <button onclick="document.getElementById('modalOverlay').classList.remove('show')" class="btn-secondary" style="padding:7px 18px;font-size:12.5px;">取消</button>
+          <button onclick="DataLoader.reimportFromDefault()" class="btn-secondary" style="padding:7px 16px;font-size:12.5px;">🔄 重新导入内置数据</button>
+          <button onclick="DataLoader.reimportFromFile()" class="btn-primary" style="padding:7px 18px;">📤 上传并导入</button>
         </div>
       </div>
     `;
+    // 使用紧凑弹窗宽度
+    document.getElementById('modal').classList.add('modal-compact');
     modalOverlay.classList.add('show');
   },
 
@@ -345,10 +347,22 @@ const DataLoader = {
     return rows;
   },
 
-  // 1. 供应商管理 (headerRow=1)
+  // 1. 供应商管理 (headerRow=1) — 已入库金额多源匹配
   async loadSuppliers(workbook) {
     showLoading('正在导入供应商数据...');
     const rows = this.parseSheet(workbook, '供应商管理', 1);
+
+    // 智能匹配已入库金额列名（Excel 可能含各种日期前缀）
+    const sampleRow = rows[0] || {};
+    const inboundAmountKey = Object.keys(sampleRow).find(k =>
+      k.includes('已供入库金额') && !k.includes('占比')
+    ) || '年度合同生效时间至2026-7-31已供入库金额';
+
+    // 匹配已入库金额占比
+    const inboundRatioKey = Object.keys(sampleRow).find(k =>
+      k.includes('已供入库金额') && k.includes('占比')
+    ) || '年度已供入库金额占比';
+
     const clean = rows.map(r => ({
       类型: r['类型'] || '',
       供应商: r['供应商'] || '',
@@ -361,8 +375,8 @@ const DataLoader = {
       年度合同剩余时间: this.parseNum(r['年度合同剩余时间']),
       最终到期时间: this.parseDate(r['最终到期时间']),
       年度合同金额: this.parseNum(r['年度合同金额']),
-      年度已供入库金额: this.parseNum(r['年度合同生效时间至2026-7-31已供入库金额'] || r['年度已供入库金额']),
-      年度已供入库金额占比: this.parseNum(r['年度已供入库金额占比']),
+      年度已供入库金额: this.parseNum(r[inboundAmountKey] || r['年度已供入库金额']),
+      年度已供入库金额占比: this.parseNum(r[inboundRatioKey] || r['年度已供入库金额占比']),
       合同: r['合同'] || '',
       生产厂址: r['生产厂址'] || '',
       地址: r['地址'] || '',
@@ -370,6 +384,34 @@ const DataLoader = {
       询价反馈时间: this.parseDate(r['询价反馈时间']),
       未入库金额: this.parseNum(r['未入库金额'])
     })).filter(r => r.供应商);
+
+    // 若已入库金额全为0，从入库表按供应商汇总补全
+    const allZeroInbound = clean.length > 0 && clean.every(s => !s.年度已供入库金额 || s.年度已供入库金额 === 0);
+    if (allZeroInbound) {
+      console.log('[data-loader] 供应商已入库金额全0，尝试从入库表汇总补全...');
+      try {
+        const inboundRows = await db.inbound.toArray();
+        const supplierInboundMap = new Map();
+        inboundRows.forEach(row => {
+          const sup = row.供应商;
+          if (!sup) return;
+          const amount = parseFloat(row.原币价税合计) || 0;
+          supplierInboundMap.set(sup, (supplierInboundMap.get(sup) || 0) + amount);
+        });
+        let fixed = 0;
+        clean.forEach(s => {
+          if (supplierInboundMap.has(s.供应商)) {
+            s.年度已供入库金额 = supplierInboundMap.get(s.供应商);
+            // 自动计算占比
+            if (s.年度合同金额 > 0) {
+              s.年度已供入库金额占比 = s.年度已供入库金额 / s.年度合同金额;
+            }
+            fixed++;
+          }
+        });
+        console.log(`[data-loader] 从入库表补全 ${fixed}/${clean.length} 条供应商已入库金额`);
+      } catch(e) { console.warn('[data-loader] 入库表补全失败:', e); }
+    }
 
     await this.bulkAddSafe(db.suppliers, clean);
     console.log(`供应商数据导入完成: ${clean.length} 条`);
@@ -454,20 +496,25 @@ const DataLoader = {
     console.log(`库存数据导入完成: ${clean.length} 条`);
   },
 
-  // 5. 库存预警 (headerRow=4)
+  // 5. 库存预警 (headerRow=4) — 现存量多源匹配：优先日期列，回退通用列，最后从库存表补全
   async loadInventoryAlerts(workbook) {
     showLoading('正在导入库存预警数据...');
     const rows = this.parseSheet(workbook, '库存预警数量', 4);
+
+    // 智能匹配现存量列名（Excel 表头可能含日期前缀如 "2026-08-03现存量"）
+    const sampleRow = rows[0] || {};
+    const stockKey = Object.keys(sampleRow).find(k =>
+      k.includes('现存量') && !k.includes('预警') && !k.includes('最低')
+    ) || '2026-08-03现存量';
+
     const clean = rows.map(r => {
-      const 现存量 = this.parseNum(r['2026-08-03现存量']);
+      const 现存量 = this.parseNum(r[stockKey] || r['现存量'] || r['现存数量']);
       const 最低库存预警 = this.parseNum(r['最低库存预警']);
       const 在途订单 = this.parseNum(r['在途订单']);
-      // 自动判定是否需补货：现存量低于最低库存预警
-      let 是否需补货 = '';
-      if (最低库存预警 > 0 && 现存量 < 最低库存预警) {
-        是否需补货 = '是';
-      } else if (r['是否需补货']) {
-        是否需补货 = r['是否需补货'];
+      // 补货值：优先取源数据"是否需补货"列的数值，否则自动计算(最低-现存)
+      let 补货值 = this.parseNum(r['是否需补货']);
+      if (!补货值 && 补货值 !== 0 && 最低库存预警 > 0) {
+        补货值 = Math.max(0, 最低库存预警 - 现存量);
       }
       return {
         序号: this.parseNum(r['序号']),
@@ -479,7 +526,7 @@ const DataLoader = {
         最低库存预警,
         最高库存: this.parseNum(r['最高库存']),
         现存量,
-        是否需补货,
+        补货值,
         在途订单,
         所上或库房: String(r['所上或库房'] || ''),
         工程项目: String(r['工程项目'] || ''),
@@ -487,6 +534,29 @@ const DataLoader = {
         涉及订单号: r['涉及订单号'] ? String(r['涉及订单号']) : ''
       };
     }).filter(r => r.存货编码 || r.存货名称);
+
+    // 若现存量仍全为0，从库存表(中心库房现存量)交叉补全
+    const allZero = clean.length > 0 && clean.every(r => !r.现存量 || r.现存量 === 0);
+    if (allZero) {
+      console.log('[data-loader] 库存预警现存量全0，尝试从库存表交叉补全...');
+      try {
+        const stockRows = await db.stock.toArray();
+        const stockMap = new Map();
+        stockRows.forEach(s => {
+          const key = s.存货编码 || s.存货名称;
+          if (key) stockMap.set(key, s.现存数量);
+        });
+        let fixed = 0;
+        clean.forEach(item => {
+          const key = item.存货编码 || item.存货名称;
+          if (key && stockMap.has(key)) {
+            item.现存量 = stockMap.get(key);
+            fixed++;
+          }
+        });
+        console.log(`[data-loader] 从库存表补全 ${fixed}/${clean.length} 条现存量`);
+      } catch(e) { console.warn('[data-loader] 库存表补全失败:', e); }
+    }
 
     await this.bulkAddSafe(db.inventoryAlerts, clean);
     console.log(`库存预警数据导入完成: ${clean.length} 条`);

@@ -6,13 +6,15 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="库管工作台">
-  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 120'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%237A9CA5'/%3E%3Cstop offset='100%25' style='stop-color:%238CC0A8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='120' height='120' rx='28' fill='url(%23g)'/%3E%3Ctext x='60' y='78' text-anchor='middle' fill='white' font-size='52' font-weight='bold'%3E库%3C/text%3E%3C/svg%3E">
+  <link rel="apple-touch-icon" href="icons/icon-192.png?v=18" type="image/png">
+  <link rel="manifest" href="manifest.json?v=2">
+  <meta name="theme-color" content="#357ABD">
   <title>库管系统工作台</title>
-  <link rel="stylesheet" href="css/style.css?v=6">
-  <script defer src="lib/dexie.min.js?v=6"></script>
-  <script defer src="lib/chart.min.js?v=6"></script>
-  <script defer src="lib/xlsx.full.min.js?v=6"></script>
-  <script defer src="lib/supabase.min.js?v=6"></script>
+  <link rel="stylesheet" href="css/style.css?v=18">
+  <script defer src="lib/dexie.min.js?v=18"></script>
+  <script defer src="lib/chart.min.js?v=18"></script>
+  <script defer src="lib/xlsx.full.min.js?v=18"></script>
+  <script defer src="lib/supabase.min.js?v=18"></script>
 </head>
 <body>
   <div class="app-container" id="appContainer">
@@ -96,6 +98,9 @@
         <a class="sidebar-item" id="sidebarSettingsBtn">
           <span class="item-icon">⚙️</span><span class="item-text">设置</span>
         </a>
+        <a class="sidebar-item" id="sourceDownloadBtn" href="javascript:void(0)" title="下载工作台源代码">
+          <span class="item-icon">📦</span><span class="item-text">源代码下载</span>
+        </a>
       </div>
     </aside>
 
@@ -151,6 +156,28 @@
     </div>
   </div>
 
+  <!-- 源代码下载密码弹窗 -->
+  <div class="modal-overlay" id="dlPwOverlay">
+    <div class="modal modal-compact" id="dlPwModal">
+      <div class="modal-header">
+        <span class="modal-title">🔒 源代码下载</span>
+        <button class="modal-close" id="dlPwClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom:14px;color:var(--text-secondary);font-size:14px;line-height:1.6;">该压缩包受密码保护，请输入下载密码后下载：</p>
+        <input type="password" id="dlPwInput" placeholder="请输入下载密码" autocomplete="off"
+          style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--panel-border);
+                 background:var(--input-bg, #fff);color:var(--text-main);font-size:14px;margin-bottom:10px;
+                 outline:none;box-sizing:border-box;">
+        <div id="dlPwError" style="color:#EF4444;font-size:13px;min-height:18px;margin-bottom:8px;"></div>
+        <button id="dlPwSubmit"
+          style="width:100%;padding:11px;border:none;border-radius:10px;
+                 background:linear-gradient(135deg,#7E8BD9,#5E6FC8);color:#fff;
+                 font-weight:600;font-size:15px;cursor:pointer;">确认下载</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 全屏磨砂弹窗 -->
   <div class="panel-overlay" id="panelOverlay"></div>
   <div class="panel-dialog" id="panelDialog">
@@ -163,22 +190,70 @@
     </div>
   </div>
 
-  <script defer src="js/table-utils.js?v=6"></script>
-  <script defer src="js/db.js?v=6"></script>
-  <script defer src="js/sync.js?v=6"></script>
-  <script defer src="js/data-loader.js?v=6"></script>
-  <script defer src="js/dashboard.js?v=6"></script>
-  <script defer src="js/supplier.js?v=6"></script>
-  <script defer src="js/query.js?v=6"></script>
-  <script defer src="js/reconciliation.js?v=6"></script>
-  <script defer src="js/order-track.js?v=6"></script>
-  <script defer src="js/inventory-alert.js?v=6"></script>
-  <script defer src="js/orders.js?v=6"></script>
-  <script defer src="js/inbound.js?v=6"></script>
-  <script defer src="js/stock.js?v=6"></script>
-  <script defer src="js/pricing.js?v=6"></script>
-  <script defer src="js/low-turnover.js?v=6"></script>
-  <script defer src="js/breach.js?v=6"></script>
-  <script defer src="js/app.js?v=6"></script>
+  <script defer src="js/table-utils.js?v=18"></script>
+  <script defer src="js/db.js?v=18"></script>
+  <script defer src="js/sync.js?v=18"></script>
+  <script defer src="js/data-loader.js?v=18"></script>
+  <script defer src="js/dashboard.js?v=18"></script>
+  <script defer src="js/supplier.js?v=18"></script>
+  <script defer src="js/query.js?v=18"></script>
+  <script defer src="js/reconciliation.js?v=18"></script>
+  <script defer src="js/order-track.js?v=18"></script>
+  <script defer src="js/inventory-alert.js?v=18"></script>
+  <script defer src="js/orders.js?v=18"></script>
+  <script defer src="js/inbound.js?v=18"></script>
+  <script defer src="js/stock.js?v=18"></script>
+  <script defer src="js/pricing.js?v=18"></script>
+  <script defer src="js/low-turnover.js?v=18"></script>
+  <script defer src="js/breach.js?v=18"></script>
+  <script defer src="js/app.js?v=18"></script>
+  <!-- PWA: 注册 Service Worker（支持离线 + 安装为桌面应用） -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('service-worker.js?v=18').then(function(reg) {
+          console.log('[PWA] Service Worker 注册成功:', reg.scope);
+        }).catch(function(err) {
+          console.warn('[PWA] Service Worker 注册失败:', err);
+        });
+      });
+    }
+  </script>
+
+  <!-- 源代码下载：密码校验（1122）后触发下载 -->
+  <script>
+    (function () {
+      var overlay = document.getElementById('dlPwOverlay');
+      var input   = document.getElementById('dlPwInput');
+      var error   = document.getElementById('dlPwError');
+      var ZIP_URL = 'source-code.zip?v=19';
+      var PW      = '1122';
+      function openDl() {
+        overlay.classList.add('show');
+        input.value = ''; error.textContent = '';
+        setTimeout(function () { try { input.focus(); } catch (e) {} }, 60);
+      }
+      function closeDl() { overlay.classList.remove('show'); }
+      document.getElementById('sourceDownloadBtn').addEventListener('click', function (e) {
+        e.preventDefault(); openDl();
+      });
+      document.getElementById('dlPwClose').addEventListener('click', closeDl);
+      overlay.addEventListener('click', function (e) { if (e.target === overlay) closeDl(); });
+      function submit() {
+        if (input.value === PW) {
+          closeDl();
+          var a = document.createElement('a');
+          a.href = ZIP_URL;
+          a.setAttribute('download', 'warehouse-workbench-source.zip');
+          document.body.appendChild(a); a.click(); a.remove();
+        } else {
+          error.textContent = '密码错误，请重试';
+          input.value = ''; input.focus();
+        }
+      }
+      document.getElementById('dlPwSubmit').addEventListener('click', submit);
+      input.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+    })();
+  </script>
 </body>
 </html>

@@ -218,10 +218,13 @@ body::after {
   box-shadow: var(--card-shadow);
 }
 
-/* ========== 顶部导航栏（悬浮胶囊） ========== */
+/* ========== 顶部导航栏（悬浮胶囊）—— 彻底修复溢出 ==========
+   关键：用 position:absolute 相对于 .main-content 定位（而非 fixed 相对视口）
+   这样 top-bar 宽度自动被约束在主内容区内，永远不会溢出到侧边栏
+*/
 .top-bar {
-  position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
-  width: calc(100% - 24px); max-width: 1200px; height: var(--header-height);
+  position: absolute; top: 8px; left: 12px; right: 12px;
+  height: var(--header-height);
   background: var(--card-bg);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -229,11 +232,15 @@ body::after {
   border-radius: var(--radius-xl);
   box-shadow: var(--card-shadow);
   display: flex; align-items: center; justify-content: space-between;
-  padding: 0 18px; z-index: 50;
+  padding: 0 16px; z-index: 50;
   transition: all var(--theme-transition);
+  /* 确保不超出父容器 */
+  max-width: 100%;
+  box-sizing: border-box;
 }
-.top-bar-left { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.top-bar-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.top-bar-left { display: flex; align-items: center; gap: 10px; flex-shrink: 0; min-width: 0; overflow: hidden; }
+.top-bar-left strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; font-size: 15px; color: var(--text-main); }
+.top-bar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
 .hamburger-btn {
   width: 34px; height: 34px; border: none; background: transparent;
@@ -250,15 +257,16 @@ body::after {
 }
 
 .search-box {
-  position: relative; flex: 1; max-width: 400px; margin: 0 16px;
+  position: relative; flex: 1 1 auto; max-width: 420px; margin: 0 12px;
+  min-width: 80px; /* 允许收缩到很小 */
 }
 .search-box input {
-  width: 100%; height: 38px; border-radius: 20px;
+  width: 100%; height: 36px; border-radius: 20px;
   border: 1px solid rgba(200,210,220,0.4);
   background: rgba(255,255,255,0.72);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
-  padding: 0 38px 0 18px; font-size: 13px;
+  padding: 0 38px 0 16px; font-size: 13px;
   color: var(--text-main); outline: none;
   transition: all 0.3s cubic-bezier(0.25,0.46,0.45,0.94);
   box-shadow:
@@ -266,6 +274,7 @@ body::after {
     0 1px 3px rgba(31,38,135,0.04),
     inset 0 1px 0 rgba(255,255,255,0.7),
     inset 0 0 0 0.5px rgba(255,255,255,0.5);
+  min-width: 0;
 }
 .search-box input::placeholder { color: var(--text-muted); }
 .search-box input:focus {
@@ -458,7 +467,7 @@ body::after {
 .main-content {
   flex: 1; display: flex; flex-direction: column;
   min-width: 0; height: 100%; overflow: hidden; position: relative;
-  padding-top: calc(var(--header-height) + 20px);
+  padding-top: calc(var(--header-height) + 16px);
 }
 .content-scroll {
   flex: 1; overflow-y: auto; overflow-x: hidden;
@@ -1047,11 +1056,12 @@ body::after {
   border: 1px solid var(--panel-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--card-shadow-hover);
-  max-width: 92vw; max-height: 85vh; overflow: hidden;
+  max-width: 94vw; max-height: 82vh; overflow: hidden;
   display: flex; flex-direction: column;
   transform: scale(0.94); transition: transform 0.25s;
-  width: 680px; /* 默认宽度，详情弹窗更宽 */
+  width: 640px;
 }
+.modal.modal-compact { width: 520px; }
 .modal-overlay.show .modal { transform: scale(1); }
 .modal-header {
   padding: 14px 18px; border-bottom: 1px solid var(--panel-border);
@@ -1130,6 +1140,26 @@ body::after {
 }
 
 /* ========== 响应式 ========== */
+
+/* 中等屏幕（768px ~ 1200px）：顶部栏元素逐步隐藏 */
+@media (max-width: 1100px) {
+  .top-bar-left strong { max-width: 90px; font-size: 14px; }
+  .search-box { max-width: 280px; margin: 0 8px; }
+  .current-time { display: none; }
+}
+@media (max-width: 900px) {
+  .top-bar-left strong { max-width: 70px; font-size: 13px; }
+  .search-box { max-width: 200px; margin: 0 6px; }
+  .search-box input { height: 34px; font-size: 12.5px; padding: 0 32px 0 12px; }
+  .sync-status span:last-child { display: none; }
+}
+@media (max-width: 800px) {
+  .top-bar-left strong { max-width: 55px; font-size: 12.5px; }
+  .search-box { max-width: 140px; margin: 0 4px; }
+  .search-box input { height: 32px; font-size: 12px; }
+  .top-bar-right .user-avatar { display: none; }
+}
+
 @media (max-width: 768px) {
   .top-bar {
     top: 0; left: 0; right: 0; transform: none;
@@ -1139,6 +1169,13 @@ body::after {
   }
   .main-content { padding-top: var(--header-height); }
   .content-scroll { padding: 10px; }
+  /* 移动端：top-bar 撑满宽度 */
+  .top-bar {
+    position: absolute; top: 0; left: 0; right: 0;
+    border-radius: 0; padding: 0 10px;
+    height: var(--header-height);
+  }
+  .top-bar-left strong { max-width: none; font-size: 14px; }
   .coverflow-container { height: 170px; }
   .coverflow-card { width: 110px; height: 140px; }
   .coverflow-card .cf-icon { width: 44px; height: 44px; border-radius: 14px; font-size: 20px; }

@@ -1,10 +1,140 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#7CB342"/>
-      <stop offset="100%" style="stop-color:#558B2F"/>
+    <!-- ============ 梦幻蓝紫渐变（低饱和、温柔） ============ -->
+    <linearGradient id="glassGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"  stop-color="#EDEBFE"/>
+      <stop offset="25%" stop-color="#CDD8F4"/>
+      <stop offset="55%" stop-color="#A3AEE8"/>
+      <stop offset="82%" stop-color="#808ED8"/>
+      <stop offset="100%" stop-color="#6470C2"/>
     </linearGradient>
+
+    <!-- 玻璃光泽（顶部高光） -->
+    <linearGradient id="glassGloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#FFFFFF" stop-opacity="0.70"/>
+      <stop offset="38%" stop-color="#FFFFFF" stop-opacity="0.0"/>
+    </linearGradient>
+
+    <!-- 底部内阴影 -->
+    <linearGradient id="glassInner" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="55%" stop-color="#2E2478" stop-opacity="0.0"/>
+      <stop offset="100%" stop-color="#2E2478" stop-opacity="0.32"/>
+    </linearGradient>
+
+    <!-- 房子主体 -->
+    <linearGradient id="houseBody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F0F1FB"/>
+    </linearGradient>
+    <!-- 屋顶 -->
+    <linearGradient id="roofGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#EBECFA"/>
+    </linearGradient>
+    <!-- 门 -->
+    <linearGradient id="doorGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"  stop-color="#909AE6"/>
+      <stop offset="100%" stop-color="#6870C0"/>
+    </linearGradient>
+    <!-- 窗 -->
+    <linearGradient id="winGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#F0F0FC"/>
+      <stop offset="100%" stop-color="#D0CCF2"/>
+    </linearGradient>
+
+    <!-- 重影模糊 -->
+    <filter id="blurGhost" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5.5"/>
+    </filter>
+    <!-- 底部投影模糊 -->
+    <filter id="blurShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+    <!-- 边缘光辉 -->
+    <filter id="blurRim" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.5"/>
+    </filter>
+
+    <clipPath id="squircleClip">
+      <rect x="22" y="22" width="468" height="468" rx="100" ry="100"/>
+    </clipPath>
   </defs>
-  <rect width="512" height="512" rx="100" fill="url(#bg)"/>
-  <text x="256" y="340" text-anchor="middle" fill="white" font-family="sans-serif" font-size="280" font-weight="bold">库</text>
+
+  <!-- ============ 背景 ============ -->
+  <rect width="512" height="512" fill="#FCFCFE"/>
+
+  <!-- ============ 底部柔和漫反射投影 ============ -->
+  <ellipse cx="260" cy="480" rx="182" ry="22" fill="#7078C4" opacity="0.26" filter="url(#blurShadow)"/>
+  <ellipse cx="256" cy="474" rx="148" ry="14" fill="#4A4098" opacity="0.17" filter="url(#blurShadow)"/>
+
+  <!-- ============ 重影层 v3：更明显、更饱和的蓝紫错位层 ============ -->
+  <rect x="46" y="42" width="468" height="468" rx="100" ry="100"
+        fill="#7886DC" opacity="0.56" filter="url(#blurGhost)"/>
+
+  <!-- ============ 主玻璃 Squircle 底座 ============ -->
+  <rect x="22" y="22" width="468" height="468" rx="100" ry="100" fill="url(#glassGrad)"/>
+
+  <!-- ============ 玻璃内部通透感（果冻效果） ============ -->
+  <g clip-path="url(#squircleClip)">
+    <ellipse cx="256" cy="240" rx="220" ry="200" fill="#FFFFFF" opacity="0.15"/>
+    <rect x="22" y="22" width="468" height="260" fill="url(#glassGloss)"/>
+    <rect x="22" y="22" width="468" height="468" fill="url(#glassInner)"/>
+    <rect x="22" y="22" width="72" height="468" fill="#FFFFFF" opacity="0.09"/>
+    <rect x="380" y="300" width="110" height="190" fill="#FFFFFF" opacity="0.05"/>
+  </g>
+
+  <!-- ============ Rim Light 边缘光（增强版） ============ -->
+  <!-- 外发光晕（更强） -->
+  <rect x="20" y="20" width="472" height="472" rx="102" ry="102"
+        fill="none" stroke="#FFFFFF" stroke-width="7" opacity="0.72" filter="url(#blurRim)"/>
+  <!-- 清晰细腻高光描边（双层） -->
+  <rect x="22.5" y="22.5" width="467" height="467" rx="99" ry="99"
+        fill="none" stroke="#FFFFFF" stroke-width="2.2" opacity="0.95"/>
+  <rect x="24.5" y="24.5" width="463" height="463" rx="97" ry="97"
+        fill="none" stroke="#C8D0F0" stroke-width="1" opacity="0.50"/>
+  <!-- 右上角冷色弧线高光 -->
+  <path d="M420 86 Q468 130 468 210" fill="none" stroke="#B8C4F8" stroke-width="3" opacity="0.58" stroke-linecap="round"/>
+  <!-- 左下角微暖弧线 -->
+  <path d="M84 430 Q120 466 210 466" fill="none" stroke="#D0CAEF" stroke-width="2" opacity="0.38" stroke-linecap="round"/>
+
+  <!-- ============ 白色极简小房子（带厚度/浮雕感） ============ -->
+
+  <!-- 厚度 / 投影偏移 -->
+  <path d="M150 323 L150 380 Q150 390 160 390 L352 390 Q362 390 362 380 L362 323 Z" fill="#C4C0EE" opacity="0.95"/>
+
+  <!-- 房子主体 -->
+  <rect x="148" y="228" width="216" height="152" rx="13" fill="url(#houseBody)"/>
+  <rect x="148" y="228" width="216" height="152" rx="13" fill="none" stroke="#C4C0EE" stroke-width="1.3" opacity="0.42"/>
+
+  <!-- 屋顶 -->
+  <path d="M118 240 Q118 218 138 216 L256 152 L374 216 Q394 218 394 240 L394 250 Q394 260 384 260 L128 260 Q118 260 118 250 Z"
+        fill="url(#roofGrad)"/>
+  <!-- 屋顶高光线 -->
+  <path d="M138 216 L256 152 L374 216" fill="none" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" opacity="0.88"/>
+  <path d="M128 252 L384 252" fill="none" stroke="#FFFFFF" stroke-width="1.4" opacity="0.52"/>
+  <path d="M118 245 Q256 156 394 245" fill="none" stroke="#B0ACE4" stroke-width="1.6" opacity="0.32"/>
+
+  <!-- 门 -->
+  <rect x="235" y="312" width="43" height="68" rx="10" fill="url(#doorGrad)"/>
+  <rect x="237" y="314" width="16" height="64" rx="7" fill="#FFFFFF" opacity="0.32"/>
+  <circle cx="268" cy="348" r="3.8" fill="#FFFFFF" opacity="0.62"/>
+
+  <!-- 左窗 -->
+  <rect x="166" y="256" width="41" height="35" rx="6" fill="url(#winGrad)"/>
+  <rect x="166" y="256" width="41" height="35" rx="6" fill="none" stroke="#B0ACE4" stroke-width="1" opacity="0.36"/>
+  <line x1="186.5" y1="256" x2="186.5" y2="291" stroke="#FFFFFF" stroke-width="1.7" opacity="0.62"/>
+  <line x1="166" y1="273.5" x2="207" y2="273.5" stroke="#FFFFFF" stroke-width="1.7" opacity="0.62"/>
+  <rect x="168" y="258" width="16" height="12" rx="3" fill="#FFFFFF" opacity="0.44"/>
+
+  <!-- 右窗 -->
+  <rect x="305" y="256" width="41" height="35" rx="6" fill="url(#winGrad)"/>
+  <rect x="305" y="256" width="41" height="35" rx="6" fill="none" stroke="#B0ACE4" stroke-width="1" opacity="0.36"/>
+  <line x1="325.5" y1="256" x2="325.5" y2="291" stroke="#FFFFFF" stroke-width="1.7" opacity="0.62"/>
+  <line x1="305" y1="273.5" x2="346" y2="273.5" stroke="#FFFFFF" stroke-width="1.7" opacity="0.62"/>
+  <rect x="307" y="258" width="16" height="12" rx="3" fill="#FFFFFF" opacity="0.44"/>
+
+  <!-- 烟囱 -->
+  <rect x="320" y="172" width="23" height="42" rx="4" fill="#D4D0EE"/>
+  <rect x="322" y="174" width="19" height="38" rx="3" fill="#F0F1FB"/>
+  <rect x="322" y="174" width="7" height="38" rx="2" fill="#FFFFFF" opacity="0.52"/>
 </svg>
