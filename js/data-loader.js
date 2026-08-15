@@ -24,17 +24,23 @@ const DataLoader = {
   },
 
   // 参与云端同步的数据表（meta 是元数据表，单独处理）
-  TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach', 'materialClass', 'monthlyStats'],
+  TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach', 'materialClass', 'monthlyStats', 'outbound'],
 
   // 主入口：检查并导入数据（本地优先，云端异步）
   async init() {
     // 1) 本地已有数据 → 立即显示，后台静默尝试云端同步
     const imported = await DataStore.isDataImported();
     if (imported) {
-      console.log('本地数据已存在，直接使用');
-      // 后台尝试从云端拉取更新（不阻塞页面）
-      this._syncFromCloudInBackground();
-      return true;
+      // 校验本地核心表是否完整；历史上出现过“标记已导入但部分表为空”导致整页空白，
+      // 因此不完整时必须放弃本地缓存，改从云端/Excel 重新导入。
+      const localComplete = await this._allCoreTablesPopulated();
+      if (localComplete) {
+        console.log('本地数据已存在，直接使用');
+        // 后台尝试从云端拉取更新（不阻塞页面）
+        this._syncFromCloudInBackground();
+        return true;
+      }
+      console.warn('[data-loader] 本地数据不完整（缺表），放弃本地缓存改从云端/Excel 导入');
     }
 
     // 2) 无本地数据，尝试从云端拉取（8 秒超时）
@@ -45,12 +51,24 @@ const DataLoader = {
     if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
       try {
         const bundle = await this._pullWithTimeout(8000);
-        if (bundle && bundle.tables) {
+        // ⚠️ 校验云端 bundle 完整性：9 张核心表必须都存在且有数据。
+        // 历史上曾因导入 bug 把残缺 bundle 推到云端，导致新用户只拿到部分表 → 全表空白。
+        // 若 bundle 不完整，回退到内置 Excel 导入（导入后会覆盖云端残缺 bundle）。
+        if (bundle && bundle.tables && this._isBundleComplete(bundle)) {
           showLoading('正在从云端同步最新数据...');
           await this.loadBundleFromCloud(bundle);
+          // 防御性校验：云端还原后实际落库的核心表可能仍缺（网络返回了部分响应等），
+          // 若任一核心表为空，判定还原不完整，继续走 Excel 导入兜底。
+          const restored = await this._allCoreTablesPopulated();
           hideLoading();
-          console.log('已从云端同步数据');
-          return true;
+          if (restored) {
+            console.log('已从云端同步数据');
+            return true;
+          }
+          console.warn('[data-loader] 云端还原后仍缺核心表，改从内置 Excel 导入兜底');
+        }
+        if (bundle && bundle.tables && !this._isBundleComplete(bundle)) {
+          console.warn('[data-loader] 云端 bundle 不完整（缺表或空表），改从内置 Excel 导入以修复');
         }
       } catch (e) {
         console.warn('云端拉取失败:', e.message || e);
@@ -61,6 +79,27 @@ const DataLoader = {
     return await this.importFromExcel();
   },
 
+  // 校验云端 bundle 是否包含全部 9 张核心表且都有数据
+  // 任一张缺失或为空 → 视为不完整，避免用残缺数据覆盖内置 Excel 的权威数据
+  _isBundleComplete(bundle) {
+    const coreTables = ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach'];
+    return coreTables.every(t => Array.isArray(bundle.tables[t]) && bundle.tables[t].length > 0);
+  },
+
+  // 校验本地库 9 张核心表是否都已有数据（防御云端部分还原）
+  async _allCoreTablesPopulated() {
+    try {
+      const coreTables = ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach'];
+      for (const t of coreTables) {
+        const cnt = await db[t].count();
+        if (!cnt) return false;
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
   // 后台静默从云端拉取更新（不阻塞页面）
   async _syncFromCloudInBackground() {
     try {
@@ -69,7 +108,8 @@ const DataLoader = {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
     try {
       const bundle = await this._pullWithTimeout(8000);
-      if (bundle && bundle.tables && bundle.savedAt) {
+      // 仅当云端 bundle 完整时才覆盖本地，避免用残缺数据污染本地
+      if (bundle && bundle.tables && bundle.savedAt && this._isBundleComplete(bundle)) {
         const localTime = await DataStore.getImportTime();
         if (!localTime || bundle.savedAt > localTime) {
           console.log('云端有更新，自动同步中...');
@@ -135,6 +175,13 @@ const DataLoader = {
   // 打包全量数据并推送到云端（覆盖式），导入/重新导入后自动调用
   async pushAllToCloud() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+    // 防御：仅当 9 张核心表全部有数据时才推送，绝不把残缺 bundle 推到云端
+    // （防止分享链接变空白）。manualPush / pushOutboundToCloud 兜底都走这里，统一拦截。
+    const allPopulated = await this._allCoreTablesPopulated();
+    if (!allPopulated) {
+      console.warn('[data-loader] 本地存在空表，已跳过云端推送以避免污染分享链接');
+      return false;
+    }
     try {
       const tables = {};
       for (const name of this.TABLES) {
@@ -154,11 +201,47 @@ const DataLoader = {
     }
   },
 
+  // 仅增量推送「出库」表到云端（不覆盖其他表）
+  // 用于出库单录入/删除后实时同步，分享链接打开即可看到最新出库数据
+  async pushOutboundToCloud() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+    try {
+      // 取本地最新 outbound
+      const outboundRows = await db.outbound.toArray();
+
+      // 从云端拉取现有 bundle（保留其他表的数据）
+      const existing = await SyncManager.pullData().catch(() => null);
+      if (existing && existing.tables) {
+        // 云端 bundle 可读：仅增量更新 outbound，保留其余表，节省带宽
+        const bundle = {
+          ...existing,
+          version: DB_VERSION,
+          savedAt: new Date().toISOString(),
+          tables: { ...existing.tables, outbound: outboundRows }
+        };
+        const ok = await SyncManager.pushData(bundle);
+        if (ok) console.log(`✅ [出库] 已单独同步 outbound 表到云端（${outboundRows.length} 条）`);
+        return ok;
+      }
+
+      // 云端拉取失败/不存在：绝不用“仅 outbound”的残缺 bundle 覆盖云端，
+      // 改为推送本地全量（完整），避免污染分享链接导致他人空白。
+      console.warn('[data-loader] 云端拉取失败，改为推送本地全量以避免残缺覆盖');
+      return await this.pushAllToCloud();
+    } catch (e) {
+      console.error('出库单独推送失败:', e);
+      return false;
+    }
+  },
+
   // 从 Excel 文件导入数据（首次启动，读取内置文件）
   async importFromExcel() {
     showLoading('正在读取 Excel 数据...');
     try {
-      const response = await fetch(this.filePath);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30000);
+      const response = await fetch(this.filePath, { signal: controller.signal });
+      clearTimeout(timer);
       if (!response.ok) throw new Error('无法读取 Excel 文件');
       const arrayBuffer = await response.arrayBuffer();
       return await this.importFromArrayBuffer(arrayBuffer, '首次导入');
@@ -209,7 +292,7 @@ const DataLoader = {
 
     await DataStore.markDataImported();
 
-    // 导入成功后推送云端（若已连接），分享链接将自动更新
+    // 导入成功后推送云端（若已连接）。pushAllToCloud 内部已校验完整性，残缺时不推送。
     if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
       try {
         await this.pushAllToCloud();
@@ -308,6 +391,48 @@ const DataLoader = {
     }
   },
 
+  // 各工作表表头的"标志性列名"——用于自动探测表头行，避免硬编码行号
+  // 背景：SheetJS 解析时会剥离顶部连续空行，而内置 Excel 的第1行常带隐藏格式残留
+  // （合并单元格/打印区域等），导致"同一 Excel 行号"在解析数组中错位一格。
+  // 纯复制粘贴（无格式）的 Excel 没有这行残留，被多剥一行 → 表头错位 → 列名匹配失败 → 整表 0 导入。
+  // 改用特征列名自动探测，彻底兼容两种文件。
+  HEADER_SIGNATURES: {
+    '供应商管理': ['供应商', '年度合同金额', '签订次数', '第一年度生效时间'],
+    '采购订单列表': ['订单编号', '未入库量', '原币价税合计'],
+    '供货2023.9.1-新入库': ['入库单号', '表体订单号', '原币价税合计'],
+    '中心库房现存量': ['存货编码', '仓库名称', '现存数量'],
+    // 注意：该表在第3行(Excel)有一行"工具栏/分组表头"(含 最低库存预警/是否需补货/最高库存/涉及订单号 等字样)，
+    // 容易被误判为表头。真正的表头(第5行)独有 "仓库名称" 与 "近一年月均入库量" 两列，工具栏行不含，
+    // 因此用这两个特征列 + 最低库存预警 来唯一定位真实表头，避免命中毒工具栏。
+    '库存预警数量': ['仓库名称', '近一年月均入库量', '最低库存预警'],
+    '订货': ['存货编码', '主计量', '在途订单', '低周转'],
+    '供应商价格': ['供应商', '存货编码', '含税单价', '生效日期'],
+    '低周转材料': ['存货编码', '现存数量', '暂无法使用量'],
+    '对账功能': ['入库单号', '原币价税合计', '供应商']
+  },
+
+  // 在前若干行内自动探测"含标志性列名最多的那一行"作为表头行
+  detectHeaderRow(json, sheetName, fallbackRow) {
+    const sigs = this.HEADER_SIGNATURES[sheetName];
+    if (!sigs || !json || json.length === 0) return fallbackRow;
+    let best = -1, bestHit = 0;
+    const maxScan = Math.min(6, json.length);
+    for (let i = 0; i < maxScan; i++) {
+      const row = (json[i] || []).map(c => String(c == null ? '' : c).trim());
+      if (row.every(c => c === '')) continue; // 跳过纯空行
+      const hit = sigs.filter(s => row.some(c => c.includes(s))).length;
+      if (hit > bestHit) { bestHit = hit; best = i; }
+    }
+    // 仅在至少命中 2 个特征列（排除元数据误命中）且优于回退行时采用；否则保持旧行为
+    if (best >= 0 && bestHit >= 2) {
+      if (best !== fallbackRow) {
+        console.log(`[data-loader] 自动探测表头: ${sheetName} 表头行 → json[${best}] (原硬编码 json[${fallbackRow}])`);
+      }
+      return best;
+    }
+    return fallbackRow;
+  },
+
   // 解析工作表为对象数组（精确指定表头行）
   parseSheet(workbook, sheetName, headerRow = 1) {
     const sheet = workbook.Sheets[sheetName];
@@ -317,6 +442,8 @@ const DataLoader = {
     }
 
     const json = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+    // 自动探测真实表头行（兼容无格式/带格式两种 Excel，纠正空行剥离导致的错位）
+    headerRow = this.detectHeaderRow(json, sheetName, headerRow);
     if (json.length <= headerRow + 1) return [];
 
     const headers = json[headerRow].map(h => String(h || '').trim().replace(/\n/g, ''));
@@ -329,13 +456,9 @@ const DataLoader = {
       const obj = {};
       headers.forEach((h, idx) => {
         if (h) {
-          let val = row[idx];
-          // 处理日期
-          if (val instanceof Date) {
-            obj[h] = val.toISOString().split('T')[0];
-          } else {
-            obj[h] = val;
-          }
+          const val = row[idx];
+          // 统一用 recoverExcelDate 处理日期（修复少一天/差43秒问题）
+          obj[h] = this.recoverExcelDate(val);
         }
       });
 
@@ -366,14 +489,14 @@ const DataLoader = {
     const clean = rows.map(r => ({
       类型: r['类型'] || '',
       供应商: r['供应商'] || '',
-      第一年度生效时间: this.parseDate(r['第一年度生效时间']),
-      第二年度生效时间: this.parseDate(r['第二年度生效时间']),
-      第三年度生效时间: this.parseDate(r['第三年度生效时间']),
+      第一年度生效时间: this.recoverExcelDate(r['第一年度生效时间']),
+      第二年度生效时间: this.recoverExcelDate(r['第二年度生效时间']),
+      第三年度生效时间: this.recoverExcelDate(r['第三年度生效时间']),
       签订次数: this.parseNum(r['签订次数']),
       合同年限: this.parseNum(r['合同年限']),
-      年度合同到期时间: this.parseDate(r['年度合同到期时间']),
+      年度合同到期时间: this.recoverExcelDate(r['年度合同到期时间']),
       年度合同剩余时间: this.parseNum(r['年度合同剩余时间']),
-      最终到期时间: this.parseDate(r['最终到期时间']),
+      最终到期时间: this.recoverExcelDate(r['最终到期时间']),
       年度合同金额: this.parseNum(r['年度合同金额']),
       年度已供入库金额: this.parseNum(r[inboundAmountKey] || r['年度已供入库金额']),
       年度已供入库金额占比: this.parseNum(r[inboundRatioKey] || r['年度已供入库金额占比']),
@@ -381,7 +504,7 @@ const DataLoader = {
       生产厂址: r['生产厂址'] || '',
       地址: r['地址'] || '',
       招采部门: r['招采部门'] || '',
-      询价反馈时间: this.parseDate(r['询价反馈时间']),
+      询价反馈时间: this.recoverExcelDate(r['询价反馈时间']),
       未入库金额: this.parseNum(r['未入库金额'])
     })).filter(r => r.供应商);
 
@@ -424,7 +547,7 @@ const DataLoader = {
     const clean = rows.map(r => ({
       序号: this.parseNum(r['序号']),
       订单编号: r['订单编号'] ? String(r['订单编号']) : '',
-      日期: this.parseDate(r['日期']),
+      日期: this.recoverExcelDate(r['日期']),
       项目名称: r['项目名称'] || '',
       供应商: r['供应商'] || '',
       存货编号: r['存货编号'] ? String(r['存货编号']) : '',
@@ -441,7 +564,7 @@ const DataLoader = {
       审批状态: r['审批状态'] || '',
       来源订单号: r['来源订单号'] ? String(r['来源订单号']) : '',
       审核人: r['审核人'] || '',
-      已下单时间: (r['已下单时间'] && r['已下单时间'] !== '0') ? this.parseDate(r['已下单时间']) : '',
+      已下单时间: (r['已下单时间'] && r['已下单时间'] !== '0') ? this.recoverExcelDate(r['已下单时间']) : '',
       未入总金额: this.parseNum(r['未入总金额'])
     })).filter(r => r.订单编号);
 
@@ -457,7 +580,7 @@ const DataLoader = {
       序号: this.parseNum(r['序号']),
       表体订单号: r['表体订单号'] ? String(r['表体订单号']) : '',
       仓库: r['仓库'] || '',
-      入库日期: this.parseDate(r['入库日期']),
+      入库日期: this.recoverExcelDate(r['入库日期']),
       审核人: r['审核人'] || '',
       项目名称: r['项目名称'] || '',
       入库单号: r['入库单号'] ? String(r['入库单号']) : '',
@@ -472,7 +595,7 @@ const DataLoader = {
       原币金额: this.parseNum(r['原币金额']),
       原币税额: this.parseNum(r['原币税额']),
       税率: this.parseNum(r['税率']),
-      实际到货日期: this.parseDate(r['实际到货日期'])
+      实际到货日期: this.recoverExcelDate(r['实际到货日期'])
     })).filter(r => r.入库单号 || r.存货名称);
 
     await this.bulkAddSafe(db.inbound, clean);
@@ -489,32 +612,82 @@ const DataLoader = {
       存货名称: r['存货名称'] || '',
       规格型号: r['规格型号'] ? String(r['规格型号']) : '',
       现存数量: this.parseNum(r['现存数量']),
-      数据更新时间: this.parseDate(r['数据更新时间']) || '2026-08-03'
+      数据更新时间: this.recoverExcelDate(r['数据更新时间']) || '2026-08-03'
     })).filter(r => r.存货编码 || r.存货名称);
 
     await this.bulkAddSafe(db.stock, clean);
     console.log(`库存数据导入完成: ${clean.length} 条`);
   },
 
-  // 5. 库存预警 (headerRow=4) — 现存量多源匹配：优先日期列，回退通用列，最后从库存表补全
+  // 5. 库存预警 — 补货值取J列"是否需补货"原始数值（按位置硬编码，不依赖名称匹配）
   async loadInventoryAlerts(workbook) {
     showLoading('正在导入库存预警数据...');
-    const rows = this.parseSheet(workbook, '库存预警数量', 4);
 
-    // 智能匹配现存量列名（Excel 表头可能含日期前缀如 "2026-08-03现存量"）
+    // ===== 先获取原始2D数组做诊断 =====
+    const sheet = workbook.Sheets['库存预警数量'];
+    if (!sheet) { console.warn('[data-loader] ⚠️ 工作表"库存预警数量"不存在！可用工作表:', Object.keys(workbook.Sheets)); return; }
+    const raw2D = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+    console.log('[data-loader] 📊 原始2D数组总行数:', raw2D.length);
+    console.log('[data-loader] 📊 前6行原始数据:');
+    for (let i = 0; i < Math.min(6, raw2D.length); i++) {
+      console.log(`[data-loader]   行${i}(${raw2D[i].length}列):`, JSON.stringify(raw2D[i]));
+    }
+
+    // 用 parseSheet 解析（headerRow=4 → 第5行=表头）
+    const rows = this.parseSheet(workbook, '库存预警数量', 4);
+    if (rows.length === 0) { console.warn('[data-loader] 库存预警数量表解析后无数据'); return; }
+
     const sampleRow = rows[0] || {};
-    const stockKey = Object.keys(sampleRow).find(k =>
-      k.includes('现存量') && !k.includes('预警') && !k.includes('最低')
-    ) || '2026-08-03现存量';
+    const allKeys = Object.keys(sampleRow);
+    console.log('[data-loader] 📋 解析后列名(', allKeys.length, '个):', JSON.stringify(allKeys));
+    console.log('[data-loader] 📋 首行数据值:', JSON.stringify(sampleRow));
+
+    // ===== 现存量列 =====
+    const stockKey = allKeys.find((k, i) => {
+      const ck = String(k).trim().replace(/[\u200B-\u200D\uFEFF\u00A0\u3000]/g, '');
+      return ck.includes('现存量') && !ck.includes('预警') && !ck.includes('最低');
+    }) || allKeys.find((k, i) => {
+      const ck = String(k).trim().replace(/[\u200B-\u200D\uFEFF\u00A0\u3000]/g, '');
+      return ck.includes('现存量');
+    }) || '2026-08-03现存量';
+
+    // ===== 补货值列：按位置硬编码 J列(index=9) + 名称匹配双重保险 =====
+    let restockKey = null;
+
+    // 方法A：名称匹配（清理不可见字符后）
+    for (let i = 0; i < allKeys.length; i++) {
+      const ck = String(allKeys[i]).trim()
+        .replace(/[\u200B-\u200D\uFEFF\u00A0\u3000]/g, '').replace(/\s+/g, ' ');
+      if (ck.includes('补货') || ck.includes('需补') || ck === '是否需补货' || ck === '补货值') {
+        restockKey = allKeys[i];
+        console.log(`[data-loader] ✅ 名称匹配成功: 列${i}="${allKeys[i]}"(清理后="${ck}")`);
+        break;
+      }
+    }
+
+    // 方法B：如果名称匹配失败，强制用第10列(J列, index=9)
+    if (!restockKey && allKeys.length >= 10) {
+      restockKey = allKeys[9];
+      console.log(`[data-loader] ✅ 强制J列兜底: 列9="${restockKey}"`);
+    }
+
+    // 最终检查：打印前10行的补货值
+    console.log('[data-loader] 🔍 补货值列最终使用:', restockKey, '| 前10行该列值:');
+    for (let ri = 0; ri < Math.min(10, rows.length); ri++) {
+      const rawVal = restockKey ? rows[ri][restockKey] : '(无列)';
+      const parsedVal = this.parseNum(rawVal);
+      console.log(`[data-loader]   行${ri}: 原始=${rawVal} → 解析后=${parsedVal}`);
+    }
 
     const clean = rows.map(r => {
       const 现存量 = this.parseNum(r[stockKey] || r['现存量'] || r['现存数量']);
       const 最低库存预警 = this.parseNum(r['最低库存预警']);
+      const 最高库存 = this.parseNum(r['最高库存']);
       const 在途订单 = this.parseNum(r['在途订单']);
-      // 补货值：优先取源数据"是否需补货"列的数值，否则自动计算(最低-现存)
-      let 补货值 = this.parseNum(r['是否需补货']);
-      if (!补货值 && 补货值 !== 0 && 最低库存预警 > 0) {
-        补货值 = Math.max(0, 最低库存预警 - 现存量);
+      // 补货值：直接取源数据J列原始数值，不做任何计算
+      let 补货值 = 0;
+      if (restockKey) {
+        补货值 = this.parseNum(r[restockKey]);
       }
       return {
         序号: this.parseNum(r['序号']),
@@ -534,6 +707,13 @@ const DataLoader = {
         涉及订单号: r['涉及订单号'] ? String(r['涉及订单号']) : ''
       };
     }).filter(r => r.存货编码 || r.存货名称);
+
+    // ===== 补货值统计（关键诊断）=====
+    const withRestock = clean.filter(r => r.补货值 > 0);
+    console.log(`[data-loader] 📊 库存预警导入: 总${clean.length}条, 补货值>0的有${withRestock.length}条`);
+    if (withRestock.length > 0) {
+      console.log(`[data-loader] 📊 前3条补货值样本:`, withRestock.slice(0, 3).map(r => ({ 编码: r.存货编码, 名称: r.存货名称, 补货值: r.补货值 })));
+    }
 
     // 若现存量仍全为0，从库存表(中心库房现存量)交叉补全
     const allZero = clean.length > 0 && clean.every(r => !r.现存量 || r.现存量 === 0);
@@ -559,7 +739,13 @@ const DataLoader = {
     }
 
     await this.bulkAddSafe(db.inventoryAlerts, clean);
-    console.log(`库存预警数据导入完成: ${clean.length} 条`);
+    const restockPositive = clean.filter(r => r.补货值 > 0);
+    console.log(`库存预警数据导入完成: ${clean.length} 条, 补货值>0的有 ${restockPositive.length} 条`);
+    if (restockPositive.length > 0) {
+      console.log(`[data-loader] 前3条补货样本:`, restockPositive.slice(0, 3).map(r => `${r.存货名称 || r.存货编码}=${r.补货值}`).join(', '));
+    } else {
+      console.warn('[data-loader] ⚠️ 补货值全部为0！请检查控制台 [data-loader] 日志');
+    }
   },
 
   // 6. 订货核对 (headerRow=2)
@@ -597,8 +783,8 @@ const DataLoader = {
       存货名称: r['存货名称'] || '',
       规格型号: r['规格型号'] ? String(r['规格型号']) : '',
       主计量: r['主计量'] || '',
-      生效日期: this.parseDate(r['生效日期']),
-      失效日期: this.parseDate(r['失效日期']),
+      生效日期: this.recoverExcelDate(r['生效日期']),
+      失效日期: this.recoverExcelDate(r['失效日期']),
       币种: r['币种'] || '',
       含税单价: this.parseNum(r['含税单价']),
       税率: this.parseNum(r['税率']),
@@ -627,26 +813,57 @@ const DataLoader = {
     console.log(`低周转数据导入完成: ${clean.length} 条`);
   },
 
-  // 9. 违约台账 (headerRow=2)
+  // 9. 违约台账 — 精确定位"延迟天数"列序号取值（不依赖名字匹配/猜列号）
   async loadBreach(workbook) {
     showLoading('正在导入违约数据...');
-    const rows = this.parseSheet(workbook, '违约台账', 2);
-    const clean = rows.map(r => ({
-      公司名称: r['公司名称'] || '',
-      涉及订单号: r['涉及订单号'] ? String(r['涉及订单号']) : '',
-      存货编码: r['存货编码'] ? String(r['存货编码']) : '',
-      存货名称: r['存货名称'] || '',
-      规格型号: r['规格型号'] ? String(r['规格型号']) : '',
-      单价: this.parseNum(r['单价']),
-      数量: this.parseNum(r['数量']),
-      到货时间: this.parseDate(r['到货时间']),
-      延迟天数: this.parseNum(r['延迟天数']),
-      扣款金额: this.parseNum(r['扣款金额']),
-      备注: r['备注'] || ''
-    })).filter(r => r.公司名称);
+
+    const sheet = workbook.Sheets['违约台账'];
+    const raw2d = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+
+    // 1) 找表头行（含"延迟天数"的那一行）
+    let headerRowIdx = -1;
+    for (let ri = 0; ri < Math.min(10, raw2d.length); ri++) {
+      if (raw2d[ri] && raw2d[ri].some(c => String(c || '').includes('延迟天数'))) {
+        headerRowIdx = ri; break;
+      }
+    }
+    if (headerRowIdx < 0) { headerRowIdx = 2; }
+    const headerCells = (raw2d[headerRowIdx] || []).map(c => String(c || '').trim());
+
+    // 2) 在表头里精确定位"延迟天数"的列序号
+    const delayColIdx = headerCells.findIndex(h => h.includes('延迟天数'));
+    console.log(`[违约台账] 表头行=row[${headerRowIdx}], 延迟天数列序号=${delayColIdx} (0-based)`);
+    console.log(`[违约台账] 表头: ${headerCells.join(' | ')}`);
+
+    // 3) 直接按列序号从数据行取值，避免列错位
+    const clean = [];
+    for (let ri = headerRowIdx + 1; ri < raw2d.length; ri++) {
+      const row = raw2d[ri];
+      if (!row || row.every(c => c === '' || c === null || c === undefined)) continue;
+      const get = (i) => (i >= 0 && i < row.length) ? row[i] : '';
+      const companyName = get(headerCells.findIndex(h => h.includes('公司名称')));
+      if (!companyName) continue;
+
+      const delayVal = delayColIdx >= 0 ? this.parseNum(get(delayColIdx)) : 0;
+      console.log(`[违约台账] 数据行[${ri}] 延迟天数(raw[${delayColIdx}])=${delayVal}`);
+
+      clean.push({
+        公司名称: companyName,
+        涉及订单号: String(get(headerCells.findIndex(h => h.includes('涉及订单号'))) || ''),
+        存货编码: String(get(headerCells.findIndex(h => h.includes('存货编码'))) || ''),
+        存货名称: get(headerCells.findIndex(h => h.includes('存货名称'))) || '',
+        规格型号: String(get(headerCells.findIndex(h => h.includes('规格型号'))) || ''),
+        单价: this.parseNum(get(headerCells.findIndex(h => h.includes('单价')))),
+        数量: this.parseNum(get(headerCells.findIndex(h => h.includes('数量')))),
+        到货时间: this.recoverExcelDate(get(headerCells.findIndex(h => h.includes('到货时间')))),
+        延迟天数: delayVal,
+        扣款金额: this.parseNum(get(headerCells.findIndex(h => h.includes('扣款金额')))),
+        备注: get(headerCells.findIndex(h => h.includes('备注'))) || ''
+      });
+    }
 
     await this.bulkAddSafe(db.breach, clean);
-    console.log(`违约数据导入完成: ${clean.length} 条`);
+    console.log(`违约数据导入完成: ${clean.length} 条, 首条延迟天数=${clean.length > 0 ? clean[0].延迟天数 : '无'}`);
   },
 
   // 工具方法：解析数值
@@ -657,19 +874,26 @@ const DataLoader = {
     return isNaN(parsed) ? 0 : parsed;
   },
 
-  // 工具方法：解析日期
-  parseDate(val) {
-    if (!val) return '';
+  // 工具方法：从 Excel 单元格值还原正确的日期字符串
+  // ⚠️ 根因（关键！）：
+  //   SheetJS 用 {cellDates:true} 把 Excel 日期序列号转成 JS Date 时，会引入
+  //   时区 + epoch 误差（实测：源 2026/6/1 被解析成 2026-05-31 23:59:17，差 1 天还差 43 秒）。
+  //   无论用 .toISOString()(UTC) 还是 getFullYear/getMonth/getDate()(本地)，
+  //   由于 Date 对象本身已错位，结果都会是"少一天"。
+  // ✅ 正确做法：从（可能错位的）Date 反推 Excel 序列号，再按标准 1900 日期系统
+  //   以 UTC 午夜重新换算，得到与源数据完全一致的日期。
+  // ⚠️ 重要：只处理 Date 对象！普通数字、字符串等必须原样返回，
+  //   否则金额/数量等数值会被误判为日期序列号而破坏。
+  recoverExcelDate(val) {
+    // 仅处理 Date 对象（SheetJS {cellDates:true} 已将日期序列号转为 Date）
     if (val instanceof Date) {
-      return val.toISOString().split('T')[0];
+      const approxSerial = (val.getTime() / 86400000) + 25569;
+      const serial = Math.round(approxSerial);
+      const correct = new Date((serial - 25569) * 86400000); // UTC 午夜
+      return `${correct.getUTCFullYear()}-${String(correct.getUTCMonth() + 1).padStart(2, '0')}-${String(correct.getUTCDate()).padStart(2, '0')}`;
     }
-    const str = String(val).trim();
-    if (!str) return '';
-    const d = new Date(str);
-    if (!isNaN(d.getTime())) {
-      return d.toISOString().split('T')[0];
-    }
-    return str;
+    // 非日期值（数字、字符串、空值等）→ 原样返回，绝不转换
+    return val;
   }
 };
 

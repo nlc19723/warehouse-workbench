@@ -6,15 +6,15 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="库管工作台">
-  <link rel="apple-touch-icon" href="icons/icon-192.png?v=18" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png?v=55" type="image/png">
   <link rel="manifest" href="manifest.json?v=2">
   <meta name="theme-color" content="#357ABD">
   <title>库管系统工作台</title>
-  <link rel="stylesheet" href="css/style.css?v=18">
-  <script defer src="lib/dexie.min.js?v=18"></script>
-  <script defer src="lib/chart.min.js?v=18"></script>
-  <script defer src="lib/xlsx.full.min.js?v=18"></script>
-  <script defer src="lib/supabase.min.js?v=18"></script>
+  <link rel="stylesheet" href="css/style.css?v=79">
+  <script defer src="lib/dexie.min.js?v=55"></script>
+  <script defer src="lib/chart.min.js?v=55"></script>
+  <script defer src="lib/xlsx.full.min.js?v=55"></script>
+  <script defer src="lib/supabase.min.js?v=55"></script>
 </head>
 <body>
   <div class="app-container" id="appContainer">
@@ -33,6 +33,8 @@
         </button>
       </div>
 
+      <!-- 导航滚动区：小屏/移动端高度不足时内部滚动，保证所有功能模块可达 -->
+      <nav class="sidebar-nav">
       <div class="sidebar-section">
         <a class="sidebar-item active" data-module="dashboard" href="#dashboard">
           <span class="item-icon" style="background:var(--accent-lavender-light);">📊</span>
@@ -86,7 +88,14 @@
         <a class="sidebar-item" data-module="breach" href="#breach">
           <span class="item-icon">❌</span><span class="item-text">违约台账</span>
         </a>
+        <a class="sidebar-item" data-module="outbound" href="#outbound">
+          <span class="item-icon">📤</span><span class="item-text">出库</span>
+        </a>
+        <a class="sidebar-item" data-module="outboundList" href="#outboundList">
+          <span class="item-icon">📋</span><span class="item-text">出库列表</span>
+        </a>
       </div>
+      </nav>
 
       <div class="sidebar-footer">
         <a class="sidebar-item" onclick="SyncManager.showConfigDialog()">
@@ -190,28 +199,31 @@
     </div>
   </div>
 
-  <script defer src="js/table-utils.js?v=18"></script>
-  <script defer src="js/db.js?v=18"></script>
-  <script defer src="js/sync.js?v=18"></script>
-  <script defer src="js/data-loader.js?v=18"></script>
-  <script defer src="js/dashboard.js?v=18"></script>
-  <script defer src="js/supplier.js?v=18"></script>
-  <script defer src="js/query.js?v=18"></script>
-  <script defer src="js/reconciliation.js?v=18"></script>
-  <script defer src="js/order-track.js?v=18"></script>
-  <script defer src="js/inventory-alert.js?v=18"></script>
-  <script defer src="js/orders.js?v=18"></script>
-  <script defer src="js/inbound.js?v=18"></script>
-  <script defer src="js/stock.js?v=18"></script>
-  <script defer src="js/pricing.js?v=18"></script>
-  <script defer src="js/low-turnover.js?v=18"></script>
-  <script defer src="js/breach.js?v=18"></script>
-  <script defer src="js/app.js?v=18"></script>
+  <script defer src="lib/jszip.min.js?v=1"></script>
+  <script defer src="js/table-utils.js?v=79"></script>
+  <script defer src="js/db.js?v=79"></script>
+  <script defer src="js/config.js?v=79"></script>
+  <script defer src="js/sync.js?v=79"></script>
+  <script defer src="js/data-loader.js?v=79"></script>
+  <script defer src="js/dashboard.js?v=79"></script>
+  <script defer src="js/supplier.js?v=79"></script>
+  <script defer src="js/query.js?v=79"></script>
+  <script defer src="js/reconciliation.js?v=79"></script>
+  <script defer src="js/order-track.js?v=79"></script>
+  <script defer src="js/inventory-alert.js?v=79"></script>
+  <script defer src="js/orders.js?v=79"></script>
+  <script defer src="js/inbound.js?v=79"></script>
+  <script defer src="js/stock.js?v=79"></script>
+  <script defer src="js/pricing.js?v=79"></script>
+  <script defer src="js/low-turnover.js?v=79"></script>
+  <script defer src="js/breach.js?v=79"></script>
+  <script defer src="js/outbound.js?v=79"></script>
+  <script defer src="js/app.js?v=79"></script>
   <!-- PWA: 注册 Service Worker（支持离线 + 安装为桌面应用） -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('service-worker.js?v=18').then(function(reg) {
+        navigator.serviceWorker.register('service-worker.js?v=55').then(function(reg) {
           console.log('[PWA] Service Worker 注册成功:', reg.scope);
         }).catch(function(err) {
           console.warn('[PWA] Service Worker 注册失败:', err);
@@ -220,32 +232,158 @@
     }
   </script>
 
-  <!-- 源代码下载：密码校验（1122）后触发下载 -->
+  <!-- 源代码保护（基础防护：禁用右键/F12/查看源码快捷键 + 控制台水印） -->
+  <script>
+    (function () {
+      // 1. 禁用右键菜单
+      document.addEventListener('contextmenu', function (e) {
+        e.preventDefault();
+      });
+
+      // 2. 禁用常见调试/查看源码快捷键
+      document.addEventListener('keydown', function (e) {
+        // F12
+        if (e.key === 'F12') { e.preventDefault(); return; }
+        // Ctrl+Shift+I / J / C / K（开发者工具）
+        if (e.ctrlKey && e.shiftKey && ['I','J','C','K'].includes(e.key.toUpperCase())) {
+          e.preventDefault(); return;
+        }
+        // Ctrl+U（查看源代码）
+        if (e.ctrlKey && e.key.toUpperCase() === 'U') { e.preventDefault(); return; }
+        // Ctrl+S（保存页面）
+        if (e.ctrlKey && e.key.toUpperCase() === 'S') { e.preventDefault(); return; }
+      });
+
+      // 3. 禁止文本选择（防简单复制）
+      document.addEventListener('selectstart', function (e) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        // 允许在数据表格内选择
+        if (e.target.closest && e.target.closest('.data-table')) return;
+        e.preventDefault();
+      });
+
+      // 4. 控制台水印
+      const banner = '\n%c🔒 库管系统工作台 · 源码受保护\n%c本应用为内部使用版本。未经授权，禁止复制、分发或反编译源码。\n© Warehouse Workbench · All Rights Reserved\n';
+      console.log(banner, 'color:#3b82f6;font-size:18px;font-weight:bold;padding:4px 0;', 'color:#64748b;font-size:12px;');
+      console.log('%c如需正式授权或技术支持，请联系管理员。', 'color:#94a3b8;font-size:11px;font-style:italic;');
+    })();
+  </script>
+
+  <!-- 源代码下载：动态打包当前最新文件（不再使用静态旧 zip） -->
+  <!-- 下载需输入密码 1122，每次点击都会要求输入。打包内容与线上版本完全一致。 -->
   <script>
     (function () {
       var overlay = document.getElementById('dlPwOverlay');
       var input   = document.getElementById('dlPwInput');
       var error   = document.getElementById('dlPwError');
-      var ZIP_URL = 'source-code.zip?v=19';
       var PW      = '1122';
+
+      // ===== 需要打包的文件清单（相对路径，与项目根目录一致）=====
+      var FILES_TO_PACKAGE = [
+        'index.html',
+        'manifest.json',
+        'service-worker.js',
+        '.gitignore',
+        'css/style.css',
+        'data/库管系统.xlsx',
+        'js/table-utils.js', 'js/db.js', 'js/config.js', 'js/sync.js', 'js/data-loader.js',
+        'js/dashboard.js', 'js/supplier.js', 'js/query.js', 'js/reconciliation.js',
+        'js/order-track.js', 'js/inventory-alert.js', 'js/orders.js', 'js/inbound.js',
+        'js/stock.js', 'js/pricing.js', 'js/low-turnover.js', 'js/breach.js',
+        'js/outbound.js', 'js/app.js', 'js/order-check.js',
+        'lib/dexie.min.js', 'lib/chart.min.js', 'lib/xlsx.full.min.js',
+        'lib/supabase.min.js', 'lib/jszip.min.js',
+        'icons/icon-72.svg','icons/icon-96.svg','icons/icon-128.svg','icons/icon-144.svg',
+        'icons/icon-152.svg','icons/icon-192.svg','icons/icon-512.svg','icons/icon-design.svg',
+        'icons/icon-72.png','icons/icon-96.png','icons/icon-128.png','icons/icon-144.png',
+        'icons/icon-152.png','icons/icon-192.png','icons/icon-512.png',
+        '.github/workflows/deploy.yml',
+        '.gitlab-ci.yml',
+        'releases/app-manifest.json',
+        'screenshots/fixed_dashboard.png',
+        '.nojekyll'
+      ];
+
+      // CDN 通常屏蔽以 . 开头的文件(返回403)，内嵌其内容作为兜底
+      var DOTFILE_FALLBACKS = {
+        '.gitignore': '# OS / editor junk\n.DS_Store\nThumbs.db\n*.swp\n\n# Node (not used, but safe)\nnode_modules/\n\n# Local-only / large working assets not needed for the live site\nscreenshots/\n',
+        '.github/workflows/deploy.yml': 'name: Deploy to GitHub Pages\n\non:\n  push:\n    branches: [main]\n  workflow_dispatch:\n\npermissions:\n  contents: read\n  pages: write\n  id-token: write\n\nconcurrency:\n  group: github-pages\n  cancel-in-progress: true\n\njobs:\n  deploy:\n    environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}\n    runs-on: ubuntu-latest\n    steps:\n      - name: Checkout\n        uses: actions/checkout@v4\n\n      - name: Setup Pages\n        uses: actions/configure-pages@v5\n\n      - name: Upload artifact\n        uses: actions/upload-pages-artifact@v3\n        with:\n          path: .\n\n      - name: Deploy to GitHub Pages\n        id: deployment\n        uses: actions/deploy-pages@v4\n',
+        '.gitlab-ci.yml': '# GitLab Pages 部署配置 —— 把静态文件发布为网站\npages:\n  stage: deploy\n  script:\n    - echo "静态站点，无需构建，直接发布"\n  artifacts:\n    paths:\n      - .\n    expire_in: 1 day\n  rules:\n    - if: $CI_COMMIT_BRANCH == "main"\n',
+        '.nojekyll': ''
+      };
+
+      // 动态打包：逐个 fetch 当前线上文件 → JSZip 压缩 → 触发下载
+      function doDynamicDownload() {
+        if (typeof JSZip === 'undefined') {
+          error.textContent = 'JSZip 库未加载，请刷新页面后重试';
+          return;
+        }
+        overlay.classList.remove('show');
+        showLoading('正在打包源代码（' + FILES_TO_PACKAGE.length + ' 个文件）...');
+
+        var zip = new JSZip();
+        var fetched = 0;
+        var total  = FILES_TO_PACKAGE.length;
+
+        Promise.all(FILES_TO_PACKAGE.map(function (path) {
+          return fetch(path).then(function (resp) {
+            if (!resp.ok) {
+              // dotfile 被 CDN 屏蔽(403)时，使用内嵌兜底内容
+              if (resp.status === 403 && DOTFILE_FALLBACKS[path]) {
+                zip.file(path, DOTFILE_FALLBACKS[path]);
+                fetched++;
+                showLoading('正在打包... (' + fetched + '/' + total + ')');
+                return;
+              }
+              throw new Error(path + ': HTTP ' + resp.status);
+            }
+            return resp.blob().then(function (blob) {
+              zip.file(path, blob);
+              fetched++;
+              showLoading('正在打包... (' + fetched + '/' + total + ')');
+            });
+          }).catch(function (err) {
+            console.warn('[download] 跳过文件:', path, err.message);
+            fetched++;
+          });
+        })).then(function () {
+          return zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } },
+            function (metadata) {
+              showLoading('正在压缩... ' + Math.round(metadata.percent) + '%');
+            });
+        }).then(function (blob) {
+          hideLoading();
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = 'warehouse-workbench-source-v' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.zip';
+          document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+          console.log('[download] 源代码打包完成 (' + fetched + '/' + total + ' 文件)');
+        }).catch(function (err) {
+          hideLoading();
+          console.error('[download] 打包失败:', err);
+          alert('打包失败: ' + (err.message || err));
+        });
+      }
+
       function openDl() {
         overlay.classList.add('show');
         input.value = ''; error.textContent = '';
         setTimeout(function () { try { input.focus(); } catch (e) {} }, 60);
       }
       function closeDl() { overlay.classList.remove('show'); }
+
       document.getElementById('sourceDownloadBtn').addEventListener('click', function (e) {
-        e.preventDefault(); openDl();
+        e.preventDefault();
+        openDl();
       });
       document.getElementById('dlPwClose').addEventListener('click', closeDl);
       overlay.addEventListener('click', function (e) { if (e.target === overlay) closeDl(); });
       function submit() {
         if (input.value === PW) {
           closeDl();
-          var a = document.createElement('a');
-          a.href = ZIP_URL;
-          a.setAttribute('download', 'warehouse-workbench-source.zip');
-          document.body.appendChild(a); a.click(); a.remove();
+          doDynamicDownload();
         } else {
           error.textContent = '密码错误，请重试';
           input.value = ''; input.focus();

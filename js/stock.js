@@ -50,10 +50,6 @@ const StockModule = {
           <div class="kpi-label">总库存数量</div>
           <div class="kpi-value">${this.formatNum(totalQty)}</div>
         </div>
-        <div class="kpi-card card-info">
-          <div class="kpi-label">更新时间</div>
-          <div class="kpi-value" style="font-size:14px;">${updateTime}</div>
-        </div>
       </div>
     `;
 
@@ -91,11 +87,11 @@ const StockModule = {
           <tbody>
             ${items.map(s => `
               <tr>
-                <td>${s.仓库名称 || '-'}</td>
-                <td>${s.存货编码 || '-'}</td>
-                <td><strong>${s.存货名称}</strong></td>
-                <td>${s.规格型号 || '-'}</td>
-                <td><strong style="color:${s.现存数量 < 10 ? 'var(--status-danger)' : 'var(--text-main)'};">${this.formatNum(s.现存数量)}</strong></td>
+                <td>${esc(s.仓库名称 || '-')}</td>
+                <td>${esc(s.存货编码 || '-')}</td>
+                <td><strong>${esc(s.存货名称)}</strong></td>
+                <td>${esc(s.规格型号 || '-')}</td>
+                <td><strong style="color:${parseFloat(s.现存数量) < 10 ? 'var(--status-danger)' : 'var(--text-main)'};">${this.formatNum(s.现存数量)}</strong></td>
               </tr>
             `).join('')}
           </tbody>
@@ -132,6 +128,11 @@ const StockModule = {
     document.getElementById('stockPagination').innerHTML = html.join('');
 
     TableUtils.initSmartSelect('stockTableArea');
+    TableUtils.initSortableHeaders('stockTableArea', this.currentData, (sorted) => {
+      this.currentData = sorted;
+      this.currentPage = 1;
+      this.renderTable();
+    });
   },
 
   changePageSize(size) {
@@ -158,6 +159,11 @@ const StockModule = {
   },
 
   formatNum(num) {
-    return new Intl.NumberFormat('zh-CN').format(Math.round(num || 0));
+    if (num === 0 || !num) return '-';
+    // 保留原始精度，不做四舍五入
+    const n = parseFloat(num);
+    if (isNaN(n)) return '-';
+    // 如果是整数就显示整数，有小数就保留小数（最多4位）
+    return Number.isInteger(n) ? n.toLocaleString('zh-CN') : n.toLocaleString('zh-CN', { maximumFractionDigits: 4, minimumFractionDigits: undefined });
   }
 };

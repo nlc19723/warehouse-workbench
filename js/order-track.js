@@ -61,7 +61,7 @@ const OrderTrackModule = {
     document.getElementById('trackSummary').innerHTML = `
       <div class="kpi-grid">
         <div class="kpi-card card-warning">
-          <div class="kpi-label">未入库订单数（去重）</div>
+          <div class="kpi-label">未入库订单数</div>
           <div class="kpi-value">${uniqueCount}</div>
           <div class="kpi-sub">总记录 ${pending.length} 条</div>
         </div>
@@ -130,12 +130,12 @@ const OrderTrackModule = {
             const progressClass = percent >= 80 ? '' : percent >= 50 ? 'warning' : 'danger';
             return `
               <tr>
-                <td><strong>${o.订单编号}</strong></td>
-                <td>${o.日期 || o.已下单时间 || '-'}</td>
-                <td>${o.供应商}</td>
-                <td>${o.项目名称 || '-'}</td>
-                <td>${o.存货名称}</td>
-                <td>${o.规格型号 || '-'}</td>
+                <td><strong>${esc(o.订单编号)}</strong></td>
+                <td>${esc(o.日期 || o.已下单时间 || '-')}</td>
+                <td>${esc(o.供应商)}</td>
+                <td>${esc(o.项目名称 || '-')}</td>
+                <td>${esc(o.存货名称)}</td>
+                <td>${esc(o.规格型号 || '-')}</td>
                 <td>${o.数量}</td>
                 <td>${o.累计入库数量 || 0}</td>
                 <td><strong>${pendingQty}</strong></td>
@@ -184,6 +184,12 @@ const OrderTrackModule = {
     </span>`);
 
     document.getElementById('trackPagination').innerHTML = html.join('');
+
+    TableUtils.initSortableHeaders('trackTableArea', this.currentData, (sorted) => {
+      this.currentData = sorted;
+      this.currentPage = 1;
+      this.renderTable();
+    });
   },
 
   changePageSize(size) {

@@ -3,37 +3,34 @@
 // ============================================
 
 const DB_NAME = 'WarehouseWorkbench';
-const DB_VERSION = 3;  // v3: 精简索引 + 自动清理旧版本
+const DB_VERSION = 5;  // v5: 日期时区修复——旧数据日期少一天，强制重建库重新导入
 
 // 先删除旧版本数据库（v1/v2 有大量索引导致写入卡死）
 // 必须在 db.open() 之前完成，否则 Dexie 实例会绑定到旧版本
 async function cleanOldDB() {
+  // 仅在检测到「真正旧版本」(version < DB_VERSION) 时才删除并重导，
+  // 以避免每次刷新都清空当前版本库——那会导致“刷新就空白 / 长时间转圈”的顽疾。
+  // 注意：indexedDB.databases() 返回的 version 在部分环境下不可靠，
+  // 因此只凭“严格小于当前版本”判断，绝不在相等 / 大于 / 未知时删除。
   try {
-    // 尝试用原生 API 检测版本
-    if (indexedDB.databases) {
-      const dbs = await indexedDB.databases();
-      const oldDB = dbs.find(d => d.name === DB_NAME);
-      if (oldDB && oldDB.version && oldDB.version < DB_VERSION) {
-        console.log('检测到旧版本数据库 v' + oldDB.version + '，正在清理...');
-        await new Promise((resolve, reject) => {
-          const req = indexedDB.deleteDatabase(DB_NAME);
-          req.onsuccess = () => { console.log('旧数据库已清理'); resolve(); };
-          req.onerror = () => reject(req.error);
-          req.onblocked = () => { console.warn('数据库删除被阻塞，强制继续'); resolve(); };
-        });
-        return;
-      }
+    if (typeof indexedDB.databases !== 'function') {
+      // 老浏览器不支持探测：交给 Dexie 的 onupgradeneeded 自动升级，不主动删除
+      return;
     }
-  } catch(e) {
-    console.warn('版本检测失败:', e.message);
-  }
-  // 兜底：用 Dexie.delete 清理
-  try {
-    await Dexie.delete(DB_NAME);
-    console.log('数据库已清理（兜底）');
-  } catch(e) {
-    // 数据库不存在时会报错，忽略
-    console.log('数据库不存在或已清理');
+    const dbs = await indexedDB.databases();
+    const oldDB = dbs.find(d => d.name === DB_NAME);
+    if (oldDB && typeof oldDB.version === 'number' && oldDB.version > 0 && oldDB.version < DB_VERSION) {
+      console.log('检测到旧版本数据库 v' + oldDB.version + '，正在清理（避免旧 schema 写入卡死）...');
+      await new Promise((resolve) => {
+        const req = indexedDB.deleteDatabase(DB_NAME);
+        req.onsuccess = () => { console.log('旧数据库已清理'); resolve(); };
+        req.onerror = () => resolve();
+        req.onblocked = () => { console.warn('数据库删除被阻塞，强制继续'); resolve(); };
+      });
+    }
+    // 当前版本 / 无版本信息 / 探测异常：保留本地数据，不删除
+  } catch (e) {
+    console.warn('版本检测失败（保留本地数据，不删除）:', e.message);
   }
 }
 
@@ -60,6 +57,8 @@ db.version(DB_VERSION).stores({
   lowTurnover: '++id, 存货编码',
   // 违约台账 - 按公司名称查询
   breach: '++id, 公司名称',
+  // 出库管理 - 独立临时表，便于后续删除
+  outbound: '++id, 出库单号, 存货编码, 出库时间',
   // 材料分类
   materialClass: '++id, 存货编码',
   // 统计数据（月度汇总）
@@ -104,6 +103,7 @@ const DataStore = {
     await db.pricing.clear();
     await db.lowTurnover.clear();
     await db.breach.clear();
+    await db.outbound.clear();
     await db.materialClass.clear();
     await db.monthlyStats.clear();
     await db.meta.delete('dataImported');
@@ -276,6 +276,36 @@ const DataStore = {
     return query.toArray();
   },
 
+  // ===== 出库管理 =====
+  async getOutbound(filter = {}, page = 1, pageSize = 20) {
+    let query = db.outbound.toCollection();
+    if (filter.出库单号) query = query.filter(o => o.出库单号 === filter.出库单号);
+    if (filter.项目名称) query = query.filter(o => o.项目名称 === filter.项目名称);
+    if (filter.keyword) {
+      const kw = filter.keyword.toLowerCase();
+      query = query.filter(o => (o.出库单号 && o.出库单号.toLowerCase().includes(kw)) ||
+                                 (o.存货编码 && o.存货编码.toLowerCase().includes(kw)) ||
+                                 (o.存货名称 && o.存货名称.toLowerCase().includes(kw)) ||
+                                 (o.领用人员 && o.领用人员.toLowerCase().includes(kw)));
+    }
+    if (filter.startDate || filter.endDate) {
+      query = query.filter(o => {
+        if (!o.出库时间) return false;
+        if (filter.startDate && o.出库时间 < filter.startDate) return false;
+        if (filter.endDate && o.出库时间 > filter.endDate) return false;
+        return true;
+      });
+    }
+    const total = await query.count();
+    const items = await query.offset((page - 1) * pageSize).limit(pageSize).toArray();
+    return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+  },
+
+  async getOutboundProjects() {
+    const all = await db.outbound.toArray();
+    return [...new Set(all.map(o => o.项目名称).filter(Boolean))];
+  },
+
   // ===== 仪表盘统计 =====
   async getDashboardStats() {
     const [suppliers, orders, inbound, stock, alerts, lowTurnover] = await Promise.all([
@@ -287,15 +317,7 @@ const DataStore = {
       db.lowTurnover.count()
     ]);
 
-    // 兼容层：旧数据有"是否需补货"(字符串)，新数据有"补货值"(数值)
-    alerts.forEach(a => {
-      if ((!a.补货值 && a.补货值 !== 0) && (a.是否需补货 === '是' || a.是否需补货 === true)) {
-        const minStock = parseFloat(a.最低库存预警) || 0;
-        const curStock = parseFloat(a.现存量) || 0;
-        a.补货值 = Math.max(0, minStock - curStock);
-      }
-      if (!a.补货值 && a.补货值 !== 0) a.补货值 = 0;
-    });
+    // 补货值统一处理在现存量交叉补全之后进行（见下方）
 
     // 从 stock 表交叉获取真实现存量（与 inventory-alert 模块保持一致）
     try {
@@ -318,13 +340,9 @@ const DataStore = {
             else for (const [k, v] of stockByNameSpec) { if (k.startsWith((a.存货名称 || '').replace(/\s+/g, ''))) { a.现存量 = v; break; } }
           }
         }
-        // 基于修正后的现存量重新计算补货值
-        if (a.补货值 > 0 || a.是否需补货 === '是') {
-          const minStock = parseFloat(a.最低库存预警) || 0;
-          const curStock = parseFloat(a.现存量) || 0;
-          if (minStock > 0 && curStock < minStock) a.补货值 = Math.max(0, minStock - curStock);
-          else a.补货值 = 0;
-        }
+        // 补货值：直接使用导入时从源数据"是否需补货"(J列)读取的原始数值，不做回退计算
+        const rv = parseFloat(a.补货值);
+        a.补货值 = isNaN(rv) ? 0 : rv;
       });
     } catch(e) { /* ignore */ }
 
@@ -332,13 +350,10 @@ const DataStore = {
     const needRestockCount = needRestock.length;
     const needRestockQty = needRestock.reduce((sum, a) => sum + (parseFloat(a.在途订单) || 0), 0);
 
-    const totalOrderAmount = await db.orders.toArray().then(arr =>
-      arr.reduce((sum, o) => sum + (parseFloat(o.原币价税合计) || 0), 0)
-    );
+    const ordersAll = await db.orders.toArray();
+    const totalOrderAmount = ordersAll.reduce((sum, o) => sum + (parseFloat(o.原币价税合计) || 0), 0);
 
-    const pendingInbound = await db.orders.toArray().then(arr =>
-      arr.filter(o => parseFloat(o.未入库量) > 0).length
-    );
+    const pendingInbound = ordersAll.filter(o => parseFloat(o.未入库量) > 0).length;
 
     // 合同到期预警（30天内）
     const now = new Date();

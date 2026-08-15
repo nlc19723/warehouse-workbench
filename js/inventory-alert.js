@@ -20,8 +20,8 @@ const InventoryAlertModule = {
           <option value="不使用类">不使用类</option>
         </select>
         <select id="alertStatus">
-          <option value="">全部状态</option>
-          <option value="yes" selected>需补货</option>
+          <option value="" selected>全部状态</option>
+          <option value="yes">需补货</option>
           <option value="no">正常</option>
         </select>
         <button class="search-glass" onclick="InventoryAlertModule.applyFilter()">筛选</button>
@@ -40,17 +40,11 @@ const InventoryAlertModule = {
   async loadData() {
     let alerts = await db.inventoryAlerts.toArray();
 
-    // ===== 兼容层：旧数据有"是否需补货"(字符串)，新数据有"补货值"(数值) =====
-    // 统一转换为 补货值 数值字段，同时从 stock 表交叉获取真实现存量
+    // ===== 补货值：直接使用导入时从源数据"是否需补货"(J列)读取的原始数值 =====
+    // 不做任何回退计算；若值为空(NaN)则设为0
     alerts.forEach(a => {
-      // 若没有补货值但有旧的"是否需补货"字段 → 计算补货值
-      if ((!a.补货值 && a.补货值 !== 0) && (a.是否需补货 === '是' || a.是否需补货 === true)) {
-        const minStock = parseFloat(a.最低库存预警) || 0;
-        const curStock = parseFloat(a.现存量) || 0;
-        a.补货值 = Math.max(0, minStock - curStock);
-      }
-      // 若补货值仍为空/undefined，设为 0
-      if (!a.补货值 && a.补货值 !== 0) a.补货值 = 0;
+      const v = parseFloat(a.补货值);
+      a.补货值 = isNaN(v) ? 0 : v;
     });
 
     // 从 stock（中心库房现存量）表交叉获取真实现存量
@@ -81,16 +75,7 @@ const InventoryAlertModule = {
             }
           }
         }
-        // 补货值也重新计算（基于修正后的现存量）
-        if (a.补货值 > 0 || a.是否需补货 === '是') {
-          const minStock = parseFloat(a.最低库存预警) || 0;
-          const curStock = parseFloat(a.现存量) || 0;
-          if (minStock > 0 && curStock < minStock) {
-            a.补货值 = Math.max(0, minStock - curStock);
-          } else {
-            a.补货值 = 0;
-          }
-        }
+        // 注意：不再重算补货值，保留源数据原始值
       });
       if (fixedCount > 0) console.log(`[inventory-alert] 从库存表补全 ${fixedCount}/${alerts.length} 条现存量`);
     } catch(e) { console.warn('[inventory-alert] 库存表关联失败:', e); }
@@ -182,10 +167,10 @@ const InventoryAlertModule = {
               const needRestock = (a.补货值 && a.补货值 > 0) ? true : false;
               return `
                 <tr class="${needRestock ? 'row-warning' : ''}">
-                  <td>${a.存货编码 || '-'}</td>
-                  <td><strong>${a.存货名称}</strong></td>
-                  <td>${a.规格型号 || '-'}</td>
-                  <td>${a.分类 ? `<span class="tag ${a.分类 === 'A' ? 'tag-success' : a.分类 === 'B' ? 'tag-warning' : 'tag-neutral'}">${a.分类}</span>` : '-'}</td>
+                  <td>${esc(a.存货编码 || '-')}</td>
+                  <td><strong>${esc(a.存货名称)}</strong></td>
+                  <td>${esc(a.规格型号 || '-')}</td>
+                  <td>${a.分类 ? `<span class="tag ${a.分类 === 'A' ? 'tag-success' : a.分类 === 'B' ? 'tag-warning' : 'tag-neutral'}">${esc(a.分类)}</span>` : '-'}</td>
                   <td>${this.formatNum(a.近一年月均入库量)}</td>
                   <td>${this.formatNum(a.最低库存预警)}</td>
                   <td>${this.formatNum(a.最高库存)}</td>
@@ -193,7 +178,7 @@ const InventoryAlertModule = {
                   <td style="${needRestock ? 'color:var(--status-danger);font-weight:600;' : ''}">${this.formatNum(a.补货值)}</td>
                   <td>${this.formatNum(a.在途订单)}</td>
                   <td>${needRestock ? '<span class="tag tag-danger">需补货</span>' : '<span class="tag tag-success">正常</span>'}</td>
-                  <td>${String(a.所上或库房 || '-').substring(0, 15)}${String(a.所上或库房 || '').length > 15 ? '...' : ''}</td>
+                  <td>${esc(String(a.所上或库房 || '-').substring(0, 15))}${String(a.所上或库房 || '').length > 15 ? '...' : ''}</td>
                 </tr>
               `;
             }).join('')}
@@ -231,6 +216,10 @@ const InventoryAlertModule = {
     document.getElementById('alertPagination').innerHTML = html.join('');
 
     TableUtils.initSmartSelect('alertTableArea');
+    TableUtils.initSortableHeaders('alertTableArea', this.currentData, (sorted) => {
+      this.currentData = sorted;
+      this.renderTable();
+    });
   },
 
   changePageSize(size) {

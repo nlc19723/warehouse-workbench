@@ -85,7 +85,6 @@ const LowTurnoverModule = {
               <th>规格</th>
               <th>现存数量</th>
               <th>暂无法使用量</th>
-              <th>可用量</th>
             </tr>
           </thead>
           <tbody>
@@ -95,13 +94,12 @@ const LowTurnoverModule = {
               const available = total - unavailable;
               return `
                 <tr class="${available <= 0 ? 'row-danger' : ''}">
-                  <td>${i.仓库名称 || '-'}</td>
-                  <td>${i.存货编码 || '-'}</td>
-                  <td><strong>${i.存货名称}</strong></td>
-                  <td>${i.规格型号 || '-'}</td>
+                  <td>${esc(i.仓库名称 || '-')}</td>
+                  <td>${esc(i.存货编码 || '-')}</td>
+                  <td><strong>${esc(i.存货名称)}</strong></td>
+                  <td>${esc(i.规格型号 || '-')}</td>
                   <td>${this.formatNum(total)}</td>
                   <td>${this.formatNum(unavailable)}</td>
-                  <td><strong style="color:${available > 0 ? 'var(--status-success)' : 'var(--status-danger)'};">${this.formatNum(available)}</strong></td>
                 </tr>
               `;
             }).join('')}

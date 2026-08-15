@@ -13,6 +13,21 @@ const ReconciliationModule = {
   async render() {
     this.suppliers = await DataStore.getOrderSuppliers();
 
+    // 计算默认日期范围：上上月26日 至 上月25日
+    // 例：现在是 2026/8 → 上上月=6月、上月=7月 → 2026/6/26 至 2026/7/25
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth() + 1; // 1~12
+    // 上月 = m - 1（跨年则去年12月）
+    const prevMonth = m === 1 ? 12 : m - 1;
+    const prevYear  = m === 1 ? y - 1 : y;
+    // 上上月 = m - 2
+    const prevPrevMonth = m === 1 ? 11 : (m === 2 ? 12 : m - 2);
+    const prevPrevYear  = (m === 1 || m === 2) ? y - 1 : y;
+    const pad = n => String(n).padStart(2, '0');
+    const defaultStart = `${prevPrevYear}-${pad(prevPrevMonth)}-26`;
+    const defaultEnd   = `${prevYear}-${pad(prevMonth)}-25`;
+
     const content = document.getElementById('contentArea');
     content.innerHTML = `
       <div class="filter-bar">
@@ -20,9 +35,9 @@ const ReconciliationModule = {
           <option value="">选择供应商</option>
           ${this.suppliers.map(s => `<option value="${s}">${s}</option>`).join('')}
         </select>
-        <input type="date" id="recStartDate" value="2026-01-01">
+        <input type="date" id="recStartDate" value="${defaultStart}">
         <span style="color:var(--text-secondary);">至</span>
-        <input type="date" id="recEndDate" value="2026-12-31">
+        <input type="date" id="recEndDate" value="${defaultEnd}">
         <button class="search-glass" onclick="ReconciliationModule.applyFilter()">查询</button>
         <button class="secondary" onclick="ReconciliationModule.exportData()">📥 导出</button>
       </div>
@@ -80,11 +95,11 @@ const ReconciliationModule = {
               <thead><tr><th>供应商</th><th>入库单数</th><th>数量</th><th>金额(元)</th><th>占比</th></tr></thead>
               <tbody>${supplierList.map(([name, info]) => `
                 <tr>
-                  <td><strong>${name}</strong></td>
+                  <td><strong>${esc(name)}</strong></td>
                   <td>${info.uniqueNos.size}</td>
                   <td>${this.formatNum(info.qty)}</td>
                   <td>${this.formatMoney(info.amount)}</td>
-                  <td>${((info.amount / totalAmount) * 100).toFixed(1)}%</td>
+                  <td>${totalAmount > 0 ? ((info.amount / totalAmount) * 100).toFixed(1) + '%' : '-'}</td>
                 </tr>
               `).join('')}</tbody>
             </table>
@@ -133,11 +148,11 @@ const ReconciliationModule = {
           <tbody>
             ${items.map(i => `
               <tr>
-                <td>${i.入库日期 || '-'}</td>
-                <td>${i.入库单号 || '-'}</td>
-                <td>${i.供应商 || '-'}</td>
-                <td>${i.存货名称 || '-'}</td>
-                <td>${i.规格型号 || '-'}</td>
+                <td>${esc(i.入库日期 || '-')}</td>
+                <td>${esc(i.入库单号 || '-')}</td>
+                <td>${esc(i.供应商 || '-')}</td>
+                <td>${esc(i.存货名称 || '-')}</td>
+                <td>${esc(i.规格型号 || '-')}</td>
                 <td>${i.数量}</td>
                 <td>${this.formatMoney(i.原币含税单价)}</td>
                 <td>${this.formatMoney(i.原币价税合计)}</td>

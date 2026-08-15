@@ -6,25 +6,18 @@ const SyncManager = {
   client: null,
   isOnline: false,
   config: null,
-  BUCKET: 'workbench-data',
-  FILE: 'data.json',
+  BUCKET: (typeof AppConfig !== 'undefined' && AppConfig.supabase) ? AppConfig.supabase.bucket : 'workbench-data',
+  FILE: (typeof AppConfig !== 'undefined' && AppConfig.supabase) ? AppConfig.supabase.file : 'data.json',
 
-  // 内置默认配置（部署后让所有访问者自动连接，anon key 本就是公开的）
-  // 留空 {} 则用用户手动输入的配置；填入后分享链接零配置
-  DEFAULT_CONFIG: {
-    url: 'https://audzjztaffbtmxshwadn.supabase.co',
-    key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF1ZHpqenRhZmZidG14c2h3YWRuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4OTU5ODksImV4cCI6MjEwMTQ3MTk4OX0.RPPyThgZZMBldysxkuIMBqP6E8WRKhpEOZNQe5itJAg'
-  },
-
-  // 初始化（优先 localStorage，其次内置默认配置）—— 不自动连接，由 DataLoader 按需触发
+  // 初始化（优先 localStorage，其次 AppConfig.supabase）—— 不自动连接，由 DataLoader 按需触发
   init() {
     try {
       const saved = localStorage.getItem('supabase_config');
       if (saved) {
         this.config = JSON.parse(saved);
         this._connect();
-      } else if (this.DEFAULT_CONFIG && this.DEFAULT_CONFIG.url) {
-        this.config = this.DEFAULT_CONFIG;
+      } else if (typeof AppConfig !== 'undefined' && AppConfig.supabase && AppConfig.supabase.url) {
+        this.config = { url: AppConfig.supabase.url, key: AppConfig.supabase.anonKey };
         this._connect();
       }
     } catch (e) {
@@ -73,7 +66,7 @@ const SyncManager = {
   disconnect() {
     this.client = null;
     this.isOnline = false;
-    localStorage.removeItem('supabase_config');
+    try { localStorage.removeItem('supabase_config'); } catch (e) { /* 隐私模式可能抛错，忽略 */ }
     this.updateUI();
   },
 

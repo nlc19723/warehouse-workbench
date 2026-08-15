@@ -25,7 +25,8 @@ const SupplierModule = {
         </select>
         <select id="contractWarn">
           <option value="">合同状态</option>
-          <option value="expiring">即将到期(30天内)</option>
+          <option value="expiring">即将到期(&lt;30天)</option>
+          <option value="near">临近期(30-90天)</option>
           <option value="expired">已到期</option>
         </select>
         <button class="search-glass" onclick="SupplierModule.applyFilter()">筛选</button>
@@ -64,6 +65,7 @@ const SupplierModule = {
         if (!s.年度合同到期时间) return false;
         const days = Math.ceil((new Date(s.年度合同到期时间) - now) / (1000 * 60 * 60 * 24));
         if (contractWarn === 'expiring') return days >= 0 && days <= 30;
+        if (contractWarn === 'near') return days > 30 && days <= 90;
         if (contractWarn === 'expired') return days < 0;
         return true;
       });
@@ -135,15 +137,15 @@ const SupplierModule = {
               }
               return `
                 <tr>
-                  <td>${s.类型 || '-'}</td>
-                  <td><strong>${s.供应商}</strong></td>
-                  <td>${s.年度合同到期时间 || '-'}</td>
+                  <td>${esc(s.类型 || '-')}</td>
+                  <td><strong>${esc(s.供应商)}</strong></td>
+                  <td>${esc(s.年度合同到期时间 || '-')}</td>
                   <td>${daysTag || '-'}</td>
                   <td>${this.formatMoney(s.年度合同金额)}</td>
                   <td>${this.formatMoney(s.年度已供入库金额)}</td>
                   <td>${s.年度已供入库金额占比 ? (s.年度已供入库金额占比 * 100).toFixed(1) + '%' : '-'}</td>
-                  <td>${s.招采部门 || '-'}</td>
-                  <td><button onclick="SupplierModule.viewDetail(${s.id})" style="border:none;background:var(--accent-mint-light);color:var(--primary-deep);cursor:pointer;border-radius:8px;padding:4px 12px;font-size:12px;">详情</button></td>
+                  <td>${esc(s.招采部门 || '-')}</td>
+                  <td><button onclick="SupplierModule.viewDetail(${JSON.stringify(s.id)})" style="border:none;background:var(--accent-mint-light);color:var(--primary-deep);cursor:pointer;border-radius:8px;padding:4px 12px;font-size:12px;">详情</button></td>
                 </tr>
               `;
             }).join('')}
@@ -158,29 +160,34 @@ const SupplierModule = {
 
   renderContractStats(suppliers) {
     const now = new Date();
-    let normal = 0, expiring = 0, expired = 0;
+    let expiring = 0, near = 0, safe = 0, expired = 0;
 
     suppliers.forEach(s => {
       if (!s.年度合同到期时间) return;
       const days = Math.ceil((new Date(s.年度合同到期时间) - now) / (1000 * 60 * 60 * 24));
       if (days < 0) expired++;
       else if (days <= 30) expiring++;
-      else normal++;
+      else if (days <= 90) near++;
+      else safe++;
     });
 
     document.getElementById('contractStatsArea').innerHTML = `
       <div class="contract-stats">
-        <div class="contract-stat-item" style="border-left:3px solid var(--status-success);">
-          <div class="cs-num">${normal}</div>
-          <div class="cs-label">合同正常</div>
-        </div>
         <div class="contract-stat-item csw">
+          <div class="cs-label">即将到期(&lt;30天)</div>
           <div class="cs-num">${expiring}</div>
-          <div class="cs-label">即将到期(≤30天)</div>
+        </div>
+        <div class="contract-stat-item csnear">
+          <div class="cs-label">临近期(30-90天)</div>
+          <div class="cs-num">${near}</div>
+        </div>
+        <div class="contract-stat-item cssafe">
+          <div class="cs-label">合同安全(&gt;90天)</div>
+          <div class="cs-num">${safe}</div>
         </div>
         <div class="contract-stat-item csd">
-          <div class="cs-num">${expired}</div>
           <div class="cs-label">已到期</div>
+          <div class="cs-num">${expired}</div>
         </div>
       </div>
     `;

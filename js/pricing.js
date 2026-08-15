@@ -131,16 +131,16 @@ const PricingModule = {
               }
               return `
                 <tr>
-                  <td>${p.供应商 || '-'}</td>
-                  <td>${p.类型 || '-'}</td>
-                  <td>${p.存货编码 || '-'}</td>
-                  <td><strong>${p.存货名称}</strong></td>
-                  <td>${p.规格型号 || '-'}</td>
-                  <td>${p.主计量 || '-'}</td>
+                  <td>${esc(p.供应商 || '-')}</td>
+                  <td>${esc(p.类型 || '-')}</td>
+                  <td>${esc(p.存货编码 || '-')}</td>
+                  <td><strong>${esc(p.存货名称)}</strong></td>
+                  <td>${esc(p.规格型号 || '-')}</td>
+                  <td>${esc(p.主计量 || '-')}</td>
                   <td><strong>¥${this.formatMoney(p.含税单价)}</strong></td>
-                  <td>${p.税率 ? p.税率 + '%' : '-'}</td>
+                  <td>${p.税率 ? esc(p.税率) + '%' : '-'}</td>
                   <td>¥${this.formatMoney(p.单价)}</td>
-                  <td>${p.生效日期 || '-'}</td>
+                  <td>${esc(p.生效日期 || '-')}</td>
                   <td>${p.失效日期 || '-'}</td>
                   <td>${status}</td>
                 </tr>

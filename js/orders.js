@@ -19,24 +19,22 @@ const OrdersModule = {
     ]);
 
     content.innerHTML = `
-      <div class="filter-bar filter-bar-two-row" style="display:flex;flex-direction:column;gap:2px;margin-bottom:6px;padding:0;">
-        <div class="filter-row filter-row-main" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
+      <div class="filter-bar" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;padding:0;align-items:flex-start;">
+        <div class="filter-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
           <input type="text" id="orderKw" class="filter-search-short" placeholder="搜索订单编号、供应商、物料..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')OrdersModule.applyFilter()">
-          <div class="filter-row-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:4px;">
-            <input type="date" id="orderStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date" title="起始日期">
-            <span class="filter-sep">至</span>
-            <input type="date" id="orderEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date" title="结束日期">
-            <button class="search-glass" onclick="OrdersModule.applyFilter()">筛选</button>
-            <button class="secondary" onclick="OrdersModule.resetFilter()">重置</button>
-            <button class="secondary" onclick="OrdersModule.exportData()">📥 导出</button>
-          </div>
+          <input type="date" id="orderStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date" title="起始日期">
+          <span class="filter-sep">至</span>
+          <input type="date" id="orderEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date" title="结束日期">
+          <button class="search-glass" onclick="OrdersModule.applyFilter()">筛选</button>
+          <button class="secondary" onclick="OrdersModule.resetFilter()">重置</button>
+          <button class="secondary" onclick="OrdersModule.exportData()">📥 导出</button>
         </div>
-        <div class="filter-row filter-row-selects" style="display:flex;gap:10px;margin:0;padding:0;">
-          <select id="orderSupplier" title="按供应商筛选">
+        <div class="filter-row" style="display:flex;gap:10px;margin:0;padding:0;">
+          <select id="orderSupplier" title="按供应商筛选" style="max-width:200px;">
             <option value="">全部供应商</option>
             ${suppliers.map(s => `<option value="${s}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${s}</option>`).join('')}
           </select>
-          <select id="orderProject" title="按项目筛选">
+          <select id="orderProject" title="按项目筛选" style="max-width:300px;">
             <option value="">全部项目</option>
             ${projects.map(p => `<option value="${p}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${p}</option>`).join('')}
           </select>
@@ -72,21 +70,24 @@ const OrdersModule = {
   async loadData() {
     const allOrders = await db.orders.toArray();
 
-    // 订单总数：按订单编号去重
-    const uniqueOrderNos = new Set(allOrders.map(o => o.订单编号).filter(Boolean));
+    // ===== 先应用当前筛选条件到全量数据（用于统计和图表）=====
+    let filteredOrders = this._applyFilters(allOrders);
+
+    // 订单总数：按订单编号去重（基于筛选后数据）
+    const uniqueOrderNos = new Set(filteredOrders.map(o => o.订单编号).filter(Boolean));
     const uniqueTotal = uniqueOrderNos.size;
 
-    const unapproved = allOrders.filter(o => o.审批状态 && o.审批状态 !== '审批通过');
+    const unapproved = filteredOrders.filter(o => o.审批状态 && o.审批状态 !== '审批通过');
     const unapprovedUnique = new Set(unapproved.map(o => o.订单编号).filter(Boolean)).size;
 
-    const uninbound = allOrders.filter(o => parseFloat(o.未入库量) > 0);
+    const uninbound = filteredOrders.filter(o => parseFloat(o.未入库量) > 0);
     const uninboundUnique = new Set(uninbound.map(o => o.订单编号).filter(Boolean)).size;
 
-    const totalAmount = allOrders.reduce((s, o) => s + (parseFloat(o.原币价税合计) || 0), 0);
+    const totalAmount = filteredOrders.reduce((s, o) => s + (parseFloat(o.原币价税合计) || 0), 0);
 
     document.getElementById('orderSummary').innerHTML = `
       <div class="kpi-card card-info">
-        <div class="kpi-label">订单总数（去重）</div>
+        <div class="kpi-label">订单总数</div>
         <div class="kpi-value">${uniqueTotal}</div>
         <div class="kpi-sub">总金额 ¥${this.formatMoney(totalAmount)}</div>
       </div>
@@ -106,7 +107,35 @@ const OrdersModule = {
     this.totalCount = uniqueTotal;
     this.currentPage = 1;
     this.renderTable();
-    this.renderTrendChart(allOrders);
+    this.renderTrendChart(filteredOrders);
+  },
+
+  // 内部筛选：复用 currentFilter 逻辑（与 DataStore.getOrders 一致）
+  _applyFilters(orders) {
+    let result = orders;
+    const f = this.currentFilter;
+    if (f) {
+      if (f.供应商) result = result.filter(o => o.供应商 === f.供应商);
+      if (f.项目名称) result = result.filter(o => o.项目名称 === f.项目名称);
+      if (f.审批状态) result = result.filter(o => o.审批状态 === f.审批状态);
+      if (f.keyword) {
+        const kw = f.keyword.toLowerCase();
+        result = result.filter(o =>
+          (o.订单编号 && o.订单编号.toLowerCase().includes(kw)) ||
+          (o.供应商 && o.供应商.toLowerCase().includes(kw)) ||
+          (o.存货名称 && o.存货名称.toLowerCase().includes(kw))
+        );
+      }
+      if (f.startDate || f.endDate) {
+        result = result.filter(o => {
+          if (!o.日期) return false;
+          if (f.startDate && o.日期 < f.startDate) return false;
+          if (f.endDate && o.日期 > f.endDate) return false;
+          return true;
+        });
+      }
+    }
+    return result;
   },
 
   async renderTable() {
@@ -141,17 +170,17 @@ const OrdersModule = {
           <tbody>
             ${items.map(o => `
               <tr>
-                <td><strong>${o.订单编号}</strong></td>
-                <td>${o.日期 || '-'}</td>
-                <td>${o.供应商 || '-'}</td>
-                <td>${o.项目名称 || '-'}</td>
-                <td>${o.存货名称 || '-'}</td>
-                <td>${o.规格型号 || '-'}</td>
+                <td><strong>${esc(o.订单编号)}</strong></td>
+                <td>${esc(o.日期 || '-')}</td>
+                <td>${esc(o.供应商 || '-')}</td>
+                <td>${esc(o.项目名称 || '-')}</td>
+                <td>${esc(o.存货名称 || '-')}</td>
+                <td>${esc(o.规格型号 || '-')}</td>
                 <td>${o.数量}</td>
-                <td>${o.未入库量 > 0 ? `<span class="tag tag-warning">${o.未入库量}</span>` : '0'}</td>
+                <td>${parseFloat(o.未入库量) > 0 ? `<span class="tag tag-warning">${o.未入库量}</span>` : '0'}</td>
                 <td>${this.formatMoney(o.原币含税单价)}</td>
                 <td>${this.formatMoney(o.原币价税合计)}</td>
-                <td>${o.审批状态 ? `<span class="tag ${o.审批状态 === '审批通过' ? 'tag-success' : 'tag-neutral'}">${o.审批状态}</span>` : '-'}</td>
+                <td>${o.审批状态 ? `<span class="tag ${o.审批状态 === '审批通过' ? 'tag-success' : 'tag-neutral'}">${esc(o.审批状态)}</span>` : '-'}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -161,6 +190,11 @@ const OrdersModule = {
 
     this.renderPagination(items.length, totalPages);
     TableUtils.initSmartSelect('orderTableArea');
+    TableUtils.initSortableHeaders('orderTableArea', this.currentData || [], (sorted) => {
+      this.currentData = sorted;
+      this.currentPage = 1;
+      this.renderTable();
+    });
   },
 
   renderPagination(total, totalPages) {
@@ -241,7 +275,7 @@ const OrdersModule = {
         labels: months.map(m => m.label),
         datasets: [
           {
-            label: '订单数（去重）',
+            label: '订单数',
             data: monthData.map(d => d.count),
             borderColor: '#5B9BD5',
             backgroundColor: 'rgba(91,155,213,0.08)',

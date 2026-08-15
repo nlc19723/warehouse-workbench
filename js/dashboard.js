@@ -166,7 +166,7 @@ const DashboardModule = {
     await this.renderDonut(stats);
     await this.renderTodos(stats);
     await this.renderSupplierContractChart();
-    await this.renderRestockChart();
+    await this.renderRestockChart(stats);
     await this.renderMonthlyChart();
     await this.renderTop10Chart();
     await this.renderCompareChart();
@@ -275,11 +275,13 @@ const DashboardModule = {
       wrapper.addEventListener('mouseleave', () => { this.coverflowPaused = false; });
     }
 
-    // 键盘支持
+    // 键盘支持（先移除旧监听，避免重复渲染时累积）
     const handler = (e) => {
       if (e.key === 'ArrowLeft') { this.coverflowPrev(); this.resetAutoTimer(); }
       else if (e.key === 'ArrowRight') { this.coverflowNext(); this.resetAutoTimer(); }
     };
+    if (this._coverflowKeyHandler) document.removeEventListener('keydown', this._coverflowKeyHandler);
+    this._coverflowKeyHandler = handler;
     document.addEventListener('keydown', handler);
     // 滚轮支持
     const container = document.getElementById('coverflowContainer');
@@ -369,15 +371,7 @@ const DashboardModule = {
       title = '需补货物料明细';
       let list = await db.inventoryAlerts.toArray();
 
-      // 兼容层：旧数据"是否需补货"→"补货值"
-      list.forEach(a => {
-        if ((!a.补货值 && a.补货值 !== 0) && (a.是否需补货 === '是' || a.是否需补货 === true)) {
-          const minStock = parseFloat(a.最低库存预警) || 0;
-          const curStock = parseFloat(a.现存量) || 0;
-          a.补货值 = Math.max(0, minStock - curStock);
-        }
-        if (!a.补货值 && a.补货值 !== 0) a.补货值 = 0;
-      });
+      // 补货值统一处理在现存量交叉补全之后进行（见下方）
 
       // 从库存表交叉补全现存量 + 重算补货值
       try {
@@ -397,15 +391,12 @@ const DashboardModule = {
               else for(const [kk,vv]of stockByNameSpec){if(kk.startsWith((a.存货名称||'').replace(/\s+/g,''))){a.现存量=vv;break;}}
             }
           }
-          // 基于修正后的现存量重算补货值
-          if (a.补货值 > 0 || a.是否需补货 === '是') {
-            const minStock = parseFloat(a.最低库存预警) || 0;
-            const curStock = parseFloat(a.现存量) || 0;
-            if (minStock > 0 && curStock < minStock) a.补货值 = Math.max(0, minStock - curStock);
-            else a.补货值 = 0;
-          }
+          // 注意：不再重算补货值，保留源数据原始值
         });
       }catch(e){/*ignore*/}
+
+      // 补货值：直接使用导入时从源数据"是否需补货"(J列)读取的原始数值，不做回退计算
+      list.forEach(a => { const v = parseFloat(a.补货值); a.补货值 = isNaN(v) ? 0 : v; });
 
       list = list.filter(a => a.补货值 && a.补货值 > 0);
       headers = ['存货名称', '规格', '现存量', '补货值', '最低库存'];
@@ -773,38 +764,28 @@ const DashboardModule = {
     });
   },
 
-  // ===== 库存补货分布饼图 =====
-  async renderRestockChart() {
+  // ===== 库存补货分布饼图（复用 getDashboardStats 统一数据，保证与待办/KPI/库存储康度完全一致） =====
+  async renderRestockChart(stats) {
     const canvas = document.getElementById('restockCanvas');
     if (!canvas) return;
     if (this.restockChart) { this.restockChart.destroy(); this.restockChart = null; }
 
-    const alerts = await db.inventoryAlerts.toArray();
+    // 直接使用统一计算的 stats 值，不再单独查询数据库
+    const needRestock = stats.needRestockCount || 0;
+    const stockCount = stats.stockCount || 0;
+    const pendingInbound = stats.pendingInbound || 0;
+    const safe = Math.max(0, stockCount - needRestock);
 
-    // 兼容层：旧数据"是否需补货"→"补货值"
-    alerts.forEach(a => {
-      if ((!a.补货值 && a.补货值 !== 0) && (a.是否需补货 === '是' || a.是否需补货 === true)) {
-        const minStock = parseFloat(a.最低库存预警) || 0;
-        const curStock = parseFloat(a.现存量) || 0;
-        a.补货值 = Math.max(0, minStock - curStock);
-      }
-      if (!a.补货值 && a.补货值 !== 0) a.补货值 = 0;
-    });
-
-    const needRestock = alerts.filter(a => a.补货值 && a.补货值 > 0).length;
-    const onTheWay = alerts.filter(a => parseFloat(a.在途订单) > 0).length;
-    const safe = alerts.length - needRestock;
-
-    // 在途和需补货可能有重叠，计算独立值
-    const both = alerts.filter(a => (a.补货值 && a.补货值 > 0) && parseFloat(a.在途订单) > 0).length;
-    const onlyNeedRestock = needRestock - both;
-    const onlyOnTheWay = onTheWay - both;
+    // 在途和需补货可能有重叠
+    const both = Math.min(needRestock, pendingInbound);
+    const onlyNeedRestock = Math.max(0, needRestock - both);
+    const onlyOnTheWay = Math.max(0, pendingInbound - both);
 
     const legend = document.getElementById('restockLegend');
     if (legend) {
       legend.innerHTML = `
         <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#D49595;"></span>需补货 ${needRestock} 种</div>
-        <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#D4A870;"></span>在途订单 ${onTheWay} 种</div>
+        <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#D4A870;"></span>在途订单 ${pendingInbound} 种</div>
         <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#6DBF9F;"></span>库存安全 ${safe} 种</div>
       `;
     }

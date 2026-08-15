@@ -21,7 +21,7 @@ const InboundModule = {
     ]);
 
     content.innerHTML = `
-      <div class="filter-bar filter-bar-two-row" style="display:flex;flex-direction:column;gap:2px;margin-bottom:6px;padding:0;">
+      <div class="filter-bar filter-bar-two-row" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;padding:0;">
         <div class="filter-row filter-row-main" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
           <input type="text" id="inboundKw" class="filter-search-short" placeholder="搜索入库单号、供应商、物料..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')InboundModule.applyFilter()">
           <div class="filter-row-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:4px;">
@@ -70,14 +70,17 @@ const InboundModule = {
   async loadData() {
     const allInbound = await db.inbound.toArray();
 
-    const uniqueInboundNos = new Set(allInbound.map(i => i.入库单号).filter(Boolean));
+    // ===== 先应用当前筛选条件（用于统计和图表）=====
+    let filteredInbound = this._applyFilters(allInbound);
+
+    const uniqueInboundNos = new Set(filteredInbound.map(i => i.入库单号).filter(Boolean));
     const uniqueCount = uniqueInboundNos.size;
-    const totalAmount = allInbound.reduce((s, i) => s + (parseFloat(i.原币价税合计) || 0), 0);
-    const totalQty = allInbound.reduce((s, i) => s + (parseFloat(i.数量) || 0), 0);
+    const totalAmount = filteredInbound.reduce((s, i) => s + (parseFloat(i.原币价税合计) || 0), 0);
+    const totalQty = filteredInbound.reduce((s, i) => s + (parseFloat(i.数量) || 0), 0);
 
     document.getElementById('inboundSummary').innerHTML = `
       <div class="kpi-card card-info">
-        <div class="kpi-label">入库单数（去重）</div>
+        <div class="kpi-label">入库单数</div>
         <div class="kpi-value">${uniqueCount}</div>
         <div class="kpi-sub">总记录 ${allInbound.length} 条</div>
       </div>
@@ -96,7 +99,34 @@ const InboundModule = {
     this.allInbound = allInbound;
     this.currentPage = 1;
     this.renderTable();
-    this.renderTrendChart(allInbound);
+    this.renderTrendChart(filteredInbound);
+  },
+
+  // 内部筛选：复用 currentFilter 逻辑
+  _applyFilters(inbound) {
+    let result = inbound;
+    const f = this.currentFilter;
+    if (f) {
+      if (f.供应商) result = result.filter(i => i.供应商 === f.供应商);
+      if (f.项目名称) result = result.filter(i => i.项目名称 === f.项目名称);
+      if (f.keyword) {
+        const kw = f.keyword.toLowerCase();
+        result = result.filter(i =>
+          (i.入库单号 && String(i.入库单号).toLowerCase().includes(kw)) ||
+          (i.供应商 && i.供应商.toLowerCase().includes(kw)) ||
+          (i.存货名称 && i.存货名称.toLowerCase().includes(kw))
+        );
+      }
+      if (f.startDate || f.endDate) {
+        result = result.filter(i => {
+          if (!i.入库日期) return false;
+          if (f.startDate && i.入库日期 < f.startDate) return false;
+          if (f.endDate && i.入库日期 > f.endDate) return false;
+          return true;
+        });
+      }
+    }
+    return result;
   },
 
   async renderTable() {
@@ -131,17 +161,17 @@ const InboundModule = {
           <tbody>
             ${items.map(i => `
               <tr>
-                <td>${i.入库日期 || '-'}</td>
-                <td><strong>${i.入库单号 || '-'}</strong></td>
-                <td>${i.供应商 || '-'}</td>
-                <td>${i.项目名称 || '-'}</td>
-                <td>${i.存货编码 || '-'}</td>
-                <td>${i.存货名称 || '-'}</td>
-                <td>${i.规格型号 || '-'}</td>
+                <td>${esc(i.入库日期 || '-')}</td>
+                <td><strong>${esc(i.入库单号 || '-')}</strong></td>
+                <td>${esc(i.供应商 || '-')}</td>
+                <td>${esc(i.项目名称 || '-')}</td>
+                <td>${esc(i.存货编码 || '-')}</td>
+                <td>${esc(i.存货名称 || '-')}</td>
+                <td>${esc(i.规格型号 || '-')}</td>
                 <td>${i.数量}</td>
                 <td>${this.formatMoney(i.原币含税单价)}</td>
                 <td>${this.formatMoney(i.原币价税合计)}</td>
-                <td>${i.税率 ? i.税率 + '%' : '-'}</td>
+                <td>${i.税率 ? esc(i.税率) + '%' : '-'}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -151,6 +181,11 @@ const InboundModule = {
 
     this.renderPagination(items.length, totalPages);
     TableUtils.initSmartSelect('inboundTableArea');
+    TableUtils.initSortableHeaders('inboundTableArea', this.currentData || [], (sorted) => {
+      this.currentData = sorted;
+      this.currentPage = 1;
+      this.renderTable();
+    });
   },
 
   renderPagination(total, totalPages) {
@@ -231,7 +266,7 @@ const InboundModule = {
         labels: months.map(m => m.label),
         datasets: [
           {
-            label: '入库单数（去重）',
+            label: '入库单数',
             data: monthData.map(d => d.count),
             borderColor: '#6DBF9F',
             backgroundColor: 'rgba(109,191,159,0.08)',

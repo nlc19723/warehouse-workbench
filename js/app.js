@@ -20,7 +20,9 @@ const App = {
     stock: { title: '现存量', instance: StockModule },
     pricing: { title: '合同价格', instance: PricingModule },
     lowTurnover: { title: '低周转材料', instance: LowTurnoverModule },
-    breach: { title: '违约台账', instance: BreachModule }
+    breach: { title: '违约台账', instance: BreachModule },
+    outbound: { title: '出库', instance: OutboundModule },
+    outboundList: { title: '出库列表', instance: OutboundListModule }
   },
 
   async init() {
@@ -42,13 +44,21 @@ const App = {
     await db.open();
     console.log('IndexedDB opened, version:', db.verno);
 
-    const imported = await DataLoader.init();
-    if (imported) {
-      hideLoading(); // 先关闭加载遮罩，再渲染模块
-      this.go('dashboard');
-    } else {
+    try {
+      const imported = await DataLoader.init();
+      if (imported) {
+        hideLoading(); // 先关闭加载遮罩，再渲染模块
+        this.go('dashboard');
+      } else {
+        hideLoading();
+        alert('数据导入失败，请刷新页面重试');
+      }
+    } catch (err) {
+      // 防御：初始化任何意外异常都不能导致整页永久空白且无提示
+      console.error('应用初始化失败:', err);
       hideLoading();
-      alert('数据导入失败，请刷新页面重试');
+      try { this.go('dashboard'); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
+      alert('初始化出现异常，已尝试继续加载；如仍空白请刷新重试。\n' + (err && err.message ? err.message : err));
     }
   },
 
@@ -57,8 +67,9 @@ const App = {
     const saved = localStorage.getItem('theme');
     const html = document.documentElement;
     const btn = document.getElementById('themeToggle');
-    if (saved === 'dark') { html.setAttribute('data-theme', 'dark'); btn.textContent = '☀️'; }
-    else { html.setAttribute('data-theme', 'light'); btn.textContent = '🌙'; }
+    if (saved === 'dark') { html.setAttribute('data-theme', 'dark'); if (btn) btn.textContent = '☀️'; }
+    else { html.setAttribute('data-theme', 'light'); if (btn) btn.textContent = '🌙'; }
+    if (!btn) return;
     btn.addEventListener('click', () => {
       const isDark = html.getAttribute('data-theme') === 'dark';
       if (isDark) {
@@ -331,11 +342,16 @@ const App = {
     const meta = this.modules[moduleName];
     try {
       meta.instance.render();
+      // 出库模块：检查是否有从列表页跳转过来的待加载单号（守卫修复：校验正确的模块）
+      if (moduleName === 'outbound' && typeof OutboundListModule !== 'undefined') {
+        setTimeout(() => OutboundListModule.checkPendingLoad(), 300);
+      }
       hideLoading(); // 确保加载遮罩在模块渲染后关闭
     } catch (err) {
       console.error(`${moduleName} render error:`, err);
-      document.getElementById('contentArea').innerHTML =
-        `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-text">加载出错: ${err.message}</div></div>`;
+      const area = document.getElementById('contentArea');
+      if (area) area.innerHTML =
+        `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-text">加载出错: ${esc(err.message || err)}</div></div>`;
       hideLoading();
     }
   },
@@ -355,8 +371,9 @@ const App = {
 
   // ===== 全局搜索 =====
   bindGlobalSearch() {
-    let timer;
     const input = document.getElementById('globalSearch');
+    if (!input) return;
+    let timer;
     input.addEventListener('input', e => {
       clearTimeout(timer);
       const kw = e.target.value.trim();
@@ -373,7 +390,10 @@ const App = {
   },
 
   async showSearchResults(kw) {
+    // 竞态保护：只展示最新一次搜索的结果
+    const seq = (this._searchSeq = (this._searchSeq || 0) + 1);
     const results = await DataStore.globalSearch(kw);
+    if (seq !== this._searchSeq) return; // 已有更新的搜索，丢弃本次
     const total = results.suppliers.length + results.orders.length + results.inbound.length + results.stock.length;
     if (total === 0) { this.closeSearchPanel(); return; }
     let panel = document.getElementById('globalSearchPanel');
@@ -382,14 +402,16 @@ const App = {
       panel.id = 'globalSearchPanel';
       panel.className = 'search-panel';
       panel.addEventListener('mousedown', e => e.stopPropagation());
-      document.querySelector('.top-bar').appendChild(panel);
+      const topBar = document.querySelector('.top-bar');
+      if (!topBar) return;
+      topBar.appendChild(panel);
     }
     panel.innerHTML = `
-      <div style="margin-bottom:8px;font-size:12px;color:var(--text-muted);">"${kw}" 的搜索结果 (${total}条)</div>
-      ${results.suppliers.length > 0 ? this.buildSearchGroup('🏭 供应商', results.suppliers.slice(0, 3), 'supplier', s => `${s.供应商} · ${s.类型 || ''}`) : ''}
-      ${results.orders.length > 0 ? this.buildSearchGroup('📝 订单', results.orders.slice(0, 3), 'orders', o => `${o.订单编号} - ${o.供应商} · ${o.存货名称}`) : ''}
-      ${results.inbound.length > 0 ? this.buildSearchGroup('📥 入库', results.inbound.slice(0, 3), 'inbound', i => `${i.入库单号} - ${i.供应商} · ${i.存货名称}`) : ''}
-      ${results.stock.length > 0 ? this.buildSearchGroup('📦 现存', results.stock.slice(0, 3), 'stock', s => `${s.存货名称} · ${s.规格型号 || ''}`) : ''}
+      <div style="margin-bottom:8px;font-size:12px;color:var(--text-muted);">"${esc(kw)}" 的搜索结果 (${total}条)</div>
+      ${results.suppliers.length > 0 ? this.buildSearchGroup('🏭 供应商', results.suppliers.slice(0, 3), 'supplier', s => `${esc(s.供应商)} · ${esc(s.类型 || '')}`) : ''}
+      ${results.orders.length > 0 ? this.buildSearchGroup('📝 订单', results.orders.slice(0, 3), 'orders', o => `${esc(o.订单编号)} - ${esc(o.供应商)} · ${esc(o.存货名称)}`) : ''}
+      ${results.inbound.length > 0 ? this.buildSearchGroup('📥 入库', results.inbound.slice(0, 3), 'inbound', i => `${esc(i.入库单号)} - ${esc(i.供应商)} · ${esc(i.存货名称)}`) : ''}
+      ${results.stock.length > 0 ? this.buildSearchGroup('📦 现存', results.stock.slice(0, 3), 'stock', s => `${esc(s.存货名称)} · ${esc(s.规格型号 || '')}`) : ''}
     `;
   },
 
@@ -397,9 +419,9 @@ const App = {
     return `<div style="margin-bottom:8px;">
       <div style="font-size:12px;font-weight:600;margin-bottom:4px;color:var(--text-secondary);">${title} (${items.length})</div>
       ${items.map(item => `
-        <div style="padding:8px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--text-primary);" 
+        <div style="padding:8px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--text-primary);"
              onmousedown="event.preventDefault();App.openPanel('${module}');App.closeSearchPanel();"
-             onmouseover="this.style.background='rgba(122,156,165,0.08)'" 
+             onmouseover="this.style.background='rgba(122,156,165,0.08)'"
              onmouseout="this.style.background=''">
           ${formatter(item)}
         </div>

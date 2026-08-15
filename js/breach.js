@@ -110,18 +110,18 @@ const BreachModule = {
           <tbody>
             ${data.map(r => `
               <tr>
-                <td><strong>${r.公司名称}</strong></td>
-                <td>${r.涉及订单号 || '-'}</td>
-                <td>${r.存货名称 || '-'}</td>
-                <td>${r.规格型号 || '-'}</td>
+                <td><strong>${esc(r.公司名称)}</strong></td>
+                <td>${esc(r.涉及订单号 || '-')}</td>
+                <td>${esc(r.存货名称 || '-')}</td>
+                <td>${esc(r.规格型号 || '-')}</td>
                 <td>¥${this.formatMoney(r.单价)}</td>
                 <td>${r.数量}</td>
-                <td>${r.到货时间 || '-'}</td>
-                <td><span class="tag ${r.延迟天数 >= 8 ? 'tag-danger' : 'tag-warning'}">${r.延迟天数 || 0} 天</span></td>
+                <td>${esc(r.到货时间 || '-')}</td>
+                <td><span class="tag ${parseFloat(r.延迟天数) >= 8 ? 'tag-danger' : 'tag-warning'}">${r.延迟天数 || 0} 天</span></td>
                 <td>${r.扣款比例 ? (parseFloat(r.扣款比例) * 100).toFixed(0) + '%' : '-'}</td>
                 <td><strong>¥${this.formatMoney(r.扣款金额)}</strong></td>
                 <td>${r.违约次数 || 0}</td>
-                <td>${r.备注 || '-'}</td>
+                <td>${esc(r.备注 || '-')}</td>
               </tr>
             `).join('')}
           </tbody>
