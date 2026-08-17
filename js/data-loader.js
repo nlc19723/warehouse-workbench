@@ -3,31 +3,28 @@
 // ============================================
 
 const DataLoader = {
-  filePath: 'data/库管系统.xlsx',
-
-  // 各工作表的精确表头行号（从0开始）
-  sheetHeaderRows: {
-    '供应商管理': 1,
-    '采购订单列表': 1,
-    '供货2023.9.1-新入库': 1,
-    '中心库房现存量': 1,
-    '库存预警数量': 2,
-    '订货': 2,
-    '供应商价格': 1,
-    '低周转材料': 2,
-    '违约台账': 2,
-    '对账功能': 2,
-    '订单跟踪列表': 0,  // 复杂结构，单独处理
-    '材料分类': 0,
-    '仪表盘': 0,
-    '统计数据': 0
-  },
+  // Excel 源文件相对路径（与 config.js 中的 app.dataPath 保持一致，避免两处硬编码不同步）
+  filePath: (typeof AppConfig !== 'undefined' && AppConfig.app && AppConfig.app.dataPath) || 'data/库管系统.xlsx',
 
   // 参与云端同步的数据表（meta 是元数据表，单独处理）
-  TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach', 'materialClass', 'monthlyStats', 'outbound'],
+  // 注：materialClass / monthlyStats 自 v1 起从未被任何 loader 写入，属死代码，已从同步范围移除
+  TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach', 'outbound'],
+
+  // 核心必填表（用于"完整性校验"）：这些表为空会直接导致页面/模块空白，必须非空。
+  // breach / outbound / materialClass / monthlyStats 可能合法为空（无违约记录、尚未录入出库单等），
+  // 不应作为强制条件，否则会误判"数据不完整"→ 每次刷新都强制重导、反复闪屏。
+  REQUIRED_TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover'],
 
   // 主入口：检查并导入数据（本地优先，云端异步）
   async init() {
+    // 🔴 重入保护（S2）：防止启动竞态或快速点击下 init 被并发调用，
+    // 导致重复清空+导入（数据清空风险）。单飞锁确保同一时刻仅执行一次。
+    if (this._initPromise) return this._initPromise;
+    this._initPromise = this._doInit().catch(err => { this._initPromise = null; throw err; });
+    return this._initPromise;
+  },
+
+  async _doInit() {
     // 1) 本地已有数据 → 立即显示，后台静默尝试云端同步
     const imported = await DataStore.isDataImported();
     if (imported) {
@@ -82,14 +79,14 @@ const DataLoader = {
   // 校验云端 bundle 是否包含全部 9 张核心表且都有数据
   // 任一张缺失或为空 → 视为不完整，避免用残缺数据覆盖内置 Excel 的权威数据
   _isBundleComplete(bundle) {
-    const coreTables = ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach'];
+    const coreTables = this.REQUIRED_TABLES;
     return coreTables.every(t => Array.isArray(bundle.tables[t]) && bundle.tables[t].length > 0);
   },
 
   // 校验本地库 9 张核心表是否都已有数据（防御云端部分还原）
   async _allCoreTablesPopulated() {
     try {
-      const coreTables = ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach'];
+      const coreTables = this.REQUIRED_TABLES;
       for (const t of coreTables) {
         const cnt = await db[t].count();
         if (!cnt) return false;
@@ -106,6 +103,11 @@ const DataLoader = {
       if (typeof SyncManager !== 'undefined') SyncManager.init();
     } catch (e) { return; }
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
+    // 显示同步中状态
+    const stEl = document.getElementById('syncStatusText');
+    const scEl = document.getElementById('syncStatus');
+    if (stEl) { stEl.textContent = '同步中…'; stEl.style.color = '#0284c7'; }
+    if (scEl) { scEl.classList.remove('online'); scEl.style.background = 'linear-gradient(135deg,rgba(2,132,199,0.12),rgba(14,165,233,0.08))'; }
     try {
       const bundle = await this._pullWithTimeout(8000);
       // 仅当云端 bundle 完整时才覆盖本地，避免用残缺数据污染本地
@@ -113,16 +115,28 @@ const DataLoader = {
         const localTime = await DataStore.getImportTime();
         if (!localTime || bundle.savedAt > localTime) {
           console.log('云端有更新，自动同步中...');
+          if (stEl) stEl.textContent = '更新中…';
           await this.loadBundleFromCloud(bundle);
           console.log('云端数据已更新，刷新视图');
-          if (typeof App !== 'undefined' && App.currentModule) {
+          // 仅当没有打开的弹窗/侧边面板时才重渲染当前模块，
+          // 避免后台同步把用户正在操作的对话框/抽屉"顶掉"或打断录入。
+          const modalOpen = document.getElementById('modalOverlay') && document.getElementById('modalOverlay').classList.contains('show');
+          const panelOpen = document.getElementById('panelOverlay') && document.getElementById('panelOverlay').classList.contains('show');
+          if (!modalOpen && !panelOpen && typeof App !== 'undefined' && App.currentModule) {
             App.go(App.currentModule);
+          } else {
+            console.log('后台同步已完成，但检测到有打开的弹窗/面板，跳过强制重渲染以避免打断操作');
           }
+        } else {
+          console.log('本地已是最新，无需更新');
         }
       }
     } catch (e) {
       console.warn('后台同步失败:', e.message || e);
     }
+    // 恢复正常状态
+    if (typeof SyncManager !== 'undefined') SyncManager.updateUI();
+    if (scEl) scEl.style.background = '';
   },
 
   // 带超时的云端拉取（防止网络请求卡死整个初始化）
@@ -234,16 +248,27 @@ const DataLoader = {
     }
   },
 
-  // 从 Excel 文件导入数据（首次启动，读取内置文件）
+  // 从 Excel 文件导入数据（首次启动，读取内置文件或用户替换的文件）
   async importFromExcel() {
     showLoading('正在读取 Excel 数据...');
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 30000);
-      const response = await fetch(this.filePath, { signal: controller.signal });
-      clearTimeout(timer);
-      if (!response.ok) throw new Error('无法读取 Excel 文件');
-      const arrayBuffer = await response.arrayBuffer();
+      let arrayBuffer;
+
+      // 优先使用用户替换的内置工作簿
+      const custom = await DataStore.getCustomWorkbook();
+      if (custom) {
+        arrayBuffer = custom;
+        console.log('[data-loader] 使用替换后的内置工作簿');
+      } else {
+        // 回退到原始内置文件
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 30000);
+        const response = await fetch(this.filePath, { signal: controller.signal });
+        clearTimeout(timer);
+        if (!response.ok) throw new Error('无法读取 Excel 文件');
+        arrayBuffer = await response.arrayBuffer();
+      }
+
       return await this.importFromArrayBuffer(arrayBuffer, '首次导入');
     } catch (err) {
       console.error('数据导入失败:', err);
@@ -255,7 +280,13 @@ const DataLoader = {
 
   // 核心导入逻辑：解析 arrayBuffer 并写入数据库
   async importFromArrayBuffer(arrayBuffer, label = '导入') {
-    showLoading('正在解析数据...');
+    // 🔴 重入保护（S2）：防止"重新导入"/"恢复内置"/"导入替换"并发调用导致重复清空+导入
+    if (this._importing) { console.warn('[data-loader] 已有导入进行中，忽略重复调用'); return false; }
+    this._importing = true;
+    try {
+      // 🔴 失效存货编码缓存（M3）：重新导入后，旧映射已失效，否则新数据下编码错乱
+      this._stockNameSpecCodeMap = null;
+      showLoading('正在解析数据...');
     let workbook;
     try {
       workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
@@ -303,6 +334,9 @@ const DataLoader = {
 
     hideLoading();
     return true;
+    } finally {
+      this._importing = false;
+    }
   },
 
   // 重新导入数据：支持上传 .xlsx / .xls 文件，或重新导入内置数据
@@ -317,23 +351,25 @@ const DataLoader = {
 
     modalTitle.textContent = '重新导入数据';
     modalBody.innerHTML = `
-      <div style="max-width:400px;">
+      <div style="width:100%;">
         <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:14px;line-height:1.5;">
           支持 <b>.xlsx</b>、<b>.xls</b> 与 <b>.xlsm</b> 格式。可上传新的数据文件覆盖当前数据，或重新导入系统内置的数据。
         </p>
-        <div style="margin-bottom:14px;">
-          <label style="display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:4px;">上传 Excel 文件（.xlsx / .xls / .xlsm）</label>
-          <div class="file-input-wrapper">
-            <input type="file" id="reimportFile" accept=".xlsx,.xls,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.ms-excel.sheet.macroEnabled.12"
-              onchange="document.getElementById('reimportFileName').textContent=this.files[0]?this.files[0].name:'未选择文件'">
-            <label for="reimportFile" class="file-input-label">📁 选择文件</label>
-            <span id="reimportFileName" class="file-input-name">未选择文件</span>
+        <div style="margin-bottom:18px;display:flex;justify-content:center;">
+          <div style="display:flex;flex-direction:column;align-items:center;">
+            <label style="font-size:11.5px;color:var(--text-secondary);margin-bottom:6px;">上传 Excel 文件（.xlsx / .xls / .xlsm）</label>
+            <div class="file-input-wrapper" style="justify-content:center;">
+              <input type="file" id="reimportFile" accept=".xlsx,.xls,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.ms-excel.sheet.macroEnabled.12"
+                onchange="document.getElementById('reimportFileName').textContent=this.files[0]?this.files[0].name:'未选择文件'">
+              <label for="reimportFile" class="file-input-label">📁 选择文件</label>
+              <span id="reimportFileName" class="file-input-name">未选择文件</span>
+            </div>
           </div>
         </div>
-        <div class="btn-group" style="border-top:none;margin-top:14px;padding-top:0;">
-          <button onclick="document.getElementById('modalOverlay').classList.remove('show')" class="btn-secondary" style="padding:7px 18px;font-size:12.5px;">取消</button>
-          <button onclick="DataLoader.reimportFromDefault()" class="btn-secondary" style="padding:7px 16px;font-size:12.5px;">🔄 重新导入内置数据</button>
-          <button onclick="DataLoader.reimportFromFile()" class="btn-primary" style="padding:7px 18px;">📤 上传并导入</button>
+        <div class="btn-group" style="border-top:none;margin-top:14px;padding-top:0;display:flex;gap:10px;justify-content:center;">
+          <button onclick="DataLoader.reimportFromDefault()" class="btn-secondary" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">🔄 重新导入内置</button>
+          <button onclick="DataLoader.replaceAndImportBuiltIn()" class="btn-primary" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">📥 导入替换内置</button>
+          <button onclick="DataLoader.reimportFromFile()" class="btn-primary" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">📤 上传并导入</button>
         </div>
       </div>
     `;
@@ -391,6 +427,75 @@ const DataLoader = {
     }
   },
 
+  // 导入替换内置数据：上传新 Excel → 存为新的内置工作簿 → 立即导入
+  async replaceAndImportBuiltIn() {
+    const fileInput = document.getElementById('reimportFile');
+    if (!fileInput || !fileInput.files || !fileInput.files.length) {
+      alert('请先选择一个 Excel 文件作为替换的内置数据源');
+      return;
+    }
+    const file = fileInput.files[0];
+    const name = (file.name || '').toLowerCase();
+    if (!name.endsWith('.xlsx') && !name.endsWith('.xls') && !name.endsWith('.xlsm')) {
+      alert('仅支持 .xlsx、.xls 或 .xlsm 格式');
+      return;
+    }
+
+    try {
+      showLoading('正在读取并存储替换工作簿...');
+      const arrayBuffer = await file.arrayBuffer();
+
+      // 1) 先校验文件能否正常解析（避免存入损坏文件）
+      XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
+
+      // 2) 存储到 IndexedDB 作为新的"内置数据"
+      await DataStore.saveCustomWorkbook(arrayBuffer);
+      console.log('[data-loader] 替换工作簿已保存 (' + (arrayBuffer.byteLength / 1024 / 1024).toFixed(1) + ' MB)');
+
+      // 3) 立即从该文件导入
+      showLoading('正在从替换工作簿导入数据...');
+      const ok = await this.importFromArrayBuffer(arrayBuffer, '替换导入');
+
+      if (ok) {
+        document.getElementById('modalOverlay').classList.remove('show');
+        alert('✅ 内置数据已替换并导入成功！\n后续"重新导入内置"将使用此新文件。\n如需恢复原始文件，可在设置中清除。');
+        if (typeof App !== 'undefined' && App.currentModule) {
+          App.go(App.currentModule);
+        }
+      }
+    } catch (err) {
+      console.error('替换导入失败:', err);
+      hideLoading();
+      if (err.message.includes('解析失败') || err.message.includes('不支持')) {
+        alert('文件解析失败，请确认是有效的 .xlsx / .xls / .xlsm 文件');
+      } else {
+        alert('替换导入失败: ' + err.message);
+      }
+    }
+  },
+
+  // 恢复原始内置数据：清除用户替换的工作簿后，重新导入系统内置文件
+  // （importFromExcel 会先检查替换工作簿，清除后自动回退到原始内置文件）
+  async restoreBuiltIn() {
+    try {
+      showLoading('正在恢复原始内置数据...');
+      await DataStore.clearCustomWorkbook();
+      const ok = await this.importFromExcel();
+      if (ok) {
+        const modalOverlay = document.getElementById('modalOverlay');
+        if (modalOverlay) modalOverlay.classList.remove('show');
+        alert('✅ 已恢复为原始内置数据！');
+        if (typeof App !== 'undefined' && App.currentModule) {
+          App.go(App.currentModule);
+        }
+      }
+    } catch (err) {
+      console.error('恢复原始内置数据失败:', err);
+      hideLoading();
+      alert('恢复失败: ' + err.message);
+    }
+  },
+
   // 各工作表表头的"标志性列名"——用于自动探测表头行，避免硬编码行号
   // 背景：SheetJS 解析时会剥离顶部连续空行，而内置 Excel 的第1行常带隐藏格式残留
   // （合并单元格/打印区域等），导致"同一 Excel 行号"在解析数组中错位一格。
@@ -407,8 +512,7 @@ const DataLoader = {
     '库存预警数量': ['仓库名称', '近一年月均入库量', '最低库存预警'],
     '订货': ['存货编码', '主计量', '在途订单', '低周转'],
     '供应商价格': ['供应商', '存货编码', '含税单价', '生效日期'],
-    '低周转材料': ['存货编码', '现存数量', '暂无法使用量'],
-    '对账功能': ['入库单号', '原币价税合计', '供应商']
+    '低周转材料': ['存货编码', '现存数量', '暂无法使用量']
   },
 
   // 在前若干行内自动探测"含标志性列名最多的那一行"作为表头行
@@ -506,7 +610,7 @@ const DataLoader = {
       招采部门: r['招采部门'] || '',
       询价反馈时间: this.recoverExcelDate(r['询价反馈时间']),
       未入库金额: this.parseNum(r['未入库金额'])
-    })).filter(r => r.供应商);
+    })).filter(r => r.供应商).map(r => this._cleanRecord(r));
 
     // 若已入库金额全为0，从入库表按供应商汇总补全
     const allZeroInbound = clean.length > 0 && clean.every(s => !s.年度已供入库金额 || s.年度已供入库金额 === 0);
@@ -566,7 +670,7 @@ const DataLoader = {
       审核人: r['审核人'] || '',
       已下单时间: (r['已下单时间'] && r['已下单时间'] !== '0') ? this.recoverExcelDate(r['已下单时间']) : '',
       未入总金额: this.parseNum(r['未入总金额'])
-    })).filter(r => r.订单编号);
+    })).filter(r => r.订单编号).map(r => this._cleanRecord(r));
 
     await this.bulkAddSafe(db.orders, clean);
     console.log(`订单数据导入完成: ${clean.length} 条`);
@@ -596,7 +700,7 @@ const DataLoader = {
       原币税额: this.parseNum(r['原币税额']),
       税率: this.parseNum(r['税率']),
       实际到货日期: this.recoverExcelDate(r['实际到货日期'])
-    })).filter(r => r.入库单号 || r.存货名称);
+    })).filter(r => r.入库单号 || r.存货名称).map(r => this._cleanRecord(r));
 
     await this.bulkAddSafe(db.inbound, clean);
     console.log(`入库数据导入完成: ${clean.length} 条`);
@@ -613,7 +717,7 @@ const DataLoader = {
       规格型号: r['规格型号'] ? String(r['规格型号']) : '',
       现存数量: this.parseNum(r['现存数量']),
       数据更新时间: this.recoverExcelDate(r['数据更新时间']) || '2026-08-03'
-    })).filter(r => r.存货编码 || r.存货名称);
+    })).filter(r => r.存货编码 || r.存货名称).map(r => this._cleanRecord(r));
 
     await this.bulkAddSafe(db.stock, clean);
     console.log(`库存数据导入完成: ${clean.length} 条`);
@@ -623,15 +727,8 @@ const DataLoader = {
   async loadInventoryAlerts(workbook) {
     showLoading('正在导入库存预警数据...');
 
-    // ===== 先获取原始2D数组做诊断 =====
     const sheet = workbook.Sheets['库存预警数量'];
     if (!sheet) { console.warn('[data-loader] ⚠️ 工作表"库存预警数量"不存在！可用工作表:', Object.keys(workbook.Sheets)); return; }
-    const raw2D = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-    console.log('[data-loader] 📊 原始2D数组总行数:', raw2D.length);
-    console.log('[data-loader] 📊 前6行原始数据:');
-    for (let i = 0; i < Math.min(6, raw2D.length); i++) {
-      console.log(`[data-loader]   行${i}(${raw2D[i].length}列):`, JSON.stringify(raw2D[i]));
-    }
 
     // 用 parseSheet 解析（headerRow=4 → 第5行=表头）
     const rows = this.parseSheet(workbook, '库存预警数量', 4);
@@ -639,8 +736,7 @@ const DataLoader = {
 
     const sampleRow = rows[0] || {};
     const allKeys = Object.keys(sampleRow);
-    console.log('[data-loader] 📋 解析后列名(', allKeys.length, '个):', JSON.stringify(allKeys));
-    console.log('[data-loader] 📋 首行数据值:', JSON.stringify(sampleRow));
+    console.log(`[data-loader] 库存预警: 解析出 ${allKeys.length} 个列`);
 
     // ===== 现存量列 =====
     const stockKey = allKeys.find((k, i) => {
@@ -660,7 +756,6 @@ const DataLoader = {
         .replace(/[\u200B-\u200D\uFEFF\u00A0\u3000]/g, '').replace(/\s+/g, ' ');
       if (ck.includes('补货') || ck.includes('需补') || ck === '是否需补货' || ck === '补货值') {
         restockKey = allKeys[i];
-        console.log(`[data-loader] ✅ 名称匹配成功: 列${i}="${allKeys[i]}"(清理后="${ck}")`);
         break;
       }
     }
@@ -668,15 +763,6 @@ const DataLoader = {
     // 方法B：如果名称匹配失败，强制用第10列(J列, index=9)
     if (!restockKey && allKeys.length >= 10) {
       restockKey = allKeys[9];
-      console.log(`[data-loader] ✅ 强制J列兜底: 列9="${restockKey}"`);
-    }
-
-    // 最终检查：打印前10行的补货值
-    console.log('[data-loader] 🔍 补货值列最终使用:', restockKey, '| 前10行该列值:');
-    for (let ri = 0; ri < Math.min(10, rows.length); ri++) {
-      const rawVal = restockKey ? rows[ri][restockKey] : '(无列)';
-      const parsedVal = this.parseNum(rawVal);
-      console.log(`[data-loader]   行${ri}: 原始=${rawVal} → 解析后=${parsedVal}`);
     }
 
     const clean = rows.map(r => {
@@ -708,12 +794,9 @@ const DataLoader = {
       };
     }).filter(r => r.存货编码 || r.存货名称);
 
-    // ===== 补货值统计（关键诊断）=====
+    // ===== 补货值统计（汇总）=====
     const withRestock = clean.filter(r => r.补货值 > 0);
-    console.log(`[data-loader] 📊 库存预警导入: 总${clean.length}条, 补货值>0的有${withRestock.length}条`);
-    if (withRestock.length > 0) {
-      console.log(`[data-loader] 📊 前3条补货值样本:`, withRestock.slice(0, 3).map(r => ({ 编码: r.存货编码, 名称: r.存货名称, 补货值: r.补货值 })));
-    }
+    console.log(`[data-loader] 库存预警: 总 ${clean.length} 条, 补货值>0 的有 ${withRestock.length} 条`);
 
     // 若现存量仍全为0，从库存表(中心库房现存量)交叉补全
     const allZero = clean.length > 0 && clean.every(r => !r.现存量 || r.现存量 === 0);
@@ -740,11 +823,9 @@ const DataLoader = {
 
     await this.bulkAddSafe(db.inventoryAlerts, clean);
     const restockPositive = clean.filter(r => r.补货值 > 0);
-    console.log(`库存预警数据导入完成: ${clean.length} 条, 补货值>0的有 ${restockPositive.length} 条`);
-    if (restockPositive.length > 0) {
-      console.log(`[data-loader] 前3条补货样本:`, restockPositive.slice(0, 3).map(r => `${r.存货名称 || r.存货编码}=${r.补货值}`).join(', '));
-    } else {
-      console.warn('[data-loader] ⚠️ 补货值全部为0！请检查控制台 [data-loader] 日志');
+    console.log(`库存预警数据导入完成: 总 ${clean.length} 条, 补货值>0 的有 ${restockPositive.length} 条`);
+    if (restockPositive.length === 0) {
+      console.warn('[data-loader] ⚠️ 补货值全部为0！请检查源数据"是否需补货"列');
     }
   },
 
@@ -862,6 +943,17 @@ const DataLoader = {
       });
     }
 
+    // 计算扣款比例（按延迟天数查规则表）与违约次数（按公司名称聚合的违约记录数）
+    clean.forEach(r => this._cleanRecord(r));
+    const companyCountMap = new Map();
+    clean.forEach(r => {
+      if (r.公司名称) companyCountMap.set(r.公司名称, (companyCountMap.get(r.公司名称) || 0) + 1);
+    });
+    clean.forEach(r => {
+      r.扣款比例 = this._calcBreachRatio(r.延迟天数);
+      r.违约次数 = companyCountMap.get(r.公司名称) || 0;
+    });
+
     await this.bulkAddSafe(db.breach, clean);
     console.log(`违约数据导入完成: ${clean.length} 条, 首条延迟天数=${clean.length > 0 ? clean[0].延迟天数 : '无'}`);
   },
@@ -872,6 +964,80 @@ const DataLoader = {
     if (typeof val === 'number') return val;
     const parsed = parseFloat(String(val).replace(/,/g, ''));
     return isNaN(parsed) ? 0 : parsed;
+  },
+
+  // 违约扣款比例计算：按延迟天数查规则表
+  // 规则：不满2天按2天计算(5%)；大于2天不满4天按4天(10%)；
+  //      大于4天不满6天按6天(15%)；大于6天不满8天按8天(20%)；8天及以上20%
+  _calcBreachRatio(delayDays) {
+    const d = this.parseNum(delayDays);
+    if (!d || d <= 0) return 0;
+    // 向上取整到最近的偶数（2/4/6/8），并封顶 8 天
+    let bucket = Math.ceil(d / 2) * 2;
+    bucket = Math.min(bucket, 8);
+    const ratioMap = { 2: 5, 4: 10, 6: 15, 8: 20 };
+    return ratioMap[bucket] || 0;
+  },
+
+  // 统一值清洗：去除所有空白字符（含不可见字符、全角/半角空格）+ trim
+  // 解决 Excel 导入值含空格导致搜索"兴乐"匹配失败的问题
+  _cleanVal(v) {
+    if (v === null || v === undefined) return '';
+    if (typeof v !== 'string') return v;
+    return v.replace(/[\s\u200B-\u200D\uFEFF\u00A0\u1680\u180E\u2000-\u200A\u2028-\u2029\u202F\u205F\u3000]+/g, '').trim();
+  },
+
+  // 清洗记录中所有字符串字段（在 import map 后统一调用）
+  _cleanRecord(rec) {
+    if (!rec || typeof rec !== 'object') return rec;
+    for (const key of Object.keys(rec)) {
+      const v = rec[key];
+      if (typeof v === 'string') rec[key] = this._cleanVal(v);
+    }
+    return rec;
+  },
+
+  // ============================================
+  // 存货编码查找工具（基于现存量基础档案）
+  // ============================================
+  // 缓存：(存货名称|规格型号) → 存货编码 的映射 Map
+  _stockNameSpecCodeMap: null,
+
+  // 构建/获取映射（懒加载，首次调用时从 db.stock 构建）
+  async getStockNameSpecCodeMap() {
+    if (this._stockNameSpecCodeMap) return this._stockNameSpecCodeMap;
+    const rows = await db.stock.toArray();
+    const map = new Map();
+    rows.forEach(s => {
+      if (s.存货名称) {
+        const key = TableUtils.buildStockKey(s.存货名称, s.规格型号);
+        if (key && s.存货编码) map.set(key, String(s.存货编码));
+      }
+    });
+    this._stockNameSpecCodeMap = map;
+    console.log('[DataLoader] 存货编码映射构建完成: ' + map.size + ' 条');
+    return map;
+  },
+
+  // 便捷查询：根据存货名称+规格型号返回存货编码
+  // 用于订单跟踪、订单列表等没有原生存货编码字段的模块
+  async getStockCode(存货名称, 规格型号) {
+    const map = await this.getStockNameSpecCodeMap();
+    const key = TableUtils.buildStockKey(存货名称, 规格型号);
+    return map.get(key) || '';
+  },
+
+  // 批量填充：对一组记录数组，按(存货名称+规格型号)查表填入 _存货编码 字段
+  // 返回原数组引用（就地修改，不创建新数组）
+  async enrichWithStockCode(records) {
+    const map = await this.getStockNameSpecCodeMap();
+    records.forEach(r => {
+      if (r.存货名称) {
+        const key = TableUtils.buildStockKey(r.存货名称, r.规格型号);
+        r._存货编码 = map.get(key) || '';
+      }
+    });
+    return records;
   },
 
   // 工具方法：从 Excel 单元格值还原正确的日期字符串

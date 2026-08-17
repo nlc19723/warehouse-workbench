@@ -21,7 +21,7 @@ const OrdersModule = {
     content.innerHTML = `
       <div class="filter-bar" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;padding:0;align-items:flex-start;">
         <div class="filter-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
-          <input type="text" id="orderKw" class="filter-search-short" placeholder="搜索订单编号、供应商、物料..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')OrdersModule.applyFilter()">
+          <input type="text" id="orderKw" class="filter-search-short" placeholder="搜索订单编号、供应商、存货名称..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')OrdersModule.applyFilter()">
           <input type="date" id="orderStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date" title="起始日期">
           <span class="filter-sep">至</span>
           <input type="date" id="orderEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date" title="结束日期">
@@ -103,8 +103,6 @@ const OrdersModule = {
       </div>
     `;
 
-    this.allOrders = allOrders;
-    this.totalCount = uniqueTotal;
     this.currentPage = 1;
     this.renderTable();
     this.renderTrendChart(filteredOrders);
@@ -119,7 +117,7 @@ const OrdersModule = {
       if (f.项目名称) result = result.filter(o => o.项目名称 === f.项目名称);
       if (f.审批状态) result = result.filter(o => o.审批状态 === f.审批状态);
       if (f.keyword) {
-        const kw = f.keyword.toLowerCase();
+        const kw = f.keyword.toLowerCase().replace(/\s+/g, '');
         result = result.filter(o =>
           (o.订单编号 && o.订单编号.toLowerCase().includes(kw)) ||
           (o.供应商 && o.供应商.toLowerCase().includes(kw)) ||
@@ -140,7 +138,18 @@ const OrdersModule = {
 
   async renderTable() {
     const result = await DataStore.getOrders(this.currentFilter, this.currentPage, this.pageSize);
-    const { items, totalPages } = result;
+    let { items, totalPages } = result;
+
+    // 从现存量基础档案匹配填充存货编码
+    if (typeof DataLoader !== 'undefined' && items.length > 0) {
+      const codeMap = await DataLoader.getStockNameSpecCodeMap();
+      items.forEach(o => {
+        if (o.存货名称) {
+          const key = (o.存货名称 + '|' + (o.规格型号 || '')).replace(/\s+/g, '');
+          o._存货编码 = codeMap.get(key) || '';
+        }
+      });
+    }
 
     const area = document.getElementById('orderTableArea');
     if (items.length === 0) {
@@ -158,12 +167,13 @@ const OrdersModule = {
               <th>日期</th>
               <th>供应商</th>
               <th>项目</th>
-              <th>物料</th>
-              <th>规格</th>
-              <th>数量</th>
-              <th>未入库</th>
-              <th>单价</th>
-              <th>金额</th>
+              <th>存货编码</th>
+              <th>存货名称</th>
+              <th>规格型号</th>
+              <th>订单量</th>
+              <th>未入库订单量</th>
+              <th>含税单价</th>
+              <th>含税金额</th>
               <th>状态</th>
             </tr>
           </thead>
@@ -171,16 +181,17 @@ const OrdersModule = {
             ${items.map(o => `
               <tr>
                 <td><strong>${esc(o.订单编号)}</strong></td>
-                <td>${esc(o.日期 || '-')}</td>
-                <td>${esc(o.供应商 || '-')}</td>
-                <td>${esc(o.项目名称 || '-')}</td>
-                <td>${esc(o.存货名称 || '-')}</td>
-                <td>${esc(o.规格型号 || '-')}</td>
+                <td>${esc(o.日期 ?? '')}</td>
+                <td>${esc(o.供应商 ?? '')}</td>
+                <td>${esc(o.项目名称 ?? '')}</td>
+                <td>${esc(o._存货编码 ?? '')}</td>
+                <td>${esc(o.存货名称 ?? '')}</td>
+                <td>${esc(o.规格型号 ?? '')}</td>
                 <td>${o.数量}</td>
                 <td>${parseFloat(o.未入库量) > 0 ? `<span class="tag tag-warning">${o.未入库量}</span>` : '0'}</td>
                 <td>${this.formatMoney(o.原币含税单价)}</td>
                 <td>${this.formatMoney(o.原币价税合计)}</td>
-                <td>${o.审批状态 ? `<span class="tag ${o.审批状态 === '审批通过' ? 'tag-success' : 'tag-neutral'}">${esc(o.审批状态)}</span>` : '-'}</td>
+                <td>${o.审批状态 ? `<span class="tag ${o.审批状态 === '审批通过' ? 'tag-success' : 'tag-neutral'}">${esc(o.审批状态)}</span>` : ''}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -354,7 +365,7 @@ const OrdersModule = {
 
   applyFilter() {
     this.currentFilter = {
-      keyword: document.getElementById('orderKw').value.trim(),
+      keyword: (document.getElementById('orderKw').value.trim() || '').replace(/\s+/g, ''),
       供应商: document.getElementById('orderSupplier').value,
       项目名称: document.getElementById('orderProject').value,
       审批状态: document.getElementById('orderStatus').value,
@@ -379,15 +390,12 @@ const OrdersModule = {
 
   async exportData() {
     const result = await DataStore.getOrders(this.currentFilter, 1, 100000);
-    if (result.items.length === 0) { alert('没有数据'); return; }
-    const ws = XLSX.utils.json_to_sheet(result.items);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '订单列表');
-    XLSX.writeFile(wb, `订单列表_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // 🟢 O1：统一导出（行为与原逻辑一致）
+    TableUtils.exportToExcel(result.items, `订单列表_${new Date().toISOString().split('T')[0]}.xlsx`, '订单列表');
   },
 
   formatMoney(num) {
-    if (!num) return '-';
+    if (num == null || num === '') return '';
     return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
   }
 };

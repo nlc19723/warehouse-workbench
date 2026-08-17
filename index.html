@@ -10,12 +10,33 @@
   <link rel="manifest" href="manifest.json?v=2">
   <meta name="theme-color" content="#357ABD">
   <title>库管系统工作台</title>
-  <link rel="stylesheet" href="css/style.css?v=79">
+  <link rel="stylesheet" href="css/style.css?v=101">
   <script defer src="lib/dexie.min.js?v=55"></script>
   <script defer src="lib/chart.min.js?v=55"></script>
   <script defer src="lib/xlsx.full.min.js?v=55"></script>
   <script defer src="lib/supabase.min.js?v=55"></script>
-</head>
+<script src="https://beacon.cdn.qq.com/sdk/4.5.9/beacon_web.min.js"></script>
+<script>
+(function(){
+  try{
+    var beacon=new BeaconAction({
+      appkey:'0WEB06U85YBSLJNL',
+      versionCode:'1.0.0',
+      channelID:'share',
+      delay:1000,
+      sessionDuration:30*60*1000,
+      isOversea:false,
+      needReportRqdEvent:false
+    });
+    beacon.onDirectUserAction('preview_page_view',{
+      'url':location.href,
+      'referrer':document.referrer,
+      'title':document.title,
+      'sandbox_id':'c430b5fce1834633aeee2e5bbe763daa'
+    });
+  }catch(e){}
+})();
+</script></head>
 <body>
   <div class="app-container" id="appContainer">
     <!-- 固定左侧功能栏 -->
@@ -108,7 +129,7 @@
           <span class="item-icon">⚙️</span><span class="item-text">设置</span>
         </a>
         <a class="sidebar-item" id="sourceDownloadBtn" href="javascript:void(0)" title="下载工作台源代码">
-          <span class="item-icon">📦</span><span class="item-text">源代码下载</span>
+          <span class="item-icon">📦</span><span class="item-text">源码</span>
         </a>
       </div>
     </aside>
@@ -200,25 +221,25 @@
   </div>
 
   <script defer src="lib/jszip.min.js?v=1"></script>
-  <script defer src="js/table-utils.js?v=79"></script>
-  <script defer src="js/db.js?v=79"></script>
-  <script defer src="js/config.js?v=79"></script>
-  <script defer src="js/sync.js?v=79"></script>
-  <script defer src="js/data-loader.js?v=79"></script>
-  <script defer src="js/dashboard.js?v=79"></script>
-  <script defer src="js/supplier.js?v=79"></script>
-  <script defer src="js/query.js?v=79"></script>
-  <script defer src="js/reconciliation.js?v=79"></script>
-  <script defer src="js/order-track.js?v=79"></script>
-  <script defer src="js/inventory-alert.js?v=79"></script>
-  <script defer src="js/orders.js?v=79"></script>
-  <script defer src="js/inbound.js?v=79"></script>
-  <script defer src="js/stock.js?v=79"></script>
-  <script defer src="js/pricing.js?v=79"></script>
-  <script defer src="js/low-turnover.js?v=79"></script>
-  <script defer src="js/breach.js?v=79"></script>
-  <script defer src="js/outbound.js?v=79"></script>
-  <script defer src="js/app.js?v=79"></script>
+  <script defer src="js/table-utils.js?v=101"></script>
+  <script defer src="js/db.js?v=101"></script>
+  <script defer src="js/config.js?v=101"></script>
+  <script defer src="js/sync.js?v=101"></script>
+  <script defer src="js/data-loader.js?v=101"></script>
+  <script defer src="js/dashboard.js?v=101"></script>
+  <script defer src="js/supplier.js?v=101"></script>
+  <script defer src="js/query.js?v=101"></script>
+  <script defer src="js/reconciliation.js?v=101"></script>
+  <script defer src="js/order-track.js?v=101"></script>
+  <script defer src="js/inventory-alert.js?v=101"></script>
+  <script defer src="js/orders.js?v=101"></script>
+  <script defer src="js/inbound.js?v=101"></script>
+  <script defer src="js/stock.js?v=101"></script>
+  <script defer src="js/pricing.js?v=101"></script>
+  <script defer src="js/low-turnover.js?v=101"></script>
+  <script defer src="js/breach.js?v=101"></script>
+  <script defer src="js/outbound.js?v=101"></script>
+  <script defer src="js/app.js?v=101"></script>
   <!-- PWA: 注册 Service Worker（支持离线 + 安装为桌面应用） -->
   <script>
     if ('serviceWorker' in navigator) {
@@ -306,7 +327,7 @@
 
       // CDN 通常屏蔽以 . 开头的文件(返回403)，内嵌其内容作为兜底
       var DOTFILE_FALLBACKS = {
-        '.gitignore': '# OS / editor junk\n.DS_Store\nThumbs.db\n*.swp\n\n# Node (not used, but safe)\nnode_modules/\n\n# Local-only / large working assets not needed for the live site\nscreenshots/\n',
+        '.gitignore': '# OS / editor junk\n.DS_Store\nThumbs.db\n*.swp\n\n# Node (not used, but safe)\nnode_modules/\n\n# Local-only / large working assets not needed for the live site\nscreenshots/\n\n# 旧的静态源码包（已被动态打包取代，且含修复前的旧代码，禁止再提交/发布）\nsource-code.zip\n',
         '.github/workflows/deploy.yml': 'name: Deploy to GitHub Pages\n\non:\n  push:\n    branches: [main]\n  workflow_dispatch:\n\npermissions:\n  contents: read\n  pages: write\n  id-token: write\n\nconcurrency:\n  group: github-pages\n  cancel-in-progress: true\n\njobs:\n  deploy:\n    environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}\n    runs-on: ubuntu-latest\n    steps:\n      - name: Checkout\n        uses: actions/checkout@v4\n\n      - name: Setup Pages\n        uses: actions/configure-pages@v5\n\n      - name: Upload artifact\n        uses: actions/upload-pages-artifact@v3\n        with:\n          path: .\n\n      - name: Deploy to GitHub Pages\n        id: deployment\n        uses: actions/deploy-pages@v4\n',
         '.gitlab-ci.yml': '# GitLab Pages 部署配置 —— 把静态文件发布为网站\npages:\n  stage: deploy\n  script:\n    - echo "静态站点，无需构建，直接发布"\n  artifacts:\n    paths:\n      - .\n    expire_in: 1 day\n  rules:\n    - if: $CI_COMMIT_BRANCH == "main"\n',
         '.nojekyll': ''

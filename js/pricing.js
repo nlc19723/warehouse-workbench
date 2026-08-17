@@ -108,8 +108,8 @@ const PricingModule = {
               <th>供应商</th>
               <th>类型</th>
               <th>存货编码</th>
-              <th>物料</th>
-              <th>规格</th>
+              <th>存货名称</th>
+              <th>规格型号</th>
               <th>单位</th>
               <th>含税单价</th>
               <th>税率</th>
@@ -131,17 +131,17 @@ const PricingModule = {
               }
               return `
                 <tr>
-                  <td>${esc(p.供应商 || '-')}</td>
-                  <td>${esc(p.类型 || '-')}</td>
-                  <td>${esc(p.存货编码 || '-')}</td>
+                  <td>${esc(p.供应商 ?? '')}</td>
+                  <td>${esc(p.类型 ?? '')}</td>
+                  <td>${esc(p.存货编码 ?? '')}</td>
                   <td><strong>${esc(p.存货名称)}</strong></td>
-                  <td>${esc(p.规格型号 || '-')}</td>
-                  <td>${esc(p.主计量 || '-')}</td>
+                  <td>${esc(p.规格型号 ?? '')}</td>
+                  <td>${esc(p.主计量 ?? '')}</td>
                   <td><strong>¥${this.formatMoney(p.含税单价)}</strong></td>
-                  <td>${p.税率 ? esc(p.税率) + '%' : '-'}</td>
+                  <td>${p.税率 ? esc(p.税率) + '%' : ''}</td>
                   <td>¥${this.formatMoney(p.单价)}</td>
-                  <td>${esc(p.生效日期 || '-')}</td>
-                  <td>${p.失效日期 || '-'}</td>
+                  <td>${esc(p.生效日期 ?? '')}</td>
+                  <td>${esc(p.失效日期 ?? '')}</td>
                   <td>${status}</td>
                 </tr>
               `;
@@ -200,15 +200,12 @@ const PricingModule = {
   goPage(p) { this.currentPage = p; this.renderTable(); },
 
   exportData() {
-    if (!this.currentData || this.currentData.length === 0) { alert('没有数据'); return; }
-    const ws = XLSX.utils.json_to_sheet(this.currentData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '合同价格');
-    XLSX.writeFile(wb, `合同价格_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // 🟢 O1：统一导出（行为与原逻辑一致）
+    TableUtils.exportToExcel(this.currentData, `合同价格_${new Date().toISOString().split('T')[0]}.xlsx`, '合同价格');
   },
 
   formatMoney(num) {
-    if (!num) return '-';
+    if (num == null || num === '') return '';
     return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
   }
 };

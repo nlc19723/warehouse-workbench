@@ -75,8 +75,7 @@ const ReconciliationModule = {
     const summary = {};
     inbound.forEach(i => {
       const key = i.供应商 || '未知';
-      if (!summary[key]) summary[key] = { count: 0, qty: 0, amount: 0, uniqueNos: new Set() };
-      summary[key].count += 1;
+      if (!summary[key]) summary[key] = { qty: 0, amount: 0, uniqueNos: new Set() };
       summary[key].qty += parseFloat(i.数量) || 0;
       summary[key].amount += parseFloat(i.原币价税合计) || 0;
       if (i.入库单号) summary[key].uniqueNos.add(i.入库单号);
@@ -92,14 +91,14 @@ const ReconciliationModule = {
           <div class="glass-card-header"><span class="glass-card-title"><span class="title-icon">📊</span>按供应商汇总</span></div>
           <div class="table-wrapper" style="max-height:260px;">
             <table class="data-table">
-              <thead><tr><th>供应商</th><th>入库单数</th><th>数量</th><th>金额(元)</th><th>占比</th></tr></thead>
+              <thead><tr><th>供应商</th><th>入库单数</th><th>入库量</th><th>金额(元)</th><th>占比</th></tr></thead>
               <tbody>${supplierList.map(([name, info]) => `
                 <tr>
                   <td><strong>${esc(name)}</strong></td>
                   <td>${info.uniqueNos.size}</td>
                   <td>${this.formatNum(info.qty)}</td>
                   <td>${this.formatMoney(info.amount)}</td>
-                  <td>${totalAmount > 0 ? ((info.amount / totalAmount) * 100).toFixed(1) + '%' : '-'}</td>
+                  <td>${totalAmount > 0 ? ((info.amount / totalAmount) * 100).toFixed(1) + '%' : ''}</td>
                 </tr>
               `).join('')}</tbody>
             </table>
@@ -143,16 +142,17 @@ const ReconciliationModule = {
       <div class="table-wrapper">
         <table class="data-table">
           <thead>
-            <tr><th>入库日期</th><th>入库单号</th><th>供应商</th><th>物料</th><th>规格</th><th>数量</th><th>含税单价</th><th>金额</th></tr>
+            <tr><th>入库日期</th><th>入库单号</th><th>供应商</th><th>存货编码</th><th>存货名称</th><th>规格型号</th><th>入库量</th><th>含税单价</th><th>含税金额</th></tr>
           </thead>
           <tbody>
             ${items.map(i => `
               <tr>
-                <td>${esc(i.入库日期 || '-')}</td>
-                <td>${esc(i.入库单号 || '-')}</td>
-                <td>${esc(i.供应商 || '-')}</td>
-                <td>${esc(i.存货名称 || '-')}</td>
-                <td>${esc(i.规格型号 || '-')}</td>
+                <td>${esc(i.入库日期 ?? '')}</td>
+                <td>${esc(i.入库单号 ?? '')}</td>
+                <td>${esc(i.供应商 ?? '')}</td>
+                <td>${esc(i.存货编码 ?? '')}</td>
+                <td>${esc(i.存货名称 ?? '')}</td>
+                <td>${esc(i.规格型号 ?? '')}</td>
                 <td>${i.数量}</td>
                 <td>${this.formatMoney(i.原币含税单价)}</td>
                 <td>${this.formatMoney(i.原币价税合计)}</td>
@@ -206,11 +206,8 @@ const ReconciliationModule = {
   },
 
   exportData() {
-    if (!this.currentData || this.currentData.length === 0) { alert('没有数据可导出'); return; }
-    const ws = XLSX.utils.json_to_sheet(this.currentData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '对账单');
-    XLSX.writeFile(wb, `对账单_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // 🟢 O1：统一导出（行为与原逻辑一致）
+    TableUtils.exportToExcel(this.currentData, `对账单_${new Date().toISOString().split('T')[0]}.xlsx`, '对账单');
   },
 
   // ===== 供应商近6月供货金额趋势图 =====
@@ -311,7 +308,7 @@ const ReconciliationModule = {
   },
 
   formatMoney(num) {
-    if (!num) return '-';
+    if (num == null || num === '') return '';
     return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
   },
 

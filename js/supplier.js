@@ -117,6 +117,7 @@ const SupplierModule = {
             <tr>
               <th>类型</th>
               <th>供应商</th>
+              <th>合同年限</th>
               <th>合同到期日</th>
               <th>剩余天数</th>
               <th>合同金额(元)</th>
@@ -135,16 +136,28 @@ const SupplierModule = {
                 else if (days <= 30) { daysTag = `<span class="tag tag-warning">${days}天</span>`; }
                 else daysTag = `<span class="tag tag-success">${days}天</span>`;
               }
+              const ratio = s.年度已供入库金额占比 || 0;
+              const pct = Math.round(ratio * 100);
+              // 颜色规则：<60%草绿色，60-80%蛋黄色，>80%暗红色
+              const barClass = pct >= 80 ? 'danger' : pct >= 60 ? 'warning' : '';
               return `
                 <tr>
-                  <td>${esc(s.类型 || '-')}</td>
+                  <td>${esc(s.类型 ?? '')}</td>
                   <td><strong>${esc(s.供应商)}</strong></td>
-                  <td>${esc(s.年度合同到期时间 || '-')}</td>
-                  <td>${daysTag || '-'}</td>
+                  <td>${esc(s.合同年限 ?? '')}</td>
+                  <td>${esc(s.年度合同到期时间 ?? '')}</td>
+                  <td>${daysTag || ''}</td>
                   <td>${this.formatMoney(s.年度合同金额)}</td>
                   <td>${this.formatMoney(s.年度已供入库金额)}</td>
-                  <td>${s.年度已供入库金额占比 ? (s.年度已供入库金额占比 * 100).toFixed(1) + '%' : '-'}</td>
-                  <td>${esc(s.招采部门 || '-')}</td>
+                  <td>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      <div class="progress-bar" style="width:70px;">
+                        <div class="progress-fill ${barClass}" style="width:${pct}%;"></div>
+                      </div>
+                      <span style="font-size:11px;color:var(--text-secondary);min-width:36px;">${pct}%</span>
+                    </div>
+                  </td>
+                  <td>${esc(s.招采部门 ?? '')}</td>
                   <td><button onclick="SupplierModule.viewDetail(${JSON.stringify(s.id)})" style="border:none;background:var(--accent-mint-light);color:var(--primary-deep);cursor:pointer;border-radius:8px;padding:4px 12px;font-size:12px;">详情</button></td>
                 </tr>
               `;
@@ -264,47 +277,167 @@ const SupplierModule = {
     const supplier = await db.suppliers.get(id);
     if (!supplier) return;
 
-    const [orders, inbound] = await Promise.all([
-      db.orders.where('供应商').equals(supplier.供应商).limit(50).toArray(),
-      db.inbound.where('供应商').equals(supplier.供应商).limit(50).toArray()
+    // 获取该供应商的全部订单和入库记录，按日期降序取最近10条
+    const [allOrders, allInbound] = await Promise.all([
+      db.orders.where('供应商').equals(supplier.供应商).toArray(),
+      db.inbound.where('供应商').equals(supplier.供应商).toArray()
     ]);
+
+    // 按日期降序排列，取前10条
+    const orders = allOrders
+      .sort((a, b) => (b.日期 || '').localeCompare(a.日期 || ''))
+      .slice(0, 10);
+    const inbound = allInbound
+      .sort((a, b) => (b.入库日期 || '').localeCompare(a.入库日期 || ''))
+      .slice(0, 10);
+
+    // 从现存量基础档案匹配填充存货编码
+    if (typeof DataLoader !== 'undefined') {
+      const codeMap = await DataLoader.getStockNameSpecCodeMap();
+      if (orders.length > 0) orders.forEach(o => {
+        if (o.存货名称) { const k = TableUtils.buildStockKey(o.存货名称, o.规格型号); o._存货编码 = codeMap.get(k) || ''; }
+      });
+      if (inbound.length > 0) inbound.forEach(i => {
+        if (i.存货名称) { const k = TableUtils.buildStockKey(i.存货名称, i.规格型号); i._存货编码 = codeMap.get(k) || ''; }
+      });
+    }
+
+    // 计算最近3个月订单/入库趋势图数据
+    const trendData = this._calcTrendData(allOrders, allInbound);
 
     document.getElementById('modalTitle').textContent = supplier.供应商;
     document.getElementById('modalBody').innerHTML = `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
-        <div><strong>类型:</strong> ${supplier.类型 || '-'}</div>
-        <div><strong>招采部门:</strong> ${supplier.招采部门 || '-'}</div>
-        <div><strong>签订次数:</strong> ${supplier.签订次数 || '-'}</div>
-        <div><strong>合同年限:</strong> ${supplier.合同年限 || '-'}</div>
-        <div><strong>合同生效:</strong> ${supplier.第一年度生效时间 || '-'}</div>
-        <div><strong>合同到期:</strong> ${supplier.年度合同到期时间 || '-'}</div>
+        <div><strong>类型:</strong> ${esc(supplier.类型 ?? '')}</div>
+        <div><strong>招采部门:</strong> ${esc(supplier.招采部门 ?? '')}</div>
+        <div><strong>签订次数:</strong> ${esc(supplier.签订次数 ?? '')}</div>
+        <div><strong>合同年限:</strong> ${esc(supplier.合同年限 ?? '')}</div>
+        <div><strong>合同生效:</strong> ${esc(supplier.第一年度生效时间 ?? '')}</div>
+        <div><strong>合同到期:</strong> ${esc(supplier.年度合同到期时间 ?? '')}</div>
         <div><strong>合同金额:</strong> ${this.formatMoney(supplier.年度合同金额)}</div>
         <div><strong>已入库金额:</strong> ${this.formatMoney(supplier.年度已供入库金额)}</div>
-        <div><strong>生产厂址:</strong> ${supplier.生产厂址 || '-'}</div>
-        <div><strong>办公地址:</strong> ${supplier.地址 || '-'}</div>
+        <div><strong>生产厂址:</strong> ${esc(supplier.生产厂址 ?? '')}</div>
+        <div><strong>办公地址:</strong> ${esc(supplier.地址 ?? '')}</div>
       </div>
 
-      <h4 style="margin:12px 0 8px;">最近订单(${orders.length})</h4>
+      <!-- 趋势图区域 -->
+      <div style="margin-bottom:16px;">
+        <h4 style="margin:0 0 8px;font-size:14px;">📈 近3月趋势对比</h4>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div class="glass-card" style="padding:12px;margin:0;">
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">订单金额（万元）</div>
+            <canvas id="supDetailOrderChart" height="120"></canvas>
+          </div>
+          <div class="glass-card" style="padding:12px;margin:0;">
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">入库金额（万元）</div>
+            <canvas id="supDetailInboundChart" height="120"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <h4 style="margin:12px 0 8px;">最近订单(10)</h4>
       ${orders.length === 0 ? '<div style="color:var(--text-muted);font-size:13px;">暂无订单</div>' : `
         <table class="data-table">
-          <thead><tr><th>订单编号</th><th>日期</th><th>物料</th><th>数量</th><th>未入库</th></tr></thead>
-          <tbody>${orders.slice(0, 10).map(o => `
-            <tr><td>${o.订单编号}</td><td>${o.日期}</td><td>${o.存货名称}</td><td>${o.数量}</td><td>${o.未入库量}</td></tr>
+          <thead><tr><th>订单编号</th><th>日期</th><th>存货编码</th><th>存货名称</th><th>数量</th><th>未入库</th></tr></thead>
+          <tbody>${orders.map(o => `
+            <tr><td>${esc(o.订单编号 ?? '')}</td><td>${esc(o.日期 ?? '')}</td><td>${esc(o._存货编码 ?? '')}</td><td>${esc(o.存货名称 ?? '')}</td><td>${esc(o.数量 ?? '')}</td><td>${esc(o.未入库量 ?? '')}</td></tr>
           `).join('')}</tbody>
         </table>
       `}
 
-      <h4 style="margin:12px 0 8px;">最近入库(${inbound.length})</h4>
+      <h4 style="margin:12px 0 8px;">最近入库(10)</h4>
       ${inbound.length === 0 ? '<div style="color:var(--text-muted);font-size:13px;">暂无入库</div>' : `
         <table class="data-table">
-          <thead><tr><th>入库单号</th><th>入库日期</th><th>物料</th><th>数量</th><th>金额</th></tr></thead>
-          <tbody>${inbound.slice(0, 10).map(i => `
-            <tr><td>${i.入库单号}</td><td>${i.入库日期}</td><td>${i.存货名称}</td><td>${i.数量}</td><td>${this.formatMoney(i.原币价税合计)}</td></tr>
+          <thead><tr><th>入库单号</th><th>入库日期</th><th>存货编码</th><th>存货名称</th><th>数量</th><th>含税金额</th></tr></thead>
+          <tbody>${inbound.map(i => `
+            <tr><td>${esc(i.入库单号 ?? '')}</td><td>${esc(i.入库日期 ?? '')}</td><td>${esc(i._存货编码 ?? '')}</td><td>${esc(i.存货名称 ?? '')}</td><td>${esc(i.数量 ?? '')}</td><td>${this.formatMoney(i.原币价税合计)}</td></tr>
           `).join('')}</tbody>
         </table>
       `}
     `;
     document.getElementById('modalOverlay').classList.add('show');
+
+    // 渲染趋势图
+    setTimeout(() => this._renderTrendCharts(trendData), 100);
+  },
+
+  // 计算最近3个月的订单/入库趋势数据
+  _calcTrendData(orders, inbound) {
+    const months = [];
+    const now = new Date();
+    for (let i = 2; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push({
+        label: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+        year: d.getFullYear(),
+        month: d.getMonth() + 1
+      });
+    }
+
+    const orderAmounts = months.map(m => {
+      return orders
+        .filter(o => {
+          if (!o.日期) return false;
+          const d = new Date(o.日期);
+          return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
+        })
+        .reduce((sum, o) => sum + (parseFloat(o.原币价税合计) || 0), 0) / 10000; // 转万元
+    });
+
+    const inboundAmounts = months.map(m => {
+      return inbound
+        .filter(i => {
+          if (!i.入库日期) return false;
+          const d = new Date(i.入库日期);
+          return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
+        })
+        .reduce((sum, i) => sum + (parseFloat(i.原币价税合计) || 0), 0) / 10000; // 转万元
+    });
+
+    return { labels: months.map(m => m.label), orderAmounts, inboundAmounts };
+  },
+
+  // 渲染趋势图
+  _renderTrendCharts(data) {
+    const chartOpts = (label, color, values) => ({
+      type: 'line',
+      data: {
+        labels: data.labels,
+        datasets: [{
+          label: label,
+          data: values,
+          borderColor: color,
+          backgroundColor: color + '20',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 4,
+          pointBackgroundColor: color
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { beginAtZero: true, ticks: { font: { size: 11 } } },
+          x: { ticks: { font: { size: 11 } } }
+        }
+      }
+    });
+
+    const orderCanvas = document.getElementById('supDetailOrderChart');
+    const inboundCanvas = document.getElementById('supDetailInboundChart');
+
+    // 🟡 先销毁旧实例（M4）：反复打开详情弹窗会累积 Chart 实例（Chart.js 全局注册表），
+    // 旧实例不销毁会导致内存泄漏、动画帧持续运行。
+    if (this._supOrderChart) { try { this._supOrderChart.destroy(); } catch (e) {} this._supOrderChart = null; }
+    if (orderCanvas && typeof Chart !== 'undefined') {
+      this._supOrderChart = new Chart(orderCanvas, chartOpts('订单金额', '#357ABD', data.orderAmounts));
+    }
+    if (this._supInboundChart) { try { this._supInboundChart.destroy(); } catch (e) {} this._supInboundChart = null; }
+    if (inboundCanvas && typeof Chart !== 'undefined') {
+      this._supInboundChart = new Chart(inboundCanvas, chartOpts('入库金额', '#28a745', data.inboundAmounts));
+    }
   },
 
   async exportData() {
@@ -314,16 +447,14 @@ const SupplierModule = {
   },
 
   exportToExcel(data, sheetName) {
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    // 🟢 O1：复用统一导出（文件名格式保持原样：名称_YYYYMMDD.xlsx）
     const now = new Date();
     const filename = `${sheetName}_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}.xlsx`;
-    XLSX.writeFile(wb, filename);
+    TableUtils.exportToExcel(data, filename, sheetName);
   },
 
   formatMoney(num) {
-    if (!num) return '-';
+    if (num == null || num === '') return '';
     return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(num);
   }
 };

@@ -76,6 +76,19 @@ const BreachModule = {
       </div>
     `;
 
+    // 计算违约次数（按公司名称聚合的违约记录数）
+    const companyCountMap = new Map();
+    records.forEach(r => { if (r.公司名称) companyCountMap.set(r.公司名称, (companyCountMap.get(r.公司名称) || 0) + 1); });
+    // 扣款比例：优先用已存储值（Excel 导入时已计算）；缺失时按延迟天数规则实时计算，
+    // 以兼容从云端同步下来的旧版 bundle（旧数据未含该字段），保证显示始终正确。
+    records.forEach(r => {
+      if (r.扣款比例 == null || r.扣款比例 === '') {
+        r.扣款比例 = (typeof DataLoader !== 'undefined' && DataLoader._calcBreachRatio)
+          ? DataLoader._calcBreachRatio(r.延迟天数) : 0;
+      }
+      r.违约次数 = companyCountMap.get(r.公司名称) || 0;
+    });
+
     this.currentData = records;
     this.renderTable();
   },
@@ -95,9 +108,10 @@ const BreachModule = {
             <tr>
               <th>公司名称</th>
               <th>涉及订单号</th>
-              <th>物料</th>
-              <th>规格</th>
-              <th>单价</th>
+              <th>存货编码</th>
+              <th>存货名称</th>
+              <th>规格型号</th>
+              <th>含税单价</th>
               <th>数量</th>
               <th>到货时间</th>
               <th>延迟天数</th>
@@ -111,17 +125,18 @@ const BreachModule = {
             ${data.map(r => `
               <tr>
                 <td><strong>${esc(r.公司名称)}</strong></td>
-                <td>${esc(r.涉及订单号 || '-')}</td>
-                <td>${esc(r.存货名称 || '-')}</td>
-                <td>${esc(r.规格型号 || '-')}</td>
+                <td>${esc(r.涉及订单号 ?? '')}</td>
+                <td>${esc(r.存货编码 ?? '')}</td>
+                <td>${esc(r.存货名称 ?? '')}</td>
+                <td>${esc(r.规格型号 ?? '')}</td>
                 <td>¥${this.formatMoney(r.单价)}</td>
                 <td>${r.数量}</td>
-                <td>${esc(r.到货时间 || '-')}</td>
+                <td>${esc(r.到货时间 ?? '')}</td>
                 <td><span class="tag ${parseFloat(r.延迟天数) >= 8 ? 'tag-danger' : 'tag-warning'}">${r.延迟天数 || 0} 天</span></td>
-                <td>${r.扣款比例 ? (parseFloat(r.扣款比例) * 100).toFixed(0) + '%' : '-'}</td>
+                <td>${r.扣款比例 ? r.扣款比例 + '%' : ''}</td>
                 <td><strong>¥${this.formatMoney(r.扣款金额)}</strong></td>
                 <td>${r.违约次数 || 0}</td>
-                <td>${esc(r.备注 || '-')}</td>
+                <td>${esc(r.备注 ?? '')}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -138,14 +153,11 @@ const BreachModule = {
     this.loadData();
   },
   exportData() {
-    if (!this.currentData || this.currentData.length === 0) { alert('没有数据'); return; }
-    const ws = XLSX.utils.json_to_sheet(this.currentData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '违约台账');
-    XLSX.writeFile(wb, `违约台账_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // 🟢 O1：统一导出（行为与原逻辑一致）
+    TableUtils.exportToExcel(this.currentData, `违约台账_${new Date().toISOString().split('T')[0]}.xlsx`, '违约台账');
   },
   formatMoney(num) {
-    if (!num) return '-';
+    if (num == null || num === '') return '';
     return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
   }
 };

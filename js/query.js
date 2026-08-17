@@ -15,11 +15,20 @@ const QueryModule = {
   ],
 
   // 各版块表头（严格对齐超级查询系统工作表）
+  // 🟡 注意（M7）：表头与 fetchTabData 返回值"双份维护"曾导致空单元格 bug。
+  // 现改为：表头由 fetchTabData 返回的对象的键动态派生（见 getColumns），此处仅作空数据兜底。
   columns: {
     stock: ['序号','存货编码','存货名称','规格型号','月均入库量','现存量','是否需补货','在途订单','所上或库房','工程项目'],
-    orders: ['订单编号','日期','项目名称','供应商','存货编号','存货名称','规格型号','数量','未入库量'],
-    inbound: ['表体订单号','入库日期','项目名称','入库单号','供应商','存货编码','存货名称','规格型号','数量'],
+    orders: ['订单编号','日期','项目名称','供应商','存货编号','存货名称','规格型号','订单量','未入库订单量'],
+    inbound: ['表体订单号','入库日期','项目名称','入库单号','供应商','存货编码','存货名称','规格型号','入库量'],
     pricing: ['供应商','存货编码','存货名称','规格型号','主计量','生效日期','失效日期','含税单价'],
+  },
+
+  // 🟡 M7：表头单一数据源 —— 始终从实际数据对象键派生，杜绝 columns 与数据键不一致
+  getColumns() {
+    const data = (this.fullData && this.fullData.length) ? this.fullData : this.results;
+    if (data && data.length) return Object.keys(data[0]);
+    return this.columns[this.currentTab] || [];
   },
 
   async render() {
@@ -65,6 +74,7 @@ const QueryModule = {
 
   async loadTabData() {
     const data = await this.fetchTabData();
+    this.fullData = data;   // 全量原始数据，二次搜索始终基于它重新过滤（避免在上次结果集上叠加过滤）
     this.results = data;
     this.page = 1;
     if (!this.searchKW) {
@@ -83,7 +93,7 @@ const QueryModule = {
         stockRows.forEach(s => {
           if (s.存货编码) stockByCode.set(String(s.存货编码), s.现存数量);
           if (s.存货名称) {
-            const key = (s.存货名称 + '|' + (s.规格型号 || '')).replace(/\s+/g, '');
+            const key = TableUtils.buildStockKey(s.存货名称, s.规格型号);
             stockByNameSpec.set(key, s.现存数量);
           }
         });
@@ -95,7 +105,7 @@ const QueryModule = {
             if (a.存货编码 && stockByCode.has(String(a.存货编码))) {
               realStock = stockByCode.get(String(a.存货编码));
             } else if (a.存货名称) {
-              const key = (a.存货名称 + '|' + (a.规格型号 || '')).replace(/\s+/g, '');
+              const key = TableUtils.buildStockKey(a.存货名称, a.规格型号);
               if (stockByNameSpec.has(key)) realStock = stockByNameSpec.get(key);
               else {
                 for (const [k, v] of stockByNameSpec) {
@@ -128,8 +138,8 @@ const QueryModule = {
           '存货编号': o.存货编号 || '',
           '存货名称': o.存货名称 || '',
           '规格型号': o.规格型号 || '',
-          '数量': o.数量 || 0,
-          '未入库量': o.未入库量 || 0,
+          '订单量': o.数量 || 0,
+          '未入库订单量': o.未入库量 || 0,
         }));
       }
       case 'inbound': {
@@ -143,7 +153,7 @@ const QueryModule = {
           '存货编码': i.存货编码 || '',
           '存货名称': i.存货名称 || '',
           '规格型号': i.规格型号 || '',
-          '数量': i.数量 || 0,
+          '入库量': i.数量 || 0,
         }));
       }
       case 'pricing': {
@@ -180,12 +190,11 @@ const QueryModule = {
 
   performSearch() {
     const keywords = this.searchKW.split(/[\s,，]+/).filter(Boolean).map(k => k.toLowerCase());
-    const cols = this.columns[this.currentTab];
-    // 在原始数据上搜索（需要重新加载原始数据）
-    // 这里用当前 results 做搜索 —— loadTabData 先加载全量，再过滤
-    // 但为了确保每次搜索基于全量数据，我们在此不做修改（results 在 loadTabData 时是全量的）
+    const cols = this.getColumns();
+    // 始终基于全量原始数据 fullData 过滤，再写入 results（二次搜索不会在上次结果集上叠加）
+    const base = (this.fullData && this.fullData.length) ? this.fullData : this.results;
     if (keywords.length > 0) {
-      const filtered = this.results.filter(row =>
+      this.results = base.filter(row =>
         keywords.every(kw =>
           cols.some(col => {
             const val = row[col];
@@ -193,7 +202,8 @@ const QueryModule = {
           })
         )
       );
-      this.results = filtered;
+    } else {
+      this.results = base.slice();
     }
     this.page = 1;
   },
@@ -212,7 +222,7 @@ const QueryModule = {
     const totalPages = Math.ceil(total / this.pageSize);
     const start = (this.page - 1) * this.pageSize;
     const pageData = this.results.slice(start, start + this.pageSize);
-    const cols = this.columns[this.currentTab];
+    const cols = this.getColumns();
 
     if (total === 0) {
       area.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><div class="empty-text">未找到匹配数据</div><div class="empty-hint">尝试其他关键词或切换版块</div></div>`;

@@ -9,15 +9,11 @@ const InboundModule = {
 
   async render() {
     const content = document.getElementById('contentArea');
+    // 🟢 O6：合并重复的 db.inbound.toArray() 查询（原两处并行 IIFE 各查一次）
+    const allInbound = await db.inbound.toArray();
     const [suppliers, projects] = await Promise.all([
-      (async () => {
-        const all = await db.inbound.toArray();
-        return [...new Set(all.map(i => i.供应商).filter(Boolean))].sort();
-      })(),
-      (async () => {
-        const all = await db.inbound.toArray();
-        return [...new Set(all.map(i => i.项目名称).filter(Boolean))].sort();
-      })()
+      Promise.resolve([...new Set(allInbound.map(i => i.供应商).filter(Boolean))].sort()),
+      Promise.resolve([...new Set(allInbound.map(i => i.项目名称).filter(Boolean))].sort())
     ]);
 
     content.innerHTML = `
@@ -96,7 +92,6 @@ const InboundModule = {
       </div>
     `;
 
-    this.allInbound = allInbound;
     this.currentPage = 1;
     this.renderTable();
     this.renderTrendChart(filteredInbound);
@@ -112,9 +107,9 @@ const InboundModule = {
       if (f.keyword) {
         const kw = f.keyword.toLowerCase();
         result = result.filter(i =>
-          (i.入库单号 && String(i.入库单号).toLowerCase().includes(kw)) ||
-          (i.供应商 && i.供应商.toLowerCase().includes(kw)) ||
-          (i.存货名称 && i.存货名称.toLowerCase().includes(kw))
+          (i.入库单号 && String(i.入库单号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+          (i.供应商 && i.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+          (i.存货名称 && i.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw))
         );
       }
       if (f.startDate || f.endDate) {
@@ -150,28 +145,28 @@ const InboundModule = {
               <th>供应商</th>
               <th>项目</th>
               <th>存货编码</th>
-              <th>物料</th>
-              <th>规格</th>
-              <th>数量</th>
+              <th>存货名称</th>
+              <th>规格型号</th>
+              <th>入库量</th>
               <th>含税单价</th>
-              <th>金额</th>
+              <th>含税金额</th>
               <th>税率</th>
             </tr>
           </thead>
           <tbody>
             ${items.map(i => `
               <tr>
-                <td>${esc(i.入库日期 || '-')}</td>
-                <td><strong>${esc(i.入库单号 || '-')}</strong></td>
-                <td>${esc(i.供应商 || '-')}</td>
-                <td>${esc(i.项目名称 || '-')}</td>
-                <td>${esc(i.存货编码 || '-')}</td>
-                <td>${esc(i.存货名称 || '-')}</td>
-                <td>${esc(i.规格型号 || '-')}</td>
+                <td>${esc(i.入库日期 ?? '')}</td>
+                <td><strong>${esc(i.入库单号 ?? '')}</strong></td>
+                <td>${esc(i.供应商 ?? '')}</td>
+                <td>${esc(i.项目名称 ?? '')}</td>
+                <td>${esc(i.存货编码 ?? '')}</td>
+                <td>${esc(i.存货名称 ?? '')}</td>
+                <td>${esc(i.规格型号 ?? '')}</td>
                 <td>${i.数量}</td>
                 <td>${this.formatMoney(i.原币含税单价)}</td>
                 <td>${this.formatMoney(i.原币价税合计)}</td>
-                <td>${i.税率 ? esc(i.税率) + '%' : '-'}</td>
+                <td>${i.税率 ? esc(i.税率) + '%' : ''}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -345,7 +340,7 @@ const InboundModule = {
 
   applyFilter() {
     this.currentFilter = {
-      keyword: document.getElementById('inboundKw').value.trim(),
+      keyword: (document.getElementById('inboundKw').value.trim() || '').replace(/\s+/g, ''),
       供应商: document.getElementById('inboundSupplier').value,
       项目名称: document.getElementById('inboundProject').value,
       startDate: document.getElementById('inboundStartDate')?.value || '',
@@ -366,11 +361,8 @@ const InboundModule = {
 
   async exportData() {
     const result = await DataStore.getInbound(this.currentFilter, 1, 100000);
-    if (result.items.length === 0) { alert('没有数据'); return; }
-    const ws = XLSX.utils.json_to_sheet(result.items);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '入库列表');
-    XLSX.writeFile(wb, `入库列表_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // 🟢 O1：统一导出（行为与原逻辑一致）
+    TableUtils.exportToExcel(result.items, `入库列表_${new Date().toISOString().split('T')[0]}.xlsx`, '入库列表');
   },
 
   formatNum(num) {
@@ -378,7 +370,7 @@ const InboundModule = {
   },
 
   formatMoney(num) {
-    if (!num) return '-';
+    if (num == null || num === '') return '';
     return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
   }
 };

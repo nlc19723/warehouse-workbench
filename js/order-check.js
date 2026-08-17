@@ -88,7 +88,7 @@ const OrderCheckModule = {
             <tr>
               <th>存货编码</th>
               <th>存货名称</th>
-              <th>规格</th>
+              <th>规格型号</th>
               <th>单位</th>
               <th>订货数量</th>
               <th>现存量</th>
@@ -103,16 +103,16 @@ const OrderCheckModule = {
               const isLow = c.低周转 === '是' || c.低周转 === true;
               return `
                 <tr class="${isLow ? 'row-warning' : ''}">
-                  <td>${c.存货编码 || '-'}</td>
-                  <td><strong>${c.存货名称}</strong></td>
-                  <td>${c.规格型号 || '-'}</td>
-                  <td>${c.主计量 || '-'}</td>
-                  <td>${c.数量}</td>
-                  <td>${c.现存量}</td>
-                  <td>${c.在途订单 || 0}</td>
-                  <td>${c.分类 ? `<span class="tag ${c.分类 === 'A' ? 'tag-success' : c.分类 === 'B' ? 'tag-warning' : 'tag-neutral'}">${c.分类}</span>` : '-'}</td>
+                  <td>${esc(c.存货编码 ?? '')}</td>
+                  <td><strong>${esc(c.存货名称 ?? '')}</strong></td>
+                  <td>${esc(c.规格型号 ?? '')}</td>
+                  <td>${esc(c.主计量 ?? '')}</td>
+                  <td>${esc(c.数量 ?? '')}</td>
+                  <td>${esc(c.现存量 ?? '')}</td>
+                  <td>${esc(c.在途订单 ?? 0)}</td>
+                  <td>${c.分类 ? `<span class="tag ${c.分类 === 'A' ? 'tag-success' : c.分类 === 'B' ? 'tag-warning' : 'tag-neutral'}">${esc(c.分类)}</span>` : ''}</td>
                   <td>${isLow ? '<span class="tag tag-warning">是</span>' : '<span class="tag tag-neutral">否</span>'}</td>
-                  <td>${c.所上或库房 || c.工程项目 || '-'}</td>
+                  <td>${esc(c.所上或库房 || c.工程项目 || '')}</td>
                 </tr>
               `;
             }).join('')}
@@ -125,11 +125,8 @@ const OrderCheckModule = {
   },
 
   exportData() {
-    if (!this.currentData || this.currentData.length === 0) { alert('没有数据'); return; }
-    const ws = XLSX.utils.json_to_sheet(this.currentData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '订货核对');
-    XLSX.writeFile(wb, `订货核对_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // 🟢 O1：统一导出（行为与原逻辑一致）
+    TableUtils.exportToExcel(this.currentData, `订货核对_${new Date().toISOString().split('T')[0]}.xlsx`, '订货核对');
   },
 
   formatNum(num) {

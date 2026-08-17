@@ -55,7 +55,7 @@ const InventoryAlertModule = {
       stockRows.forEach(s => {
         if (s.存货编码) stockByCode.set(String(s.存货编码), s.现存数量);
         if (s.存货名称) {
-          const key = (s.存货名称 + '|' + (s.规格型号 || '')).replace(/\s+/g, '');
+          const key = TableUtils.buildStockKey(s.存货名称, s.规格型号);
           stockByNameSpec.set(key, s.现存数量);
         }
       });
@@ -66,7 +66,7 @@ const InventoryAlertModule = {
             a.现存量 = stockByCode.get(String(a.存货编码)); fixedCount++;
           }
           else if (a.存货名称) {
-            const key = (a.存货名称 + '|' + (a.规格型号 || '')).replace(/\s+/g, '');
+            const key = TableUtils.buildStockKey(a.存货名称, a.规格型号);
             if (stockByNameSpec.has(key)) { a.现存量 = stockByNameSpec.get(key); fixedCount++; }
             else {
               for (const [k, v] of stockByNameSpec) {
@@ -80,14 +80,15 @@ const InventoryAlertModule = {
       if (fixedCount > 0) console.log(`[inventory-alert] 从库存表补全 ${fixedCount}/${alerts.length} 条现存量`);
     } catch(e) { console.warn('[inventory-alert] 库存表关联失败:', e); }
 
-    const kw = document.getElementById('alertKw')?.value.trim().toLowerCase();
+    const kw = (document.getElementById('alertKw')?.value.trim() || '').replace(/\s+/g, '').toLowerCase();
     const category = document.getElementById('alertCategory')?.value;
     const status = document.getElementById('alertStatus')?.value;
 
     if (kw) {
+      // 🟡 M9：输入侧已归一化（去空白），数据侧同样去空白再比较，避免含空格/全角空格的存货名称匹配失败
       alerts = alerts.filter(a =>
-        (a.存货名称 && a.存货名称.toLowerCase().includes(kw)) ||
-        (a.存货编码 && a.存货编码.toLowerCase().includes(kw))
+        (a.存货名称 && a.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+        (a.存货编码 && String(a.存货编码).replace(/\s+/g, '').toLowerCase().includes(kw))
       );
     }
     if (category) {
@@ -150,7 +151,7 @@ const InventoryAlertModule = {
             <tr>
               <th>存货编码</th>
               <th>存货名称</th>
-              <th>规格</th>
+              <th>规格型号</th>
               <th>分类</th>
               <th>月均入库</th>
               <th>最低库存</th>
@@ -159,7 +160,8 @@ const InventoryAlertModule = {
               <th>补货值</th>
               <th>在途订单</th>
               <th>状态</th>
-              <th>仓库/项目</th>
+              <th>仓库</th>
+              <th>项目</th>
             </tr>
           </thead>
           <tbody>
@@ -167,10 +169,10 @@ const InventoryAlertModule = {
               const needRestock = (a.补货值 && a.补货值 > 0) ? true : false;
               return `
                 <tr class="${needRestock ? 'row-warning' : ''}">
-                  <td>${esc(a.存货编码 || '-')}</td>
+                  <td>${esc(a.存货编码 ?? '')}</td>
                   <td><strong>${esc(a.存货名称)}</strong></td>
-                  <td>${esc(a.规格型号 || '-')}</td>
-                  <td>${a.分类 ? `<span class="tag ${a.分类 === 'A' ? 'tag-success' : a.分类 === 'B' ? 'tag-warning' : 'tag-neutral'}">${esc(a.分类)}</span>` : '-'}</td>
+                  <td>${esc(a.规格型号 ?? '')}</td>
+                  <td>${a.分类 ? `<span class="tag ${a.分类 === 'A' ? 'tag-success' : a.分类 === 'B' ? 'tag-warning' : 'tag-neutral'}">${esc(a.分类)}</span>` : ''}</td>
                   <td>${this.formatNum(a.近一年月均入库量)}</td>
                   <td>${this.formatNum(a.最低库存预警)}</td>
                   <td>${this.formatNum(a.最高库存)}</td>
@@ -178,7 +180,8 @@ const InventoryAlertModule = {
                   <td style="${needRestock ? 'color:var(--status-danger);font-weight:600;' : ''}">${this.formatNum(a.补货值)}</td>
                   <td>${this.formatNum(a.在途订单)}</td>
                   <td>${needRestock ? '<span class="tag tag-danger">需补货</span>' : '<span class="tag tag-success">正常</span>'}</td>
-                  <td>${esc(String(a.所上或库房 || '-').substring(0, 15))}${String(a.所上或库房 || '').length > 15 ? '...' : ''}</td>
+                  <td>${esc(String(a.所上或库房 ?? '').substring(0, 15))}${String(a.所上或库房 ?? '').length > 15 ? '...' : ''}</td>
+                  <td>${esc(String(a.工程项目 ?? '').substring(0, 15))}${String(a.工程项目 ?? '').length > 15 ? '...' : ''}</td>
                 </tr>
               `;
             }).join('')}
@@ -231,15 +234,12 @@ const InventoryAlertModule = {
   goPage(p) { this.currentPage = p; this.renderTable(); },
 
   exportData() {
-    if (!this.currentData || this.currentData.length === 0) { alert('没有数据'); return; }
-    const ws = XLSX.utils.json_to_sheet(this.currentData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '库存预警');
-    XLSX.writeFile(wb, `库存预警_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // 🟢 O1：统一导出（行为与原逻辑一致）
+    TableUtils.exportToExcel(this.currentData, `库存预警_${new Date().toISOString().split('T')[0]}.xlsx`, '库存预警');
   },
 
   formatNum(num) {
-    if (num === 0 || !num) return '-';
+    if (num == null || num === '') return '';
     return new Intl.NumberFormat('zh-CN').format(num);
   }
 };

@@ -92,6 +92,23 @@ const DataStore = {
     return meta ? meta.time : null;
   },
 
+  // ─── 替换内置工作簿存储（IndexedDB meta 表）──
+  // 存储用户上传的替换工作簿 ArrayBuffer
+  async saveCustomWorkbook(arrayBuffer) {
+    await db.meta.put({ key: 'customWorkbook', value: arrayBuffer, time: new Date().toISOString(), size: arrayBuffer.byteLength });
+  },
+
+  // 读取替换后的内置工作簿（不存在则返回 null）
+  async getCustomWorkbook() {
+    const meta = await db.meta.get('customWorkbook');
+    return meta ? meta.value : null;
+  },
+
+  // 清除替换工作簿（恢复使用原始内置文件）
+  async clearCustomWorkbook() {
+    await db.meta.delete('customWorkbook');
+  },
+
   // 清空所有数据（重新导入时使用）
   async clearAll() {
     await db.suppliers.clear();
@@ -104,8 +121,6 @@ const DataStore = {
     await db.lowTurnover.clear();
     await db.breach.clear();
     await db.outbound.clear();
-    await db.materialClass.clear();
-    await db.monthlyStats.clear();
     await db.meta.delete('dataImported');
   },
 
@@ -140,10 +155,10 @@ const DataStore = {
     if (filter.审批状态) query = query.filter(o => o.审批状态 === filter.审批状态);
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(o => (o.订单编号 && o.订单编号.toLowerCase().includes(kw)) ||
-                                 (o.供应商 && o.供应商.toLowerCase().includes(kw)) ||
-                                 (o.存货名称 && o.存货名称.toLowerCase().includes(kw)) ||
-                                 (o.项目名称 && o.项目名称.toLowerCase().includes(kw)));
+      query = query.filter(o => (o.订单编号 && String(o.订单编号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                                 (o.供应商 && o.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                                 (o.存货名称 && o.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                                 (o.项目名称 && o.项目名称.replace(/\s+/g, '').toLowerCase().includes(kw)));
     }
     if (filter.startDate || filter.endDate) {
       query = query.filter(o => {
@@ -176,9 +191,9 @@ const DataStore = {
     if (filter.仓库) query = query.filter(i => i.仓库 === filter.仓库);
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(i => (i.入库单号 && i.入库单号.toLowerCase().includes(kw)) ||
-                                 (i.供应商 && i.供应商.toLowerCase().includes(kw)) ||
-                                 (i.存货名称 && i.存货名称.toLowerCase().includes(kw)));
+      query = query.filter(i => (i.入库单号 && String(i.入库单号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                                 (i.供应商 && i.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                                 (i.存货名称 && i.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw)));
     }
     if (filter.startDate || filter.endDate) {
       query = query.filter(i => {
@@ -327,7 +342,7 @@ const DataStore = {
       stockRows.forEach(s => {
         if (s.存货编码) stockByCode.set(String(s.存货编码), s.现存数量);
         if (s.存货名称) {
-          const key = (s.存货名称 + '|' + (s.规格型号 || '')).replace(/\s+/g, '');
+          const key = TableUtils.buildStockKey(s.存货名称, s.规格型号);
           stockByNameSpec.set(key, s.现存数量);
         }
       });
@@ -355,46 +370,64 @@ const DataStore = {
 
     const pendingInbound = ordersAll.filter(o => parseFloat(o.未入库量) > 0).length;
 
-    // 合同到期预警（30天内）
+    // 未审批通过订单（与订单列表模块逻辑一致：有审批状态且 ≠ '审批通过'，按订单编号去重）
+    const unapprovedOrders = ordersAll.filter(o => o.审批状态 && o.审批状态 !== '审批通过');
+    const pendingApproval = new Set(unapprovedOrders.map(o => o.订单编号).filter(Boolean)).size;
+
+    // 临近到期供应商（30-90天）
     const now = new Date();
-    const contractWarnings = await db.suppliers.toArray().then(arr =>
+    const contractExpiringSoon = await db.suppliers.toArray().then(arr =>
       arr.filter(s => {
         if (!s.年度合同到期时间) return false;
         const days = Math.ceil((new Date(s.年度合同到期时间) - now) / (1000 * 60 * 60 * 24));
-        return days <= 30 && days >= 0;
+        return days > 30 && days <= 90;
       }).length
     );
 
+    // 在供供应商数（排除已过期的：合同到期时间 < 今天）
+    const activeSupplierCount = await db.suppliers.toArray().then(arr =>
+      arr.filter(s => !s.年度合同到期时间 || new Date(s.年度合同到期时间) >= now).length
+    );
+
+    // 年度供货总金额（当年入库记录的 原币价税合计 求和）
+    const y = now.getFullYear();
+    const yearInboundAmount = (await db.inbound.toArray())
+      .filter(i => i.入库日期 && new Date(i.入库日期).getFullYear() === y)
+      .reduce((sum, i) => sum + (parseFloat(i.原币价税合计) || 0), 0);
+
     return {
       supplierCount: suppliers,
+      activeSupplierCount,
       orderCount: orders,
       inboundCount: inbound,
       stockCount: stock,
       needRestockCount,
       needRestockQty: Math.round(needRestockQty * 100) / 100,
-      contractWarnings,
+      contractExpiringSoon,
       totalOrderAmount: Math.round(totalOrderAmount * 100) / 100,
       pendingInbound,
-      lowTurnoverCount: lowTurnover
+      pendingApproval,
+      lowTurnoverCount: lowTurnover,
+      yearInboundAmount: Math.round(yearInboundAmount * 100) / 100
     };
   },
 
   // ===== 全局搜索 =====
   async globalSearch(keyword) {
     if (!keyword || keyword.trim().length < 1) return { suppliers: [], orders: [], inbound: [], stock: [] };
-    const kw = keyword.trim().toLowerCase();
+    const kw = keyword.trim().replace(/\s+/g, '').toLowerCase();
 
     const [suppliers, orders, inbound, stock] = await Promise.all([
-      db.suppliers.filter(s => (s.供应商 && s.供应商.toLowerCase().includes(kw)) ||
-                               (s.类型 && s.类型.toLowerCase().includes(kw))).limit(10).toArray(),
-      db.orders.filter(o => (o.订单编号 && o.订单编号.toLowerCase().includes(kw)) ||
-                            (o.供应商 && o.供应商.toLowerCase().includes(kw)) ||
-                            (o.存货名称 && o.存货名称.toLowerCase().includes(kw))).limit(10).toArray(),
-      db.inbound.filter(i => (i.入库单号 && i.入库单号.toLowerCase().includes(kw)) ||
-                             (i.供应商 && i.供应商.toLowerCase().includes(kw)) ||
-                             (i.存货名称 && i.存货名称.toLowerCase().includes(kw))).limit(10).toArray(),
-      db.stock.filter(s => (s.存货编码 && s.存货编码.toLowerCase().includes(kw)) ||
-                           (s.存货名称 && s.存货名称.toLowerCase().includes(kw))).limit(10).toArray()
+      db.suppliers.filter(s => (s.供应商 && s.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                               (s.类型 && s.类型.replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray(),
+      db.orders.filter(o => (o.订单编号 && String(o.订单编号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                            (o.供应商 && o.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                            (o.存货名称 && o.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray(),
+      db.inbound.filter(i => (i.入库单号 && String(i.入库单号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                             (i.供应商 && i.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                             (i.存货名称 && i.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray(),
+      db.stock.filter(s => (s.存货编码 && String(s.存货编码).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                           (s.存货名称 && s.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray()
     ]);
 
     return { suppliers, orders, inbound, stock };

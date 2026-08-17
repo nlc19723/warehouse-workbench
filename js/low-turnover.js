@@ -81,8 +81,8 @@ const LowTurnoverModule = {
             <tr>
               <th>仓库</th>
               <th>存货编码</th>
-              <th>物料名称</th>
-              <th>规格</th>
+              <th>存货名称</th>
+              <th>规格型号</th>
               <th>现存数量</th>
               <th>暂无法使用量</th>
             </tr>
@@ -94,10 +94,10 @@ const LowTurnoverModule = {
               const available = total - unavailable;
               return `
                 <tr class="${available <= 0 ? 'row-danger' : ''}">
-                  <td>${esc(i.仓库名称 || '-')}</td>
-                  <td>${esc(i.存货编码 || '-')}</td>
+                  <td>${esc(i.仓库名称 ?? '')}</td>
+                  <td>${esc(i.存货编码 ?? '')}</td>
                   <td><strong>${esc(i.存货名称)}</strong></td>
-                  <td>${esc(i.规格型号 || '-')}</td>
+                  <td>${esc(i.规格型号 ?? '')}</td>
                   <td>${this.formatNum(total)}</td>
                   <td>${this.formatNum(unavailable)}</td>
                 </tr>
@@ -152,11 +152,8 @@ const LowTurnoverModule = {
   },
   goPage(p) { this.currentPage = p; this.renderTable(); },
   exportData() {
-    if (!this.currentData || this.currentData.length === 0) { alert('没有数据'); return; }
-    const ws = XLSX.utils.json_to_sheet(this.currentData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '低周转');
-    XLSX.writeFile(wb, `低周转_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // 🟢 O1：统一导出（行为与原逻辑一致）
+    TableUtils.exportToExcel(this.currentData, `低周转_${new Date().toISOString().split('T')[0]}.xlsx`, '低周转');
   },
   formatNum(num) {
     return new Intl.NumberFormat('zh-CN').format(Math.round(num || 0));

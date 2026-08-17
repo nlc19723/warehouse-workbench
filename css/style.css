@@ -805,9 +805,11 @@ body::after {
 /* ========== 数据Widget ========== */
 .data-widgets {
   display: flex; flex-direction: row; gap: 14px; margin-bottom: 16px;
+  align-items: stretch;
 }
 .dash-todo-card { flex: 1.2 1 0; min-width: 0; }
-.dash-donut-card { flex: 1 1 0; min-width: 0; }
+.dash-donut-card { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
+.dash-donut-card .donut-container { flex: 1; display: flex; align-items: center; }
 .todo-clickable { cursor: pointer; }
 .todo-clickable:hover { background: var(--card-bg-hover); transform: translateX(2px); }
 .todo-clickable .todo-meta { color: var(--primary); font-weight: 600; }
@@ -816,7 +818,7 @@ body::after {
 
 /* 待办事项文字统一对齐 */
 .todo-item {
-  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
   background: var(--card-bg); border-radius: var(--radius-sm);
   border: 1px solid var(--card-border);
   transition: background 0.15s;
@@ -1949,12 +1951,21 @@ body::after {
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
-/* ─── 出库明细表包裹层：不靠拉条，自适应铺开 ─── */
+/* ─── 出库明细表包裹层：内部滚动 + 粘性表头 ─── */
 .ob-entry-table-wrapper {
   width: 100%;
-  overflow: visible !important;
+  max-height: calc(100vh - 280px);
+  overflow-y: auto;
+  overflow-x: hidden;
   border-radius: var(--radius-sm);
+  /* 自定义滚动条 */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99,102,241,0.3) transparent;
 }
+.ob-entry-table-wrapper::-webkit-scrollbar { width: 5px; }
+.ob-entry-table-wrapper::-webkit-scrollbar-track { background: transparent; }
+.ob-entry-table-wrapper::-webkit-scrollbar-thumb { background: rgba(99,102,241,0.25); border-radius: 4px; }
+.ob-entry-table-wrapper::-webkit-scrollbar-thumb:hover { background: rgba(99,102,241,0.4); }
 .ob-list-table-wrapper {
   width: 100%;
   overflow: visible !important;
@@ -1962,26 +1973,19 @@ body::after {
   border-radius: 0 !important;
 }
 
-/* ─── 粘性表头：卡片标题行 + 表格 thead 双层 sticky ─── */
+/* ─── 出库明细表：表头在滚动容器内粘性固定 ─── */
 .ob-detail-card {
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
 .ob-detail-card .glass-card-header {
-  position: sticky;
-  top: 70px;
-  z-index: 12;
-  background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.92));
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  box-shadow: 0 2px 8px rgba(15,23,42,0.06), 0 1px 0 rgba(15,23,42,0.04);
+  flex-shrink: 0;
 }
-[data-theme="dark"] .ob-detail-card .glass-card-header {
-  background: linear-gradient(180deg, rgba(30,41,59,0.96), rgba(15,23,42,0.92));
-}
-/* 表格内的 thead 也保持粘性，紧贴标题行（约 54px 高） */
+/* 表格内的 thead 在滚动容器内粘性固定（top=0 相对于滚动容器） */
 .ob-detail-card .data-table thead {
   position: sticky;
-  top: 126px;   /* 70 + 54 + 2 buffer */
+  top: 0;
   z-index: 11;
 }
 .ob-detail-card .data-table thead th {
@@ -2013,18 +2017,6 @@ body::after {
   text-align: right !important;
   font-weight: 600;
   vertical-align: middle;
-}
-
-/* ─── 返回顶部浮动按钮：固定于表格末行右侧（粘性）─── */
-.ob-back-to-top-btn {
-  position: fixed;
-  bottom: 100px;
-  right: 40px;
-  width: fit-content;
-  height: 40px;
-  padding: 0 18px;
-  font-size: 12.5px;
-  z-index: 90;
 }
 
 /* ─── 项目联想下拉：稍大点的字体 + 行间距 ─── */

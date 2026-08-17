@@ -12,7 +12,7 @@ const OrderTrackModule = {
 
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="trackKw" placeholder="搜索订单编号、供应商、物料..." onkeydown="if(event.key==='Enter')OrderTrackModule.applyFilter()">
+        <input type="text" id="trackKw" placeholder="搜索订单编号、供应商、存货名称..." onkeydown="if(event.key==='Enter')OrderTrackModule.applyFilter()">
         <select id="trackSupplier">
           <option value="">全部供应商</option>
           ${suppliers.map(s => `<option value="${s}">${s}</option>`).join('')}
@@ -34,15 +34,15 @@ const OrderTrackModule = {
 
   async loadData() {
     let orders = await db.orders.toArray();
-    const kw = document.getElementById('trackKw')?.value.trim();
+    const kw = (document.getElementById('trackKw')?.value.trim() || '').replace(/\s+/g, '');
     const supplier = document.getElementById('trackSupplier')?.value;
 
     if (kw) {
       const kwLower = kw.toLowerCase();
       orders = orders.filter(o =>
-        (o.订单编号 && String(o.订单编号).toLowerCase().includes(kwLower)) ||
-        (o.供应商 && o.供应商.toLowerCase().includes(kwLower)) ||
-        (o.存货名称 && o.存货名称.toLowerCase().includes(kwLower))
+        (o.订单编号 && String(o.订单编号).replace(/\s+/g, '').toLowerCase().includes(kwLower)) ||
+        (o.供应商 && o.供应商.replace(/\s+/g, '').toLowerCase().includes(kwLower)) ||
+        (o.存货名称 && o.存货名称.replace(/\s+/g, '').toLowerCase().includes(kwLower))
       );
     }
     if (supplier) {
@@ -77,6 +77,18 @@ const OrderTrackModule = {
     `;
 
     this.currentData = pending;
+
+    // 从现存量基础档案匹配填充存货编码（按 存货名称+规格型号 → 存货编码）
+    if (typeof DataLoader !== 'undefined' && pending.length > 0) {
+      const codeMap = await DataLoader.getStockNameSpecCodeMap();
+      pending.forEach(o => {
+        if (o.存货名称) {
+          const key = (o.存货名称 + '|' + (o.规格型号 || '')).replace(/\s+/g, '');
+          o._存货编码 = codeMap.get(key) || '';
+        }
+      });
+    }
+
     this.currentPage = 1;
     this.renderTable();
   },
@@ -112,11 +124,12 @@ const OrderTrackModule = {
             <th>下单时间</th>
             <th>供应商</th>
             <th>项目</th>
-            <th>物料</th>
-            <th>规格</th>
+            <th>存货编码</th>
+            <th>存货名称</th>
+            <th>规格型号</th>
             <th>订单量</th>
-            <th>已入库</th>
-            <th>未入库</th>
+            <th>入库量</th>
+            <th>未入库订单量</th>
             <th>入库进度</th>
             <th>未入金额</th>
           </tr>
@@ -127,15 +140,17 @@ const OrderTrackModule = {
             const inbound = parseFloat(o.累计入库数量) || 0;
             const pendingQty = parseFloat(o.未入库量) || 0;
             const percent = totalQty > 0 ? Math.min(100, Math.round((inbound / totalQty) * 100)) : 0;
-            const progressClass = percent >= 80 ? '' : percent >= 50 ? 'warning' : 'danger';
+            // 颜色规则：<60%草绿色，60-80%蛋黄色，>80%暗红色
+            const progressClass = percent >= 80 ? 'danger' : percent >= 60 ? 'warning' : '';
             return `
               <tr>
                 <td><strong>${esc(o.订单编号)}</strong></td>
-                <td>${esc(o.日期 || o.已下单时间 || '-')}</td>
+                <td>${esc(o.日期 || o.已下单时间 || '')}</td>
                 <td>${esc(o.供应商)}</td>
-                <td>${esc(o.项目名称 || '-')}</td>
+                <td>${esc(o.项目名称 ?? '')}</td>
+                <td>${esc(o._存货编码 ?? '')}</td>
                 <td>${esc(o.存货名称)}</td>
-                <td>${esc(o.规格型号 || '-')}</td>
+                <td>${esc(o.规格型号 ?? '')}</td>
                 <td>${o.数量}</td>
                 <td>${o.累计入库数量 || 0}</td>
                 <td><strong>${pendingQty}</strong></td>
@@ -212,11 +227,8 @@ const OrderTrackModule = {
   },
 
   exportData() {
-    if (!this.currentData || this.currentData.length === 0) { alert('没有数据'); return; }
-    const ws = XLSX.utils.json_to_sheet(this.currentData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '订单跟踪');
-    XLSX.writeFile(wb, `订单跟踪_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // 🟢 O1：统一导出（行为与原逻辑一致）
+    TableUtils.exportToExcel(this.currentData, `订单跟踪_${new Date().toISOString().split('T')[0]}.xlsx`, '订单跟踪');
   },
 
   formatNum(num) {
@@ -224,7 +236,7 @@ const OrderTrackModule = {
   },
 
   formatMoney(num) {
-    if (!num) return '-';
+    if (num == null || num === '') return '';
     return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
   }
 };

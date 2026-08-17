@@ -39,9 +39,14 @@ const TableUtils = {
       // 点击 ▾ 图标：弹出 Excel 风格筛选面板（首次点击=打开面板）
       filterIcon.addEventListener('click', (e) => {
         e.stopPropagation();
-        this._showFilterPopup(th, colIdx, columnFilters, (kw) => {
-          columnFilters[colIdx] = kw;
-          filterIcon.classList.toggle('active', !!kw);
+        this._showFilterPopup(th, colIdx, columnFilters, (filterState) => {
+          columnFilters[colIdx] = filterState;
+          const hasActive = !!filterState && (
+            !!filterState.kw ||
+            (filterState.unchecked && filterState.unchecked.length > 0) ||
+            (filterState.checked && filterState.checked.length === 0)
+          );
+          filterIcon.classList.toggle('active', hasActive);
           this._applyTableSortAndFilter(table, currentSortCol, currentSortDir, columnFilters);
         });
       });
@@ -98,10 +103,43 @@ const TableUtils = {
     // 1) 重置可见性
     rows.forEach(tr => { tr.style.display = ''; });
 
-    // 2) 关键词筛选（多列叠加生效）
-    Object.entries(filters).forEach(([ci, kw]) => {
-      if (!kw) return;
+    // 2) 值集合筛选 + 关键词筛选（多列叠加生效）
+    Object.entries(filters).forEach(([ci, fs]) => {
+      if (!fs) return;
       const col = parseInt(ci, 10);
+
+      // 新格式：{ checked, unchecked, kw } — 基于复选框值集合过滤
+      if (fs.checked !== undefined) {
+        const checkedSet = new Set(fs.checked.map(v => v.toLowerCase()));
+        const uncheckedSet = new Set(fs.unchecked?.map(v => v.toLowerCase()) || []);
+        rows.forEach(tr => {
+          const td = tr.children[col];
+          const val = td ? td.textContent.trim() : '';
+          const valLower = val.toLowerCase();
+          // 如果有未勾选项（排除模式）：隐藏匹配未勾选的行
+          // 如果无未勾选项但有勾选项（包含模式）：隐藏不在勾选中的行
+          if (uncheckedSet.size > 0) {
+            if (uncheckedSet.has(valLower)) tr.style.display = 'none';
+          } else if (checkedSet.size > 0 && fs.checked.length < (fs.totalCount || 0)) {
+            if (!checkedSet.has(valLower)) tr.style.display = 'none';
+          }
+        });
+        // 同时应用关键词二次过滤
+        if (fs.kw) {
+          const k = fs.kw.toLowerCase();
+          rows.forEach(tr => {
+            if (tr.style.display === 'none') return;
+            const td = tr.children[col];
+            const val = td ? td.textContent.toLowerCase() : '';
+            if (!val.includes(k)) tr.style.display = 'none';
+          });
+        }
+        return;
+      }
+
+      // 旧格式兼容：纯关键词字符串
+      const kw = typeof fs === 'string' ? fs : (fs.kw || '');
+      if (!kw) return;
       const k = kw.toLowerCase();
       rows.forEach(tr => {
         const td = tr.children[col];
@@ -145,10 +183,9 @@ const TableUtils = {
     const tbody = table ? table.querySelector('tbody') : null;
     const rows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
 
-    // 收集该列所有唯一值（仅可见行）
+    // 收集该列所有唯一值（包含被其他列筛选隐藏的行，确保选项不丢失）
     const valueMap = new Map();
     rows.forEach(tr => {
-      if (tr.style.display === 'none') return; // 已被其他列筛选隐藏的行不计入
       const td = tr.children[colIdx];
       const rawVal = td ? (td.textContent || '').trim() : '';
       // 清理数值格式用于分组（如 330.29 和 330 显示为不同值）
@@ -166,9 +203,11 @@ const TableUtils = {
     });
 
     const popupId = 'th-filter-popup-' + Date.now();
-    const currentKw = currentFilters[colIdx] || '';
+    const currentFs = currentFilters[colIdx] || null;
+    // 兼容新旧格式：旧格式是字符串 keyword，新格式是 { checked, unchecked, kw }
+    const currentKw = (currentFs && typeof currentFs === 'object') ? (currentFs.kw || '') : (currentFs || '');
 
-    popup = document.createElement('div');
+    const popup = document.createElement('div');
     popup.className = 'excel-filter-popup';
     popup.id = popupId;
     popup.innerHTML = `
@@ -176,13 +215,19 @@ const TableUtils = {
         <input type="text" class="efp-search" placeholder="🔍 搜索筛选..." value="${currentKw}" />
       </div>
       <div class="efp-values" style="max-height:280px;overflow-y:auto;">
-        ${sortedValues.length > 0 ? sortedValues.map(([val, count]) => `
+        ${sortedValues.length > 0 ? sortedValues.map(([val, count]) => {
+          // 如果已有筛选状态，根据 checked/unchecked 列表决定初始勾选
+          let isChecked = !currentKw; // 无关键词时默认全选
+          if (currentFs && typeof currentFs === 'object' && currentFs.checked) {
+            isChecked = currentFs.checked.includes(val);
+          }
+          return `
           <label class="efp-item">
-            <input type="checkbox" class="efp-cb" data-val="${this._escapeAttr(val)}" ${!currentKw ? 'checked' : ''} />
+            <input type="checkbox" class="efp-cb" data-val="${this._escapeAttr(val)}" ${isChecked ? 'checked' : ''} />
             <span class="efp-text">${this._escapeHtml(val)}</span>
             <span class="efp-count">(${count})</span>
-          </label>
-        `).join('') : '<div class="efp-empty">无数据</div>'}
+          </label>`;
+        }).join('') : '<div class="efp-empty">无数据</div>'}
       </div>
       <div class="efp-actions">
         <button class="efp-action-btn efp-select-all">全选</button>
@@ -228,10 +273,13 @@ const TableUtils = {
       });
     });
 
-    // 确定 → 用搜索关键词模式（兼容原有逻辑）
+    // 确定 → 收集复选框勾选状态 + 搜索关键词
     popup.querySelector('.efp-ok').addEventListener('click', () => {
-      const kw = searchInput.value.trim();
-      onConfirm(kw);
+      const checkedVals = Array.from(popup.querySelectorAll('.efp-cb:checked')).map(cb => cb.dataset.val);
+      const allVals = Array.from(popup.querySelectorAll('.efp-cb')).map(cb => cb.dataset.val);
+      const uncheckedVals = checkedVals.length < allVals.length
+        ? allVals.filter(v => !checkedVals.includes(v)) : [];
+      onConfirm({ checked: checkedVals, unchecked: uncheckedVals, kw: searchInput.value.trim(), totalCount: allVals.length });
       this._hideFilterPopup();
     });
 
@@ -443,5 +491,50 @@ const TableUtils = {
     if (Math.abs(num) >= 100000000) return '¥' + (num / 100000000).toFixed(2) + ' 亿';
     if (Math.abs(num) >= 10000) return '¥' + (num / 10000).toFixed(2) + ' 万';
     return '¥' + new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
+  },
+
+  // ============================================================
+  // 🟢 共享工具（O1/O2/O3/O5 去重）：导出 / 格式化 / 日期 / 编码键
+  // ============================================================
+
+  // 金额格式化（fractionDigits 默认 0，与供应商模块原行为一致；pricing 传 2）
+  formatMoney(num, fractionDigits = 0) {
+    if (num == null || num === '') return '';
+    return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: fractionDigits }).format(num);
+  },
+
+  // 数量/整数格式化（与订货核对/库存预警模块原行为一致）
+  formatNum(num) {
+    if (num == null || num === '') return '';
+    return new Intl.NumberFormat('zh-CN').format(num);
+  },
+
+  // 距离今天的天数（向上取整；负数=已过期；无日期=null）
+  daysUntil(dateStr) {
+    if (!dateStr) return null;
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return null;
+    return Math.ceil((d - new Date()) / (1000 * 60 * 60 * 24));
+  },
+
+  // 月份标签 YYYY-MM（兼容 Date 或日期字符串）
+  monthLabel(dateOrStr) {
+    const d = (dateOrStr instanceof Date) ? dateOrStr : new Date(dateOrStr);
+    if (isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  },
+
+  // 存货编码查找键：名称|规格，去空白（O5 去重，逻辑与原内联完全一致）
+  buildStockKey(name, spec) {
+    return ((name || '') + '|' + (spec || '')).replace(/\s+/g, '');
+  },
+
+  // 统一 Excel 导出（O1 去重）：rows 为空时提示并返回，行为与原各模块一致
+  exportToExcel(rows, filename, sheetName) {
+    if (!rows || !rows.length) { alert('没有数据'); return; }
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, sheetName || '数据');
+    XLSX.writeFile(wb, filename);
   }
 };

@@ -92,11 +92,17 @@ const SyncManager = {
     const modalOverlay = document.getElementById('modalOverlay');
 
     modalTitle.textContent = '云端同步配置';
+    const statusIcon = this.isOnline ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-right:6px;"></span>' : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#94a3b8;margin-right:6px;"></span>';
+    const statusText = this.isOnline ? '已同步 · 云端连接正常' : '未连接 · 请填写下方信息后点击保存并连接';
     modalBody.innerHTML = `
-      <div style="max-width:400px;">
-        <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:14px;line-height:1.5;">
+      <div style="width:100%;">
+        <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:12px;line-height:1.5;">
           配置 Supabase 项目信息以启用云端数据同步。所有数据将在本地和云端之间自动双向同步。
         </p>
+        <div id="syncStatusBanner" style="background:${this.isOnline ? 'linear-gradient(135deg,rgba(34,197,94,0.08),rgba(16,185,129,0.04))' : 'linear-gradient(135deg,rgba(148,163,184,0.08),rgba(148,163,184,0.04))'};border:1px solid ${this.isOnline ? 'rgba(34,197,94,0.2)' : 'rgba(148,163,184,0.15)'};border-radius:10px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;">
+          ${statusIcon}
+          <span style="font-size:12.5px;color:${this.isOnline ? '#166534' : '#475569'};font-weight:500;" id="syncConfigStatusText">${statusText}</span>
+        </div>
         <div style="margin-bottom:10px;">
           <label style="display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:3px;">Project URL</label>
           <input type="text" id="sbUrl" placeholder="https://xxxx.supabase.co" value="${this.config?.url || ''}"
@@ -107,11 +113,10 @@ const SyncManager = {
           <input type="password" id="sbKey" placeholder="eyJ..." value="${this.config?.key || ''}"
             style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;">
         </div>
-        <div class="btn-group" style="border-top:none;margin-top:14px;padding-top:0;display:flex;gap:8px;justify-content:flex-end;">
-          <button onclick="SyncManager.hideConfigDialog()" class="btn-secondary" style="padding:7px 18px;font-size:12.5px;">取消</button>
-          ${this.isOnline ? `<button onclick="SyncManager.disconnect();SyncManager.hideConfigDialog();" style="padding:7px 14px;border:none;border-radius:10px;background:linear-gradient(135deg,rgba(212,149,149,0.6),rgba(212,149,149,0.25));color:#993333;cursor:pointer;font-size:12px;font-weight:600;backdrop-filter:blur(8px);transition:all 0.2s;" onmouseover="this.style.transform='translateY(-1px)'" onmouseout="this.style.transform=''">断开连接</button>` : ''}
-          ${this.isOnline ? `<button onclick="SyncManager.manualPush()" class="btn-primary" style="padding:7px 16px;">📤 上传数据</button>` : ''}
-          <button onclick="SyncManager.saveConfig()" class="btn-primary" style="padding:7px 18px;">保存并连接</button>
+        <div class="btn-group" style="border-top:none;margin-top:14px;padding-top:0;display:flex;gap:8px;justify-content:center;">
+          ${this.isOnline ? `<button onclick="SyncManager.disconnect();SyncManager.hideConfigDialog();" style="flex:1;max-width:120px;padding:9px 0;border:none;border-radius:10px;background:linear-gradient(135deg,rgba(212,149,149,0.6),rgba(212,149,149,0.25));color:#993333;cursor:pointer;font-size:12.5px;font-weight:600;backdrop-filter:blur(8px);transition:all 0.2s;text-align:center;" onmouseover="this.style.transform='translateY(-1px)'" onmouseout="this.style.transform=''">断开连接</button>` : ''}
+          ${this.isOnline ? `<button onclick="SyncManager.manualPush()" class="btn-primary" style="flex:1;max-width:120px;padding:9px 0;font-size:12.5px;">📤 上传数据</button>` : ''}
+          <button onclick="SyncManager.saveConfig()" class="btn-primary" style="flex:1;max-width:120px;padding:9px 0;font-size:12.5px;">💾 保存并连接</button>
         </div>
       </div>
     `;

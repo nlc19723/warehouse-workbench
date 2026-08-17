@@ -103,33 +103,21 @@ const DashboardModule = {
           <div class="kpi-label">需补货种类</div>
           <div class="kpi-value">${stats.needRestockCount}<span class="kpi-unit"> 种</span></div>
         </div>
-        <div class="kpi-card card-danger" onclick="App.openPanel('supplier')">
-          <div class="kpi-label">合同到期预警</div>
-          <div class="kpi-value">${stats.contractWarnings}<span class="kpi-unit"> 家</span></div>
+        <div class="kpi-card card-warning" onclick="App.openPanel('supplier')">
+          <div class="kpi-label">临近到期供应商</div>
+          <div class="kpi-value">${stats.contractExpiringSoon ?? 0}<span class="kpi-unit"> 家</span></div>
         </div>
         <div class="kpi-card card-info" onclick="App.openPanel('supplier')">
-          <div class="kpi-label">供应商总数</div>
-          <div class="kpi-value">${stats.supplierCount}<span class="kpi-unit"> 家</span></div>
-        </div>
-        <div class="kpi-card card-info" onclick="App.openPanel('orders')">
-          <div class="kpi-label">订单总数</div>
-          <div class="kpi-value">${stats.orderCount}</div>
-        </div>
-        <div class="kpi-card card-warning" onclick="App.openPanel('orderTrack')">
-          <div class="kpi-label">在途订单</div>
-          <div class="kpi-value">${stats.pendingInbound}</div>
-        </div>
-        <div class="kpi-card card-info" onclick="App.openPanel('inbound')">
-          <div class="kpi-label">入库记录</div>
-          <div class="kpi-value">${stats.inboundCount}</div>
-        </div>
-        <div class="kpi-card card-success" onclick="App.openPanel('stock')">
-          <div class="kpi-label">物料种类</div>
-          <div class="kpi-value">${stats.stockCount}</div>
+          <div class="kpi-label">在供供应商数</div>
+          <div class="kpi-value">${stats.activeSupplierCount ?? stats.supplierCount}<span class="kpi-unit"> 家</span></div>
         </div>
         <div class="kpi-card card-info" onclick="App.openPanel('orders')">
           <div class="kpi-label">年度采购总额</div>
           <div class="kpi-value" style="font-size:20px;">¥${this.formatMoney(stats.totalOrderAmount)}</div>
+        </div>
+        <div class="kpi-card card-success" onclick="App.openPanel('inbound')">
+          <div class="kpi-label">年度供货总金额</div>
+          <div class="kpi-value" style="font-size:20px;">¥${this.formatMoney(stats.yearInboundAmount)}</div>
         </div>
         <div class="kpi-card card-danger" onclick="App.openPanel('lowTurnover')">
           <div class="kpi-label">低周转物料</div>
@@ -346,9 +334,8 @@ const DashboardModule = {
     if (!area) return;
     const items = [];
     if (stats.needRestockCount > 0) items.push({ type: 'restock', dot: 'urgent', text: `${stats.needRestockCount} 种物料库存不足`, meta: '库存预警' });
-    if (stats.pendingInbound > 0) items.push({ type: 'pendingInbound', dot: 'warning', text: `${stats.pendingInbound} 条订单未完成入库`, meta: '订单跟踪' });
-    if (stats.contractWarnings > 0) items.push({ type: 'contract', dot: 'urgent', text: `${stats.contractWarnings} 家供应商合同到期`, meta: '供应商管理' });
-    if (stats.lowTurnoverCount > 0) items.push({ type: 'lowTurnover', dot: 'warning', text: `${stats.lowTurnoverCount} 种低周转物料`, meta: '低周转材料' });
+    if (stats.pendingApproval > 0) items.push({ type: 'pendingApproval', dot: 'warning', text: `${stats.pendingApproval} 条订单未审批通过`, meta: '订单列表' });
+    if (stats.contractExpiringSoon > 0) items.push({ type: 'contract', dot: 'warning', text: `${stats.contractExpiringSoon} 家供应商临近到期`, meta: '供应商管理' });
     if (items.length === 0) items.push({ dot: 'warning', text: '暂无待办事项 ✓', meta: '' });
     area.innerHTML = items.map(i =>
       `<div class="todo-item ${i.type ? 'todo-clickable' : ''}" ${i.type ? `onclick="DashboardModule.showTodoDetail('${i.type}')"` : ''}>
@@ -367,6 +354,11 @@ const DashboardModule = {
     if (!overlay || !bodyEl) return;
 
     let title = '', headers = [], rows = [];
+
+    // 预构建存货编码映射（供下方多个分支复用）
+    let codeMap = null;
+    try { if (typeof DataLoader !== 'undefined') codeMap = await DataLoader.getStockNameSpecCodeMap(); } catch(e){/*ignore*/}
+
     if (type === 'restock') {
       title = '需补货物料明细';
       let list = await db.inventoryAlerts.toArray();
@@ -399,42 +391,51 @@ const DashboardModule = {
       list.forEach(a => { const v = parseFloat(a.补货值); a.补货值 = isNaN(v) ? 0 : v; });
 
       list = list.filter(a => a.补货值 && a.补货值 > 0);
-      headers = ['存货名称', '规格', '现存量', '补货值', '最低库存'];
-      rows = list.slice(0, 300).map(a => [a.存货名称 || '-', a.规格型号 || '-', this.fmt(a.现存量), this.fmt(a.补货值), this.fmt(a.最低库存预警)]);
+      headers = ['存货编码', '存货名称', '规格型号', '现存量', '补货值', '最低库存'];
+      rows = list.slice(0, 300).map(a => [a.存货编码 ?? '', a.存货名称 ?? '', a.规格型号 ?? '', this.fmt(a.现存量), this.fmt(a.补货值), this.fmt(a.最低库存预警)]);
     } else if (type === 'pendingInbound') {
       title = '未完成入库订单';
       const list = (await db.orders.toArray()).filter(o => parseFloat(o.未入库量) > 0);
-      headers = ['订单编号', '供应商', '存货名称', '规格', '订货量', '未入库量'];
-      rows = list.slice(0, 300).map(o => [o.订单编号 || '-', o.供应商 || '-', o.存货名称 || '-', o.规格型号 || '-', this.fmt(o.数量), this.fmt(o.未入库量)]);
+      // 填充存货编码
+      if (codeMap) list.forEach(o => { if (o.存货名称) { const k=(o.存货名称+'|'+(o.规格型号||'')).replace(/\s+/g,''); o._存货编码=codeMap.get(k)||''; } });
+      headers = ['订单编号', '供应商', '存货编码', '存货名称', '规格型号', '订货量', '未入库量'];
+      rows = list.slice(0, 300).map(o => [o.订单编号 ?? '', o.供应商 ?? '', o._存货编码 ?? '', o.存货名称 ?? '', o.规格型号 ?? '', this.fmt(o.数量), this.fmt(o.未入库量)]);
+    } else if (type === 'pendingApproval') {
+      title = '未审批通过订单';
+      const list = (await db.orders.toArray()).filter(o => o.审批状态 && o.审批状态 !== '审批通过');
+      // 填充存货编码（显示全部行项，不按订单编号去重）
+      if (codeMap) list.forEach(o => { if (o.存货名称) { const k=(o.存货名称+'|'+(o.规格型号||'')).replace(/\s+/g,''); o._存货编码=codeMap.get(k)||''; } });
+      headers = ['订单编号', '日期', '供应商', '存货编码', '存货名称', '规格型号', '审批状态', '未入库量'];
+      rows = list.slice(0, 300).map(o => [o.订单编号 ?? '', o.日期 || o.已下单时间 || '', o.供应商 ?? '', o._存货编码 ?? '', o.存货名称 ?? '', o.规格型号 ?? '', o.审批状态 || '', this.fmt(o.未入库量)]);
     } else if (type === 'contract') {
-      title = '合同即将到期供应商';
+      title = '临近到期供应商（30-90天）';
       const now = new Date();
       const list = (await db.suppliers.toArray())
         .map(s => {
           if (!s.年度合同到期时间) return null;
           const diff = Math.ceil((new Date(s.年度合同到期时间) - now) / 86400000);
-          return (diff <= 90 && diff >= 0) ? { s, diff } : null;
+          return (diff > 30 && diff <= 90) ? { s, diff } : null;
         })
         .filter(Boolean)
         .sort((a, b) => a.diff - b.diff);
       headers = ['供应商', '到期时间', '剩余天数', '状态'];
-      rows = list.slice(0, 300).map(({ s, diff }) => [s.供应商 || '-', s.年度合同到期时间 || '-', diff + ' 天', diff <= 30 ? '紧急' : '关注']);
+      rows = list.slice(0, 300).map(({ s, diff }) => [s.供应商 ?? '', s.年度合同到期时间 ?? '', diff + ' 天', '关注']);
     } else if (type === 'lowTurnover') {
       title = '低周转物料';
       const list = await db.lowTurnover.toArray();
-      headers = ['物料名称', '规格', '现存数量', '暂无法使用量'];
-      rows = list.slice(0, 300).map(l => [l.物料名称 || l.存货名称 || '-', l.规格 || l.规格型号 || '-', this.fmt(l.现存数量), this.fmt(l.暂无法使用量)]);
+      headers = ['存货编码', '存货名称', '规格型号', '现存数量', '暂无法使用量'];
+      rows = list.slice(0, 300).map(l => [l.存货编码 ?? '', l.物料名称 || l.存货名称 || '', l.规格 || l.规格型号 || '', this.fmt(l.现存数量), this.fmt(l.暂无法使用量)]);
     }
 
     titleEl.textContent = title + (rows.length ? `（${rows.length} 条）` : '');
     bodyEl.innerHTML = rows.length
-      ? `<div class="todo-detail-table"><table class="data-table"><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
+      ? `<div class="todo-detail-table"><table class="data-table"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
       : '<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-text">暂无相关记录</div></div>';
     overlay.classList.add('show');
   },
 
   fmt(v) {
-    if (v === null || v === undefined || v === '') return '-';
+    if (v === null || v === undefined || v === '') return '';
     const n = parseFloat(v);
     return isNaN(n) ? v : this.formatMoney(n);
   },

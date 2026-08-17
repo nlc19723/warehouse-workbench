@@ -259,6 +259,7 @@ const App = {
           <div style="display:flex;flex-direction:column;gap:8px;">
             <button onclick="App.closePanel();SyncManager.showConfigDialog();" class="btn-secondary" style="justify-content:flex-start;">☁️ 云端同步配置</button>
             <button onclick="App.closePanel();DataLoader.reimport();" class="btn-secondary" style="justify-content:flex-start;">🔄 重新导入数据</button>
+            <button onclick="App.closePanel();DataLoader.restoreBuiltIn();" class="btn-secondary" style="justify-content:flex-start;">♻️ 恢复原始内置数据</button>
           </div>
         </div>
 
@@ -330,8 +331,10 @@ const App = {
   },
 
   // ===== 模块切换 =====
-  go(moduleName) {
+  async go(moduleName) {
     if (!this.modules[moduleName]) return;
+    // 🟡 渲染令牌（M5）：快速切换模块时，丢弃过期 render 的后续副作用，避免竞态与 DOM 互相覆盖
+    const token = (this._goToken = (this._goToken || 0) + 1);
     this.currentModule = moduleName;
     document.querySelectorAll('.sidebar-item[data-module]').forEach(item => {
       item.classList.toggle('active', item.getAttribute('data-module') === moduleName);
@@ -341,8 +344,9 @@ const App = {
     if (titleEl) titleEl.textContent = this.modules[moduleName].title || '库管工作台';
     const meta = this.modules[moduleName];
     try {
-      meta.instance.render();
-      // 出库模块：检查是否有从列表页跳转过来的待加载单号（守卫修复：校验正确的模块）
+      await meta.instance.render();
+      if (token !== this._goToken) return; // 已被更新的模块切换打断，丢弃过期操作
+      // 出库模块：检查是否有从列表页跳转过来的待加载单号
       if (moduleName === 'outbound' && typeof OutboundListModule !== 'undefined') {
         setTimeout(() => OutboundListModule.checkPendingLoad(), 300);
       }

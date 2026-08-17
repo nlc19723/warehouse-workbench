@@ -40,8 +40,9 @@ window.AppConfig = {
   // ────────────────────────────────────────
   app: {
     name: '库管系统工作台',
-    version: 'v57',
+    version: 'v101',
     dataPath: 'data/库管系统.xlsx',
+    kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
     pages: {
       outboundListPageSize: 20   // 出库列表每页固定条数
     }

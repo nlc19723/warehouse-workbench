@@ -2,7 +2,7 @@
   "name": "库管工作台",
   "short_name": "库管",
   "description": "个人库管系统工作台 - 数据驱动的仓库管理助手",
-  "start_url": "./?v=18",
+  "start_url": "./?v=101",
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#F0F4F8",
