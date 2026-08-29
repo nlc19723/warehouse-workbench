@@ -4,14 +4,17 @@
 
 const StockModule = {
   currentData: [],
+  currentFilter: { keyword: '' },
   currentPage: 1,
   pageSize: 20,
 
-  async render() {
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     const content = document.getElementById('contentArea');
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="stockKw" placeholder="搜索物料编码、名称、规格..." onkeydown="if(event.key==='Enter')StockModule.applyFilter()">
+        <input type="text" id="stockKw" placeholder="搜索物料编码、名称、规格..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')StockModule.applyFilter()">
         <button class="search-glass" onclick="StockModule.applyFilter()">🔍 搜索</button>
         <button class="secondary" onclick="StockModule.resetFilter()">重置</button>
         <button class="secondary" onclick="StockModule.exportData()">📥 导出</button>
@@ -22,12 +25,14 @@ const StockModule = {
       <div id="stockPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
 
-    await this.loadData();
+    await this.loadData(myToken);
   },
 
-  async loadData() {
-    let stocks = await db.stock.toArray();
-    const kw = document.getElementById('stockKw')?.value.trim().toLowerCase();
+  async loadData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
+    let stocks = await DataStore.getStock();
+    const kw = (this.currentFilter.keyword || '').trim().toLowerCase();
 
     if (kw) {
       stocks = stocks.filter(s =>
@@ -40,6 +45,7 @@ const StockModule = {
     const totalQty = stocks.reduce((s, c) => s + (parseFloat(c.现存数量) || 0), 0);
     const updateTime = stocks.length > 0 ? stocks[0].数据更新时间 : '';
 
+    if (rt !== undefined && rt !== App._goToken) return;
     document.getElementById('stockSummary').innerHTML = `
       <div class="kpi-grid">
         <div class="kpi-card card-info">
@@ -48,22 +54,25 @@ const StockModule = {
         </div>
         <div class="kpi-card card-info">
           <div class="kpi-label">总库存数量</div>
-          <div class="kpi-value">${this.formatNum(totalQty)}</div>
+          <div class="kpi-value">${TableUtils.formatNum(totalQty)}</div>
         </div>
       </div>
     `;
 
     this.currentData = stocks;
-    this.currentPage = 1;
-    this.renderTable();
+    this.renderTable(rt);
   },
 
-  renderTable() {
+  renderTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const data = this.currentData;
     const total = data.length;
-    const totalPages = Math.ceil(total / this.pageSize);
+    const pageSize = this.pageSize === 'all' ? total : this.pageSize;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
     const page = Math.min(this.currentPage, Math.max(1, totalPages));
-    const items = data.slice((page - 1) * this.pageSize, page * this.pageSize);
+    this.currentPage = page;
+    const items = data.slice((page - 1) * pageSize, page * pageSize);
 
     const area = document.getElementById('stockTableArea');
     if (items.length === 0) {
@@ -88,10 +97,10 @@ const StockModule = {
             ${items.map(s => `
               <tr>
                 <td>${esc(s.仓库名称 ?? '')}</td>
-                <td>${esc(s.存货编码 ?? '')}</td>
-                <td><strong>${esc(s.存货名称)}</strong></td>
+                <td>${TableUtils.link('stock', s.存货编码 ?? '', s.存货编码 ?? '')}</td>
+                <td><strong>${esc(s.存货名称 ?? '')}</strong></td>
                 <td>${esc(s.规格型号 ?? '')}</td>
-                <td><strong style="color:${parseFloat(s.现存数量) < 10 ? 'var(--status-danger)' : 'var(--text-main)'};">${this.formatNum(s.现存数量)}</strong></td>
+                <td><strong style="color:${parseFloat(s.现存数量) < 10 ? 'var(--status-danger)' : 'var(--text-main)'};">${TableUtils.formatNum(s.现存数量)}</strong></td>
               </tr>
             `).join('')}
           </tbody>
@@ -99,52 +108,30 @@ const StockModule = {
       </div>
     `;
 
-    const html = [];
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>`);
-    html.push(`<span class="page-btns">`);
-    html.push(`<button onclick="StockModule.goPage(1)" ${page === 1 ? 'disabled' : ''}>«</button>`);
-    html.push(`<button onclick="StockModule.goPage(${page - 1})" ${page === 1 ? 'disabled' : ''}>‹</button>`);
-    const start = Math.max(1, page - 2);
-    const end = Math.min(totalPages, start + 4);
-    for (let i = start; i <= end; i++) {
-      html.push(`<button class="${i === page ? 'active' : ''}" onclick="StockModule.goPage(${i})">${i}</button>`);
-    }
-    html.push(`<button onclick="StockModule.goPage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>›</button>`);
-    html.push(`<button onclick="StockModule.goPage(${totalPages})" ${page === totalPages ? 'disabled' : ''}>»</button>`);
-    html.push(`</span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      每页 <select onchange="StockModule.changePageSize(parseInt(this.value))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
-        <option value="20" ${this.pageSize===20?'selected':''}>20</option>
-        <option value="50" ${this.pageSize===50?'selected':''}>50</option>
-        <option value="100" ${this.pageSize===100?'selected':''}>100</option>
-      </select> 条
-    </span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      跳至 <input type="number" id="stockPageJumper" min="1" max="${totalPages}" value="${page}"
-        onkeydown="if(event.key==='Enter')StockModule.goPage(parseInt(this.value))"
-        style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
-      / ${totalPages} 页
-    </span>`);
-    document.getElementById('stockPagination').innerHTML = html.join('');
+    // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
+    TableUtils.renderPagination('stockPagination', { module: 'StockModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
     TableUtils.initSmartSelect('stockTableArea');
-    TableUtils.initSortableHeaders('stockTableArea', this.currentData, (sorted) => {
-      this.currentData = sorted;
-      this.currentPage = 1;
-      this.renderTable();
-    });
+    TableUtils.initSortableHeaders('stockTableArea');
   },
 
   changePageSize(size) {
-    this.pageSize = size;
+    this.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     this.currentPage = 1;
     this.renderTable();
   },
 
-  applyFilter() { this.loadData(); },
+  applyFilter() {
+    this.currentFilter.keyword = (document.getElementById('stockKw')?.value || '').trim();
+    this.currentPage = 1;
+    this.loadData();
+  },
 
   resetFilter() {
-    document.getElementById('stockKw').value = '';
+    this.currentFilter = { keyword: '' };
+    this.currentPage = 1;
+    const input = document.getElementById('stockKw');
+    if (input) input.value = '';
     this.loadData();
   },
 
@@ -153,14 +140,5 @@ const StockModule = {
   exportData() {
     // 🟢 O1：统一导出（行为与原逻辑一致）
     TableUtils.exportToExcel(this.currentData, `现存量_${new Date().toISOString().split('T')[0]}.xlsx`, '现存量');
-  },
-
-  formatNum(num) {
-    if (num == null || num === '') return '';
-    // 保留原始精度，不做四舍五入
-    const n = parseFloat(num);
-    if (isNaN(n)) return '';
-    // 如果是整数就显示整数，有小数就保留小数（最多4位）
-    return Number.isInteger(n) ? n.toLocaleString('zh-CN') : n.toLocaleString('zh-CN', { maximumFractionDigits: 4, minimumFractionDigits: undefined });
   }
 };

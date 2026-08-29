@@ -3,26 +3,29 @@
 // ============================================
 
 const InventoryAlertModule = {
+  currentFilter: { keyword: '', category: '', status: 'yes' },
   currentPage: 1,
   pageSize: 20,
   currentData: [],
 
-  async render() {
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     const content = document.getElementById('contentArea');
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="alertKw" placeholder="搜索物料名称、编码..." onkeydown="if(event.key==='Enter')InventoryAlertModule.applyFilter()">
+        <input type="text" id="alertKw" placeholder="搜索物料名称、编码..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')InventoryAlertModule.applyFilter()">
         <select id="alertCategory">
           <option value="">全部分类</option>
-          <option value="A">A类</option>
-          <option value="B">B类</option>
-          <option value="C">C类</option>
-          <option value="不使用类">不使用类</option>
+          <option value="A" ${this.currentFilter.category === 'A' ? 'selected' : ''}>A类</option>
+          <option value="B" ${this.currentFilter.category === 'B' ? 'selected' : ''}>B类</option>
+          <option value="C" ${this.currentFilter.category === 'C' ? 'selected' : ''}>C类</option>
+          <option value="不使用类" ${this.currentFilter.category === '不使用类' ? 'selected' : ''}>不使用类</option>
         </select>
-        <select id="alertStatus">
-          <option value="" selected>全部状态</option>
-          <option value="yes">需补货</option>
-          <option value="no">正常</option>
+        <select id="alertStatus" onchange="InventoryAlertModule.applyFilter()">
+          <option value="yes" ${this.currentFilter.status === 'yes' ? 'selected' : ''}>需补货</option>
+          <option value="no" ${this.currentFilter.status === 'no' ? 'selected' : ''}>正常</option>
+          <option value="" ${this.currentFilter.status === '' ? 'selected' : ''}>全部状态</option>
         </select>
         <button class="search-glass" onclick="InventoryAlertModule.applyFilter()">筛选</button>
         <button class="secondary" onclick="InventoryAlertModule.resetFilter()">重置</button>
@@ -34,11 +37,13 @@ const InventoryAlertModule = {
       <div id="alertPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
 
-    await this.loadData();
+    await this.loadData(myToken);
   },
 
-  async loadData() {
-    let alerts = await db.inventoryAlerts.toArray();
+  async loadData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
+    let alerts = await DataStore.getInventoryAlerts();
 
     // ===== 补货值：直接使用导入时从源数据"是否需补货"(J列)读取的原始数值 =====
     // 不做任何回退计算；若值为空(NaN)则设为0
@@ -49,7 +54,7 @@ const InventoryAlertModule = {
 
     // 从 stock（中心库房现存量）表交叉获取真实现存量
     try {
-      const stockRows = await db.stock.toArray();
+      const stockRows = await DataStore.getStock();
       const stockByCode = new Map();
       const stockByNameSpec = new Map();
       stockRows.forEach(s => {
@@ -80,9 +85,10 @@ const InventoryAlertModule = {
       if (fixedCount > 0) console.log(`[inventory-alert] 从库存表补全 ${fixedCount}/${alerts.length} 条现存量`);
     } catch(e) { console.warn('[inventory-alert] 库存表关联失败:', e); }
 
-    const kw = (document.getElementById('alertKw')?.value.trim() || '').replace(/\s+/g, '').toLowerCase();
-    const category = document.getElementById('alertCategory')?.value;
-    const status = document.getElementById('alertStatus')?.value;
+    const kw = (this.currentFilter.keyword || '').replace(/\s+/g, '').toLowerCase();
+    const category = this.currentFilter.category || '';
+    // 状态默认「需补货」，但允许用户切换其他状态
+    const status = this.currentFilter.status || '';
 
     if (kw) {
       // 🟡 M9：输入侧已归一化（去空白），数据侧同样去空白再比较，避免含空格/全角空格的存货名称匹配失败
@@ -103,6 +109,7 @@ const InventoryAlertModule = {
     const needRestock = alerts.filter(a => a.补货值 && a.补货值 > 0);
     const totalNeedQty = needRestock.reduce((s, a) => s + (parseFloat(a.补货值) || 0), 0);
 
+    if (rt !== undefined && rt !== App._goToken) return;
     document.getElementById('alertSummary').innerHTML = `
       <div class="kpi-grid">
         <div class="kpi-card card-warning">
@@ -111,31 +118,45 @@ const InventoryAlertModule = {
         </div>
         <div class="kpi-card card-warning">
           <div class="kpi-label">需补货量(在途)</div>
-          <div class="kpi-value">${this.formatNum(totalNeedQty)}</div>
+          <div class="kpi-value">${TableUtils.formatNum(totalNeedQty)}</div>
         </div>
       </div>
     `;
 
     this.currentData = alerts;
-    this.currentPage = 1;
-    this.renderTable();
+    this.renderTable(rt);
   },
 
-  applyFilter() { this.loadData(); },
-
-  resetFilter() {
-    document.getElementById('alertKw').value = '';
-    document.getElementById('alertCategory').value = '';
-    document.getElementById('alertStatus').value = '';
+  applyFilter() {
+    this.currentFilter.keyword = (document.getElementById('alertKw')?.value || '').trim();
+    this.currentFilter.category = document.getElementById('alertCategory')?.value || '';
+    this.currentFilter.status = document.getElementById('alertStatus')?.value || '';
+    this.currentPage = 1;
     this.loadData();
   },
 
-  renderTable() {
+  resetFilter() {
+    this.currentFilter = { keyword: '', category: '', status: 'yes' };
+    this.currentPage = 1;
+    const kwInput = document.getElementById('alertKw');
+    const catSelect = document.getElementById('alertCategory');
+    const statusSelect = document.getElementById('alertStatus');
+    if (kwInput) kwInput.value = '';
+    if (catSelect) catSelect.value = '';
+    if (statusSelect) statusSelect.value = 'yes';
+    this.loadData();
+  },
+
+  renderTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const data = this.currentData;
     const total = data.length;
-    const totalPages = Math.ceil(total / this.pageSize);
+    const pageSize = this.pageSize === 'all' ? total : this.pageSize;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
     const page = Math.min(this.currentPage, Math.max(1, totalPages));
-    const items = data.slice((page - 1) * this.pageSize, page * this.pageSize);
+    this.currentPage = page;
+    const items = data.slice((page - 1) * pageSize, page * pageSize);
 
     const area = document.getElementById('alertTableArea');
     if (items.length === 0) {
@@ -146,7 +167,7 @@ const InventoryAlertModule = {
 
     area.innerHTML = `
       <div class="table-wrapper">
-        <table class="data-table">
+        <table class="data-table" data-table-key="inventoryAlert">
           <thead>
             <tr>
               <th>存货编码</th>
@@ -169,16 +190,16 @@ const InventoryAlertModule = {
               const needRestock = (a.补货值 && a.补货值 > 0) ? true : false;
               return `
                 <tr class="${needRestock ? 'row-warning' : ''}">
-                  <td>${esc(a.存货编码 ?? '')}</td>
-                  <td><strong>${esc(a.存货名称)}</strong></td>
+                  <td>${TableUtils.link('stock', a.存货编码 ?? '', a.存货编码 ?? '')}</td>
+                  <td><strong>${esc(a.存货名称 ?? '')}</strong></td>
                   <td>${esc(a.规格型号 ?? '')}</td>
                   <td>${a.分类 ? `<span class="tag ${a.分类 === 'A' ? 'tag-success' : a.分类 === 'B' ? 'tag-warning' : 'tag-neutral'}">${esc(a.分类)}</span>` : ''}</td>
-                  <td>${this.formatNum(a.近一年月均入库量)}</td>
-                  <td>${this.formatNum(a.最低库存预警)}</td>
-                  <td>${this.formatNum(a.最高库存)}</td>
-                  <td>${this.formatNum(a.现存量)}</td>
-                  <td style="${needRestock ? 'color:var(--status-danger);font-weight:600;' : ''}">${this.formatNum(a.补货值)}</td>
-                  <td>${this.formatNum(a.在途订单)}</td>
+                  <td>${TableUtils.formatNum(a.近一年月均入库量)}</td>
+                  <td>${TableUtils.formatNum(a.最低库存预警)}</td>
+                  <td>${TableUtils.formatNum(a.最高库存)}</td>
+                  <td>${TableUtils.formatNum(a.现存量)}</td>
+                  <td style="${needRestock ? 'color:var(--status-danger);font-weight:600;' : ''}">${TableUtils.formatNum(a.补货值)}</td>
+                  <td>${TableUtils.formatNum(a.在途订单)}</td>
                   <td>${needRestock ? '<span class="tag tag-danger">需补货</span>' : '<span class="tag tag-success">正常</span>'}</td>
                   <td>${esc(String(a.所上或库房 ?? '').substring(0, 15))}${String(a.所上或库房 ?? '').length > 15 ? '...' : ''}</td>
                   <td>${esc(String(a.工程项目 ?? '').substring(0, 15))}${String(a.工程项目 ?? '').length > 15 ? '...' : ''}</td>
@@ -190,43 +211,15 @@ const InventoryAlertModule = {
       </div>
     `;
 
-    const html = [];
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>`);
-    html.push(`<span class="page-btns">`);
-    html.push(`<button onclick="InventoryAlertModule.goPage(1)" ${page === 1 ? 'disabled' : ''}>«</button>`);
-    html.push(`<button onclick="InventoryAlertModule.goPage(${page - 1})" ${page === 1 ? 'disabled' : ''}>‹</button>`);
-    const start = Math.max(1, page - 2);
-    const end = Math.min(totalPages, start + 4);
-    for (let i = start; i <= end; i++) {
-      html.push(`<button class="${i === page ? 'active' : ''}" onclick="InventoryAlertModule.goPage(${i})">${i}</button>`);
-    }
-    html.push(`<button onclick="InventoryAlertModule.goPage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>›</button>`);
-    html.push(`<button onclick="InventoryAlertModule.goPage(${totalPages})" ${page === totalPages ? 'disabled' : ''}>»</button>`);
-    html.push(`</span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      每页 <select onchange="InventoryAlertModule.changePageSize(parseInt(this.value))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
-        <option value="20" ${this.pageSize===20?'selected':''}>20</option>
-        <option value="50" ${this.pageSize===50?'selected':''}>50</option>
-        <option value="100" ${this.pageSize===100?'selected':''}>100</option>
-      </select> 条
-    </span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      跳至 <input type="number" id="alertPageJumper" min="1" max="${totalPages}" value="${page}"
-        onkeydown="if(event.key==='Enter')InventoryAlertModule.goPage(parseInt(this.value))"
-        style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
-      / ${totalPages} 页
-    </span>`);
-    document.getElementById('alertPagination').innerHTML = html.join('');
+    // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
+    TableUtils.renderPagination('alertPagination', { module: 'InventoryAlertModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
     TableUtils.initSmartSelect('alertTableArea');
-    TableUtils.initSortableHeaders('alertTableArea', this.currentData, (sorted) => {
-      this.currentData = sorted;
-      this.renderTable();
-    });
+    TableUtils.initSortableHeaders('alertTableArea');
   },
 
   changePageSize(size) {
-    this.pageSize = size;
+    this.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     this.currentPage = 1;
     this.renderTable();
   },
@@ -236,10 +229,5 @@ const InventoryAlertModule = {
   exportData() {
     // 🟢 O1：统一导出（行为与原逻辑一致）
     TableUtils.exportToExcel(this.currentData, `库存预警_${new Date().toISOString().split('T')[0]}.xlsx`, '库存预警');
-  },
-
-  formatNum(num) {
-    if (num == null || num === '') return '';
-    return new Intl.NumberFormat('zh-CN').format(num);
   }
 };

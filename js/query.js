@@ -4,8 +4,24 @@
 
 const QueryModule = {
   currentTab: 'stock', // stock | orders | inbound | pricing
-  page: 1, pageSize: 20,
+  page: 1, pageSize: 30,
   searchKW: '', results: [],
+  currentFilter: {}, // 跨模块带参跳转（M1）：App.go 注入的 { keyword } 自动触发搜索
+  startDate: '',
+  endDate: '',
+  HISTORY_KEY: 'wb_query_search_history',
+  HISTORY_MAX: 5,
+  _historyOpen: false,
+
+  // 默认固定日期区间：3 个月前的 1 号 → 今日（按本地时区格式化）
+  getDefaultDateRange() {
+    const pad = n => String(n).padStart(2, '0');
+    const today = new Date();
+    const end = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+    const start = new Date(today.getFullYear(), today.getMonth() - 3, 1);
+    const startStr = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`;
+    return { start: startStr, end };
+  },
 
   tabs: [
     { id: 'stock', label: '存量', icon: '🏪' },
@@ -14,47 +30,69 @@ const QueryModule = {
     { id: 'pricing', label: '供应商价格', icon: '💰' },
   ],
 
-  // 各版块表头（严格对齐超级查询系统工作表）
-  // 🟡 注意（M7）：表头与 fetchTabData 返回值"双份维护"曾导致空单元格 bug。
-  // 现改为：表头由 fetchTabData 返回的对象的键动态派生（见 getColumns），此处仅作空数据兜底。
-  columns: {
-    stock: ['序号','存货编码','存货名称','规格型号','月均入库量','现存量','是否需补货','在途订单','所上或库房','工程项目'],
-    orders: ['订单编号','日期','项目名称','供应商','存货编号','存货名称','规格型号','订单量','未入库订单量'],
-    inbound: ['表体订单号','入库日期','项目名称','入库单号','供应商','存货编码','存货名称','规格型号','入库量'],
-    pricing: ['供应商','存货编码','存货名称','规格型号','主计量','生效日期','失效日期','含税单价'],
-  },
-
-  // 🟡 M7：表头单一数据源 —— 始终从实际数据对象键派生，杜绝 columns 与数据键不一致
+  // 🟢 O11：表头单一数据源 —— 始终从实际数据对象键动态派生，不再维护冗余 columns 列表
+  // （无数据兜底返回空数组；renderResults 在 total===0 时走 empty-state，不会用此渲染表头）
   getColumns() {
     const data = (this.fullData && this.fullData.length) ? this.fullData : this.results;
     if (data && data.length) return Object.keys(data[0]);
-    return this.columns[this.currentTab] || [];
+    return [];
   },
 
-  async render() {
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
+    // 跨模块带参跳转（M1）：App.go 注入的 currentFilter.keyword 自动触发搜索
+    if (this.currentFilter && this.currentFilter.keyword) {
+      this.searchKW = this.currentFilter.keyword;
+      this.currentFilter.keyword = '';
+    }
+    // 首次进入时初始化固定日期区间；用户可修改，切出切回不重置
+    if (!this.startDate || !this.endDate) {
+      const dr = this.getDefaultDateRange();
+      this.startDate = dr.start;
+      this.endDate = dr.end;
+    }
+
     const content = document.getElementById('contentArea');
+
+    // 清理可能遗留的旧日期选择器弹窗（render 会重建 input）
+    if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
+
     const tabBtns = this.tabs.map(t =>
       `<button class="tab-btn ${t.id === this.currentTab ? 'active' : ''}" onclick="QueryModule.switchTab('${t.id}')">${t.icon} ${t.label}</button>`
     ).join('');
 
+    // 日期区间：与 tab 分开显示，仅约束订单 / 入库两个板块；首次默认近 3 个月，可编辑
+    // 版式与订单列表完全一致：日期框放在 .filter-bar 内，与搜索框、按钮同一行
     content.innerHTML = `
-      <div class="tab-bar">${tabBtns}</div>
-      <div class="filter-bar">
-        <input type="text" id="querySearch" placeholder="多关键词搜索（空格/逗号分隔）..." style="max-width:400px;flex:0 1 400px;" value="${this.escapeHtml(this.searchKW)}" onkeydown="if(event.key==='Enter')QueryModule.doSearch()">
-        <button class="search-glass" onclick="QueryModule.doSearch()">搜索</button>
-        <button class="secondary" onclick="QueryModule.clearSearch()">清空</button>
+      <div class="tab-bar" style="display:flex;align-items:center;gap:4px;">${tabBtns}</div>
+      <div class="filter-bar" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;padding:0;align-items:flex-start;">
+        <div class="filter-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
+          <input type="text" id="querySearch" class="filter-search-short" autocomplete="off" placeholder="多关键词搜索（空格/逗号分隔）..." value="${this.escapeHtml(this.searchKW)}" onkeydown="if(event.key==='Enter')QueryModule.doSearch()" onfocus="QueryModule.showHistory()">
+          <input type="text" id="queryStartDate" value="${this.startDate}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="QueryModule.onDateChange()" readonly>
+          <span class="filter-sep">至</span>
+          <input type="text" id="queryEndDate" value="${this.endDate}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="QueryModule.onDateChange()" readonly>
+          <button class="search-glass" onclick="QueryModule.doSearch()">搜索</button>
+          <button class="secondary" onclick="QueryModule.clearSearch()">清空</button>
+        </div>
       </div>
       <div id="queryResultArea"></div>
     `;
 
+    // 挂载自定义日期选择器（替换原生 type=date，保持 id 与 change 事件不变）
+    if (typeof DatePicker !== 'undefined') {
+      DatePicker.mount('queryStartDate');
+      DatePicker.mount('queryEndDate');
+    }
+
     if (this.results.length > 0) {
-      this.renderResults();
+      this.renderResults(myToken);
     } else if (this.searchKW) {
       // 有搜索词但无结果：先加载数据再搜索
-      await this.loadTabData();
+      await this.loadTabData(myToken);
       if (this.searchKW) this.doSearchSilent();
     } else {
-      await this.loadTabData();
+      await this.loadTabData(myToken);
     }
   },
 
@@ -72,22 +110,22 @@ const QueryModule = {
     this.render();
   },
 
-  async loadTabData() {
+  async loadTabData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
     const data = await this.fetchTabData();
     this.fullData = data;   // 全量原始数据，二次搜索始终基于它重新过滤（避免在上次结果集上叠加过滤）
     this.results = data;
-    this.page = 1;
     if (!this.searchKW) {
-      this.renderResults();
+      this.renderResults(rt);
     }
   },
 
   async fetchTabData() {
     switch (this.currentTab) {
       case 'stock': {
-        const alerts = await db.inventoryAlerts.toArray();
+        const alerts = await DataStore.getRows('inventoryAlerts');
         // 从 stock（中心库房现存量）表获取真实库存数据
-        const stockRows = await db.stock.toArray();
+        const stockRows = await DataStore.getRows('stock');
         const stockByCode = new Map();
         const stockByNameSpec = new Map();
         stockRows.forEach(s => {
@@ -129,8 +167,8 @@ const QueryModule = {
         });
       }
       case 'orders': {
-        const orders = await db.orders.toArray();
-        return orders.map(o => ({
+        const orders = await DataStore.getRows('orders');
+        let list = orders.map(o => ({
           '订单编号': o.订单编号 || '',
           '日期': o.日期 || '',
           '项目名称': o.项目名称 || '',
@@ -141,11 +179,13 @@ const QueryModule = {
           '订单量': o.数量 || 0,
           '未入库订单量': o.未入库量 || 0,
         }));
+        list = this._filterByDateRange(list, '日期');
+        return list;
       }
       case 'inbound': {
-        const inbound = await db.inbound.toArray();
-        return inbound.map(i => ({
-          '表体订单号': i.表体订单号 || '',
+        const inbound = await DataStore.getRows('inbound');
+        let list = inbound.map(i => ({
+          '订单编号': i.表体订单号 || '',  // 🟢 v190：列名与入库列表对齐（与入库表单体订单号同字段）
           '入库日期': i.入库日期 || '',
           '项目名称': i.项目名称 || '',
           '入库单号': i.入库单号 || '',
@@ -155,9 +195,11 @@ const QueryModule = {
           '规格型号': i.规格型号 || '',
           '入库量': i.数量 || 0,
         }));
+        list = this._filterByDateRange(list, '入库日期');
+        return list;
       }
       case 'pricing': {
-        const pricing = await db.pricing.toArray();
+        const pricing = await DataStore.getRows('pricing');
         return pricing.map(p => ({
           '供应商': p.供应商 || '',
           '存货编码': p.存货编码 || '',
@@ -177,8 +219,10 @@ const QueryModule = {
     const input = document.getElementById('querySearch');
     if (input) this.searchKW = input.value.trim();
     if (!this.searchKW) { this.loadTabData(); return; }
+    this.saveHistoryAsync(this.searchKW);
     this.performSearch();
     this.renderResults();
+    this.hideHistory();
   },
 
   // 静默搜索（不读取 input，用已有 searchKW）
@@ -215,13 +259,119 @@ const QueryModule = {
     this.loadTabData();
   },
 
-  renderResults() {
+  // ===== 搜索历史（localStorage 长期记忆，最近 5 条）=====
+  getHistory() {
+    try {
+      const raw = localStorage.getItem(this.HISTORY_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter(Boolean).slice(0, this.HISTORY_MAX) : [];
+    } catch (e) { return []; }
+  },
+  // 读取搜索历史：优先云端设置（跨设备），无云端回退 localStorage
+  async getHistoryAsync() {
+    if (typeof DataStore !== 'undefined' && DataStore.getSetting) {
+      try {
+        const cloud = await DataStore.getSetting('search_history_query');
+        if (Array.isArray(cloud) && cloud.length) return cloud.slice(0, this.HISTORY_MAX);
+      } catch (e) {}
+    }
+    return this.getHistory();
+  },
+  // 保存搜索历史：localStorage + 云端双写
+  async saveHistoryAsync(kw) {
+    kw = (kw || '').trim();
+    if (!kw) return;
+    let arr = this.getHistory().filter(k => k !== kw);
+    arr.unshift(kw);
+    arr = arr.slice(0, this.HISTORY_MAX);
+    try { localStorage.setItem(this.HISTORY_KEY, JSON.stringify(arr)); } catch (e) {}
+    if (typeof DataStore !== 'undefined' && DataStore.setSetting) {
+      DataStore.setSetting('search_history_query', arr).catch(() => {});
+    }
+  },
+  saveHistory(kw) {
+    kw = (kw || '').trim();
+    if (!kw) return;
+    let arr = this.getHistory().filter(k => k !== kw);
+    arr.unshift(kw);
+    arr = arr.slice(0, this.HISTORY_MAX);
+    try { localStorage.setItem(this.HISTORY_KEY, JSON.stringify(arr)); } catch (e) {}
+  },
+  removeHistory(kw) {
+    const arr = this.getHistory().filter(k => k !== kw);
+    try { localStorage.setItem(this.HISTORY_KEY, JSON.stringify(arr)); } catch (e) {}
+    if (this._historyOpen) this.showHistory();
+  },
+  clearHistory() {
+    try { localStorage.removeItem(this.HISTORY_KEY); } catch (e) {}
+    this.hideHistory();
+  },
+
+  // 显示历史对话框（模仿浏览器"保存的信息"浮层样式）
+  async showHistory() {
+    const input = document.getElementById('querySearch');
+    if (!input) return;
+    const list = await this.getHistoryAsync();
+    let pop = document.getElementById('qhPop');
+    if (!pop) {
+      pop = document.createElement('div');
+      pop.id = 'qhPop';
+      pop.className = 'qh-pop';
+      document.body.appendChild(pop);
+      pop.addEventListener('mousedown', (e) => e.preventDefault()); // 防失焦关闭导致点不到
+      pop.addEventListener('click', (e) => {
+        const item = e.target.closest('.qh-item');
+        const del = e.target.closest('.qh-del');
+        if (del) { this.removeHistory(del.dataset.kw); return; }
+        if (item) { this.applyHistory(item.dataset.kw); }
+      });
+    }
+    if (!list.length) { this.hideHistory(); return; }
+    pop.innerHTML = `
+      <div class="qh-head"><span>🕘 最近搜索</span><span class="qh-clear" onclick="QueryModule.clearHistory()">清空</span></div>
+      <div class="qh-list">
+        ${list.map(k => `<div class="qh-item" data-kw="${this.escapeHtml(k)}"><span class="qh-text">${this.escapeHtml(k)}</span><span class="qh-del" data-kw="${this.escapeHtml(k)}" title="删除">×</span></div>`).join('')}
+      </div>`;
+    // 定位到输入框下方
+    const r = input.getBoundingClientRect();
+    pop.style.position = 'fixed';
+    pop.style.top = (r.bottom + 6) + 'px';
+    pop.style.left = r.left + 'px';
+    pop.style.minWidth = Math.max(r.width, 220) + 'px';
+    pop.style.display = 'block';
+    this._historyOpen = true;
+    if (!this._docClose) {
+      this._docClose = (e) => {
+        const pop = document.getElementById('qhPop');
+        const inp = document.getElementById('querySearch');
+        if (pop && pop.style.display !== 'none' && !pop.contains(e.target) && e.target !== inp) this.hideHistory();
+      };
+    }
+    setTimeout(() => document.addEventListener('click', this._docClose), 0);
+  },
+  hideHistory() {
+    const pop = document.getElementById('qhPop');
+    if (pop) pop.style.display = 'none';
+    if (this._docClose) document.removeEventListener('click', this._docClose);
+    this._historyOpen = false;
+  },
+  applyHistory(kw) {
+    const input = document.getElementById('querySearch');
+    if (input) input.value = kw;
+    this.hideHistory();
+    this.doSearch();
+  },
+
+  renderResults(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const area = document.getElementById('queryResultArea');
     if (!area) return;
     const total = this.results.length;
-    const totalPages = Math.ceil(total / this.pageSize);
-    const start = (this.page - 1) * this.pageSize;
-    const pageData = this.results.slice(start, start + this.pageSize);
+    const pageSize = this.pageSize === 'all' ? total : this.pageSize;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
+    const start = (this.page - 1) * pageSize;
+    const pageData = this.results.slice(start, start + pageSize);
     const cols = this.getColumns();
 
     if (total === 0) {
@@ -229,19 +379,33 @@ const QueryModule = {
       return;
     }
 
-    const colHeaders = cols.map(c => `<th>${c}</th>`).join('');
+    // 🟢 v193：列名 → link 实体类型映射。
+    // 同一行内 订单编号/存货编码/供应商 全部 link 化，避免「订单编号能点、旁边不能点」的体验割裂。
+    const ENTITY_COL = {
+      '订单编号': 'order',
+      '表体订单号': 'order',
+      '存货编码': 'stock',
+      '存货编号': 'stock',
+      '供应商': 'supplier'
+    };
+    const colHeaders = cols.map(c => `<th>${esc(c)}</th>`).join('');
     const rowsHtml = pageData.map(row =>
       `<tr>${cols.map(c => {
         let val = row[c] ?? '';
-        if (typeof val === 'number') val = val.toLocaleString();
-        return `<td>${val}</td>`;
+        const linkType = ENTITY_COL[c];
+        if (linkType) {
+          // 用原始 string 作为 label/key（订单号/存货编码/供应商在数据层都是 string，
+          //   不会被下方数字千分位分支污染），避免格式化破坏 link
+          const strVal = String(val).trim();
+          return `<td>${strVal ? TableUtils.link(linkType, strVal, strVal) : ''}</td>`;
+        }
+        // 🟢 v117：序号列始终保持纯数字（不千分位），其他数字列正常千分位
+        if (c === '序号') { val = String(val); }
+        else if (typeof val === 'number') { val = val.toLocaleString(); }
+        return `<td>${esc(val)}</td>`;
       }).join('')}</tr>`
     ).join('');
 
-    const pageNumbers = [];
-    for (let i = Math.max(1, this.page - 2); i <= Math.min(totalPages, this.page + 2); i++) {
-      pageNumbers.push(i);
-    }
 
     area.innerHTML = `
       <div class="table-wrapper">
@@ -250,43 +414,46 @@ const QueryModule = {
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>
-      <div class="pagination-bar" style="justify-content:center;gap:8px;">
-        <span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>
-        <span class="page-btns">
-          <button ${this.page<=1?'disabled':''} onclick="QueryModule.goPage(1)">«</button>
-          <button ${this.page<=1?'disabled':''} onclick="QueryModule.goPage(${this.page-1})">‹</button>
-          ${pageNumbers.map(p => `<button class="${p===this.page?'active':''}" onclick="QueryModule.goPage(${p})">${p}</button>`).join('')}
-          <button ${this.page>=totalPages?'disabled':''} onclick="QueryModule.goPage(${this.page+1})">›</button>
-          <button ${this.page>=totalPages?'disabled':''} onclick="QueryModule.goPage(${totalPages})">»</button>
-        </span>
-        <span style="font-size:12px;color:var(--text-secondary);">
-          每页
-          <select onchange="QueryModule.changePageSize(parseInt(this.value))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
-            <option value="20" ${this.pageSize===20?'selected':''}>20</option>
-            <option value="30" ${this.pageSize===30?'selected':''}>30</option>
-            <option value="50" ${this.pageSize===50?'selected':''}>50</option>
-          </select> 条
-        </span>
-        <span style="font-size:12px;color:var(--text-secondary);">
-          跳至 <input type="number" id="pageJumper" min="1" max="${totalPages}" value="${this.page}"
-            onkeydown="if(event.key==='Enter')QueryModule.goPage(parseInt(this.value))"
-            style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
-          / ${totalPages} 页
-        </span>
-      </div>
+      <div id="queryPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
+    // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（查询页使用 30/50/100/全部）
+    TableUtils.renderPagination('queryPagination', { module: 'QueryModule', total, totalPages, page: this.page, pageSize: this.pageSize, pageSizes: [30, 50, 100, 'all'] });
     TableUtils.initSmartSelect('queryResultArea');
+    TableUtils.initSortableHeaders('queryResultArea');
+  },
+
+  // 用户调整时间区间后保存并重新加载当前 tab
+  onDateChange() {
+    const startInput = document.getElementById('queryStartDate');
+    const endInput = document.getElementById('queryEndDate');
+    if (startInput) this.startDate = startInput.value;
+    if (endInput) this.endDate = endInput.value;
+    this.page = 1;
+    this.loadTabData();
+  },
+
+  // 按日期区间过滤（仅对订单 / 入库生效）
+  _filterByDateRange(list, dateField) {
+    if (!this.startDate && !this.endDate) return list;
+    return list.filter(item => {
+      const d = item[dateField];
+      if (!d) return false;
+      if (this.startDate && d < this.startDate) return false;
+      if (this.endDate && d > this.endDate) return false;
+      return true;
+    });
   },
 
   goPage(p) {
-    const totalPages = Math.ceil(this.results.length / this.pageSize);
+    const pageSize = this.pageSize === 'all' ? this.results.length : this.pageSize;
+    const totalPages = pageSize > 0 ? Math.ceil(this.results.length / pageSize) : 1;
     if (p < 1 || p > totalPages) return;
     this.page = p;
     this.renderResults();
   },
 
   changePageSize(size) {
-    this.pageSize = size;
+    this.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     this.page = 1;
     this.renderResults();
   }

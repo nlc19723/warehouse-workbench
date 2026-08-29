@@ -6,28 +6,56 @@ const PricingModule = {
   currentData: [],
   currentPage: 1,
   pageSize: 20,
+  currentFilter: {}, // 跨模块带参跳转（M1）：App.go 注入的 { keyword } 自动填入搜索框
 
-  async render() {
+  // 计算默认生效日期区间：最小生效日期 至 今日
+  getDefaultDateRange(pricing) {
+    const pad = n => String(n).padStart(2, '0');
+    const today = new Date();
+    const end = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+    let minDate = '';
+    if (pricing && pricing.length > 0) {
+      const dates = pricing.map(p => p.生效日期).filter(Boolean).sort();
+      if (dates.length > 0) minDate = dates[0];
+    }
+    return { start: minDate || end, end };
+  },
+
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     const content = document.getElementById('contentArea');
+    const allPricing = await DataStore.getPricing();
     const [suppliers, types] = await Promise.all([
-      (async () => {
-        const all = await db.pricing.toArray();
-        return [...new Set(all.map(p => p.供应商).filter(Boolean))].sort();
-      })(),
+      Promise.resolve([...new Set(allPricing.map(p => p.供应商).filter(Boolean))].sort()),
       DataStore.getPricingTypes()
     ]);
 
+    // 首次进入：根据数据自动填充默认生效日期区间
+    const dr = this.getDefaultDateRange(allPricing);
+    if (!this.currentFilter) this.currentFilter = {};
+    if (!this.currentFilter.startDate) this.currentFilter.startDate = dr.start;
+    if (!this.currentFilter.endDate) this.currentFilter.endDate = dr.end;
+
+    if (myToken !== undefined && myToken !== App._goToken) return;
+
+    // 清理可能遗留的旧日期选择器弹窗（render 会重建 input）
+    if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
+
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="pricingKw" placeholder="搜索供应商、物料..." onkeydown="if(event.key==='Enter')PricingModule.applyFilter()">
+        <input type="text" id="pricingKw" placeholder="搜索供应商、物料..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')PricingModule.applyFilter()">
         <select id="pricingSupplier">
           <option value="">全部供应商</option>
-          ${suppliers.map(s => `<option value="${s}">${s}</option>`).join('')}
+          ${suppliers.map(s => `<option value="${s}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${s}</option>`).join('')}
         </select>
         <select id="pricingType">
           <option value="">全部类型</option>
-          ${types.map(t => `<option value="${t}">${t}</option>`).join('')}
+          ${types.map(t => `<option value="${t}" ${this.currentFilter.类型 === t ? 'selected' : ''}>${t}</option>`).join('')}
         </select>
+        <input type="text" id="pricingStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date dp-input" placeholder="生效起始日期" title="生效起始日期" onchange="PricingModule.onDateChange()" readonly>
+        <span class="filter-sep">至</span>
+        <input type="text" id="pricingEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date dp-input" placeholder="生效结束日期" title="生效结束日期" onchange="PricingModule.onDateChange()" readonly>
         <button class="search-glass" onclick="PricingModule.applyFilter()">筛选</button>
         <button class="secondary" onclick="PricingModule.resetFilter()">重置</button>
         <button class="secondary" onclick="PricingModule.exportData()">📥 导出</button>
@@ -38,14 +66,28 @@ const PricingModule = {
       <div id="pricingPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
 
-    await this.loadData();
+    if (window.enhanceSearchSelect) {
+      enhanceSearchSelect('pricingSupplier', { placeholder: '搜索供应商', widthMode: 'full' });
+    }
+
+    // 挂载自定义日期选择器（替换原生 type=date，保持 id 与 change 事件不变）
+    if (typeof DatePicker !== 'undefined') {
+      DatePicker.mount('pricingStartDate');
+      DatePicker.mount('pricingEndDate');
+    }
+
+    await this.loadData(myToken);
   },
 
-  async loadData() {
-    let pricing = await db.pricing.toArray();
-    const kw = document.getElementById('pricingKw')?.value.trim().toLowerCase();
-    const supplier = document.getElementById('pricingSupplier')?.value;
-    const type = document.getElementById('pricingType')?.value;
+  async loadData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
+    let pricing = await DataStore.getPricing();
+    const kw = (this.currentFilter.keyword || '').trim().toLowerCase();
+    const supplier = this.currentFilter.供应商 || '';
+    const type = this.currentFilter.类型 || '';
+    const startDate = this.currentFilter.startDate || '';
+    const endDate = this.currentFilter.endDate || '';
 
     if (kw) {
       pricing = pricing.filter(p =>
@@ -55,6 +97,14 @@ const PricingModule = {
     }
     if (supplier) pricing = pricing.filter(p => p.供应商 === supplier);
     if (type) pricing = pricing.filter(p => p.类型 === type);
+    if (startDate || endDate) {
+      pricing = pricing.filter(p => {
+        if (!p.生效日期) return false;
+        if (startDate && p.生效日期 < startDate) return false;
+        if (endDate && p.生效日期 > endDate) return false;
+        return true;
+      });
+    }
 
     const now = new Date();
     const active = pricing.filter(p => {
@@ -63,6 +113,7 @@ const PricingModule = {
     });
     const avgPrice = active.length > 0 ? active.reduce((s, p) => s + (parseFloat(p.含税单价) || 0), 0) / active.length : 0;
 
+    if (rt !== undefined && rt !== App._goToken) return;
     document.getElementById('pricingSummary').innerHTML = `
       <div class="kpi-grid">
         <div class="kpi-card card-info">
@@ -75,22 +126,25 @@ const PricingModule = {
         </div>
         <div class="kpi-card card-info">
           <div class="kpi-label">平均含税价</div>
-          <div class="kpi-value">¥${this.formatMoney(avgPrice)}</div>
+          <div class="kpi-value">¥${TableUtils.formatMoney(avgPrice)}</div>
         </div>
       </div>
     `;
 
     this.currentData = pricing;
-    this.currentPage = 1;
-    this.renderTable();
+    this.renderTable(rt);
   },
 
-  renderTable() {
+  renderTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const data = this.currentData;
     const total = data.length;
-    const totalPages = Math.ceil(total / this.pageSize);
+    const pageSize = this.pageSize === 'all' ? total : this.pageSize;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
     const page = Math.min(this.currentPage, Math.max(1, totalPages));
-    const items = data.slice((page - 1) * this.pageSize, page * this.pageSize);
+    this.currentPage = page;
+    const items = data.slice((page - 1) * pageSize, page * pageSize);
     const now = new Date();
 
     const area = document.getElementById('pricingTableArea');
@@ -131,15 +185,15 @@ const PricingModule = {
               }
               return `
                 <tr>
-                  <td>${esc(p.供应商 ?? '')}</td>
+                  <td>${TableUtils.link('supplier', p.供应商 ?? '', p.供应商 ?? '')}</td>
                   <td>${esc(p.类型 ?? '')}</td>
-                  <td>${esc(p.存货编码 ?? '')}</td>
-                  <td><strong>${esc(p.存货名称)}</strong></td>
+                  <td>${TableUtils.link('stock', p.存货编码 ?? '', p.存货编码 ?? '')}</td>
+                  <td><strong>${esc(p.存货名称 ?? '')}</strong></td>
                   <td>${esc(p.规格型号 ?? '')}</td>
                   <td>${esc(p.主计量 ?? '')}</td>
-                  <td><strong>¥${this.formatMoney(p.含税单价)}</strong></td>
+                  <td><strong>¥${TableUtils.formatMoney(p.含税单价)}</strong></td>
                   <td>${p.税率 ? esc(p.税率) + '%' : ''}</td>
-                  <td>¥${this.formatMoney(p.单价)}</td>
+                  <td>¥${TableUtils.formatMoney(p.单价)}</td>
                   <td>${esc(p.生效日期 ?? '')}</td>
                   <td>${esc(p.失效日期 ?? '')}</td>
                   <td>${status}</td>
@@ -151,49 +205,56 @@ const PricingModule = {
       </div>
     `;
 
-    const html = [];
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>`);
-    html.push(`<span class="page-btns">`);
-    html.push(`<button onclick="PricingModule.goPage(1)" ${page === 1 ? 'disabled' : ''}>«</button>`);
-    html.push(`<button onclick="PricingModule.goPage(${page - 1})" ${page === 1 ? 'disabled' : ''}>‹</button>`);
-    const start = Math.max(1, page - 2);
-    const end = Math.min(totalPages, start + 4);
-    for (let i = start; i <= end; i++) {
-      html.push(`<button class="${i === page ? 'active' : ''}" onclick="PricingModule.goPage(${i})">${i}</button>`);
-    }
-    html.push(`<button onclick="PricingModule.goPage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>›</button>`);
-    html.push(`<button onclick="PricingModule.goPage(${totalPages})" ${page === totalPages ? 'disabled' : ''}>»</button>`);
-    html.push(`</span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      每页 <select onchange="PricingModule.changePageSize(parseInt(this.value))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
-        <option value="20" ${this.pageSize===20?'selected':''}>20</option>
-        <option value="50" ${this.pageSize===50?'selected':''}>50</option>
-        <option value="100" ${this.pageSize===100?'selected':''}>100</option>
-      </select> 条
-    </span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      跳至 <input type="number" id="pricingPageJumper" min="1" max="${totalPages}" value="${page}"
-        onkeydown="if(event.key==='Enter')PricingModule.goPage(parseInt(this.value))"
-        style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
-      / ${totalPages} 页
-    </span>`);
-    document.getElementById('pricingPagination').innerHTML = html.join('');
+    // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
+    TableUtils.renderPagination('pricingPagination', { module: 'PricingModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
     TableUtils.initSmartSelect('pricingTableArea');
+    TableUtils.initSortableHeaders('pricingTableArea');
+  },
+
+  onDateChange() {
+    const startInput = document.getElementById('pricingStartDate');
+    const endInput = document.getElementById('pricingEndDate');
+    if (startInput) this.currentFilter.startDate = startInput.value;
+    if (endInput) this.currentFilter.endDate = endInput.value;
+    this.currentPage = 1;
+    this.loadData();
   },
 
   changePageSize(size) {
-    this.pageSize = size;
+    this.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     this.currentPage = 1;
     this.renderTable();
   },
 
-  applyFilter() { this.loadData(); },
+  applyFilter() {
+    this.currentFilter = {
+      keyword: (document.getElementById('pricingKw')?.value || '').trim(),
+      供应商: document.getElementById('pricingSupplier')?.value || '',
+      类型: document.getElementById('pricingType')?.value || '',
+      startDate: document.getElementById('pricingStartDate')?.value || '',
+      endDate: document.getElementById('pricingEndDate')?.value || ''
+    };
+    this.currentPage = 1;
+    this.loadData();
+  },
 
-  resetFilter() {
-    document.getElementById('pricingKw').value = '';
-    document.getElementById('pricingSupplier').value = '';
-    document.getElementById('pricingType').value = '';
+  async resetFilter() {
+    const allPricing = await DataStore.getPricing();
+    const dr = this.getDefaultDateRange(allPricing);
+    this.currentFilter = { keyword: '', 供应商: '', 类型: '', startDate: dr.start, endDate: dr.end };
+    this.currentPage = 1;
+    this.pageSize = 20;
+    const kwInput = document.getElementById('pricingKw');
+    const supSelect = document.getElementById('pricingSupplier');
+    const typeSelect = document.getElementById('pricingType');
+    const startInput = document.getElementById('pricingStartDate');
+    const endInput = document.getElementById('pricingEndDate');
+    if (kwInput) kwInput.value = '';
+    if (supSelect) supSelect.value = '';
+    if (typeSelect) typeSelect.value = '';
+    if (startInput) startInput.value = dr.start;
+    if (endInput) endInput.value = dr.end;
     this.loadData();
   },
 
@@ -202,10 +263,5 @@ const PricingModule = {
   exportData() {
     // 🟢 O1：统一导出（行为与原逻辑一致）
     TableUtils.exportToExcel(this.currentData, `合同价格_${new Date().toISOString().split('T')[0]}.xlsx`, '合同价格');
-  },
-
-  formatMoney(num) {
-    if (num == null || num === '') return '';
-    return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
   }
 };

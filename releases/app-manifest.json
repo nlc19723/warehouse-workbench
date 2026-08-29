@@ -1,1 +1,5 @@
-{"version":"1.0.8","notes":"V1.0.8: 桌面图标重做 - Glassmorphism蓝紫渐变果冻玻璃+白色极简小房子(重影/Rim Light/梦幻蓝紫)","publishedAt":"2026-08-07"}
+{
+  "version": "v180",
+  "notes": "全面升级所有日期筛选弹窗为自实现 DatePicker v3（拟物毛玻璃风格）。涉及 6 个模块共 13 个日期输入框：orders.js(orderStart/EndDate)、inbound.js(inboundStart/EndDate)、outbound.js(obDate,oblStart/EndDate)、pricing.js(pricingStart/EndDate)、query.js(queryStart/EndDate)、reconciliation.js(recStart/EndDate)。视觉：立体毛玻璃 popover（双向软阴影+blur 饱和）、扁平清爽 ± 按钮（右侧）、标题\"Y 年 M 月\"可点击展开月年面板（左年列/右月份网格）、选中色清爽蓝 #5B8FF9、今日描边。保持各模块 input id 与 change/onDateChange 逻辑不变，业务零改动；零依赖（减依赖审计原则）。",
+  "publishedAt": "2026-08-26"
+}

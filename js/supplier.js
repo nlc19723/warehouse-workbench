@@ -7,10 +7,13 @@ const SupplierModule = {
   currentPage: 1,
   pageSize: 20,
 
-  async render() {
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     const content = document.getElementById('contentArea');
     const types = await DataStore.getSupplierTypes();
     const departments = await DataStore.getSupplierDepartments();
+    if (myToken !== undefined && myToken !== App._goToken) return;
 
     content.innerHTML = `
       <div class="filter-bar">
@@ -41,17 +44,19 @@ const SupplierModule = {
       <div id="supplierPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
 
-    await this.loadTable();
+    await this.loadTable(myToken);
   },
 
-  async loadTable() {
+  async loadTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     let suppliers = await DataStore.getSuppliers(this.currentFilter);
 
     // 运行时补全：若已入库金额全为0，从入库表汇总
     const allZero = suppliers.length > 0 && suppliers.every(s => !s.年度已供入库金额 || s.年度已供入库金额 === 0);
     if (allZero) {
       try {
-        const inbound = await db.inbound.toArray();
+        const inbound = await DataStore.getRows('inbound');
         const map = new Map();
         inbound.forEach(row => { const sup=row.供应商; if(sup) map.set(sup, (map.get(sup)||0)+(parseFloat(row.原币价税合计)||0)); });
         suppliers.forEach(s => { if(map.has(s.供应商)) { s.年度已供入库金额=map.get(s.供应商); if(s.年度合同金额>0) s.年度已供入库金额占比=s.年度已供入库金额/s.年度合同金额; }});
@@ -96,12 +101,15 @@ const SupplierModule = {
       return daysB - daysA;
     });
 
+    if (rt !== undefined && rt !== App._goToken) return;
     this.renderContractStats(suppliers);
 
     const total = suppliers.length;
-    const totalPages = Math.ceil(total / this.pageSize);
+    const pageSize = this.pageSize === 'all' ? total : this.pageSize;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
     const page = Math.min(this.currentPage, Math.max(1, totalPages));
-    const items = suppliers.slice((page - 1) * this.pageSize, page * this.pageSize);
+    this.currentPage = page;
+    const items = suppliers.slice((page - 1) * pageSize, page * pageSize);
 
     const area = document.getElementById('supplierTableArea');
     if (items.length === 0) {
@@ -147,8 +155,8 @@ const SupplierModule = {
                   <td>${esc(s.合同年限 ?? '')}</td>
                   <td>${esc(s.年度合同到期时间 ?? '')}</td>
                   <td>${daysTag || ''}</td>
-                  <td>${this.formatMoney(s.年度合同金额)}</td>
-                  <td>${this.formatMoney(s.年度已供入库金额)}</td>
+                  <td>${TableUtils.formatMoney(s.年度合同金额)}</td>
+                  <td>${TableUtils.formatMoney(s.年度已供入库金额)}</td>
                   <td>
                     <div style="display:flex;align-items:center;gap:6px;">
                       <div class="progress-bar" style="width:70px;">
@@ -169,6 +177,7 @@ const SupplierModule = {
 
     this.renderPagination(total, totalPages);
     TableUtils.initSmartSelect('supplierTableArea');
+    TableUtils.initSortableHeaders('supplierTableArea');
   },
 
   renderContractStats(suppliers) {
@@ -207,41 +216,11 @@ const SupplierModule = {
   },
 
   renderPagination(total, totalPages) {
-    const page = this.currentPage;
-    const html = [];
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>`);
-    html.push(`<span class="page-btns">`);
-    html.push(`<button onclick="SupplierModule.goPage(1)" ${page === 1 ? 'disabled' : ''}>«</button>`);
-    html.push(`<button onclick="SupplierModule.goPage(${page - 1})" ${page === 1 ? 'disabled' : ''}>‹</button>`);
-    const start = Math.max(1, page - 2);
-    const end = Math.min(totalPages, start + 4);
-    for (let i = start; i <= end; i++) {
-      html.push(`<button class="${i === page ? 'active' : ''}" onclick="SupplierModule.goPage(${i})">${i}</button>`);
-    }
-    html.push(`<button onclick="SupplierModule.goPage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>›</button>`);
-    html.push(`<button onclick="SupplierModule.goPage(${totalPages})" ${page === totalPages ? 'disabled' : ''}>»</button>`);
-    html.push(`</span>`);
-
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      每页 <select onchange="SupplierModule.changePageSize(parseInt(this.value))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
-        <option value="20" ${this.pageSize===20?'selected':''}>20</option>
-        <option value="50" ${this.pageSize===50?'selected':''}>50</option>
-        <option value="100" ${this.pageSize===100?'selected':''}>100</option>
-      </select> 条
-    </span>`);
-
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      跳至 <input type="number" id="supplierPageJumper" min="1" max="${totalPages}" value="${page}"
-        onkeydown="if(event.key==='Enter')SupplierModule.goPage(parseInt(this.value))"
-        style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
-      / ${totalPages} 页
-    </span>`);
-
-    document.getElementById('supplierPagination').innerHTML = html.join('');
+    TableUtils.renderPagination('supplierPagination', { module: 'SupplierModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
   },
 
   changePageSize(size) {
-    this.pageSize = size;
+    this.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     this.currentPage = 1;
     this.loadTable();
   },
@@ -291,15 +270,11 @@ const SupplierModule = {
       .sort((a, b) => (b.入库日期 || '').localeCompare(a.入库日期 || ''))
       .slice(0, 10);
 
-    // 从现存量基础档案匹配填充存货编码
-    if (typeof DataLoader !== 'undefined') {
+    // 从现存量基础档案匹配填充存货编码（双路取码：① 记录自身字段 存货编码/存货编号；② codeMap 兜底）
+    if (typeof DataLoader !== 'undefined' && DataLoader.fillStockCode) {
       const codeMap = await DataLoader.getStockNameSpecCodeMap();
-      if (orders.length > 0) orders.forEach(o => {
-        if (o.存货名称) { const k = TableUtils.buildStockKey(o.存货名称, o.规格型号); o._存货编码 = codeMap.get(k) || ''; }
-      });
-      if (inbound.length > 0) inbound.forEach(i => {
-        if (i.存货名称) { const k = TableUtils.buildStockKey(i.存货名称, i.规格型号); i._存货编码 = codeMap.get(k) || ''; }
-      });
+      if (orders.length > 0) orders.forEach(o => DataLoader.fillStockCode(o, codeMap));
+      if (inbound.length > 0) inbound.forEach(i => DataLoader.fillStockCode(i, codeMap));
     }
 
     // 计算最近3个月订单/入库趋势图数据
@@ -314,8 +289,8 @@ const SupplierModule = {
         <div><strong>合同年限:</strong> ${esc(supplier.合同年限 ?? '')}</div>
         <div><strong>合同生效:</strong> ${esc(supplier.第一年度生效时间 ?? '')}</div>
         <div><strong>合同到期:</strong> ${esc(supplier.年度合同到期时间 ?? '')}</div>
-        <div><strong>合同金额:</strong> ${this.formatMoney(supplier.年度合同金额)}</div>
-        <div><strong>已入库金额:</strong> ${this.formatMoney(supplier.年度已供入库金额)}</div>
+        <div><strong>合同金额:</strong> ${TableUtils.formatMoney(supplier.年度合同金额)}</div>
+        <div><strong>已入库金额:</strong> ${TableUtils.formatMoney(supplier.年度已供入库金额)}</div>
         <div><strong>生产厂址:</strong> ${esc(supplier.生产厂址 ?? '')}</div>
         <div><strong>办公地址:</strong> ${esc(supplier.地址 ?? '')}</div>
       </div>
@@ -326,11 +301,15 @@ const SupplierModule = {
         <div style="display:flex;flex-direction:column;gap:12px;">
           <div class="glass-card" style="padding:12px;margin:0;">
             <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">订单金额（万元）</div>
-            <canvas id="supDetailOrderChart" height="120"></canvas>
+            <div style="height:140px;position:relative;">
+              <canvas id="supDetailOrderChart"></canvas>
+            </div>
           </div>
           <div class="glass-card" style="padding:12px;margin:0;">
             <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">入库金额（万元）</div>
-            <canvas id="supDetailInboundChart" height="120"></canvas>
+            <div style="height:140px;position:relative;">
+              <canvas id="supDetailInboundChart"></canvas>
+            </div>
           </div>
         </div>
       </div>
@@ -350,7 +329,7 @@ const SupplierModule = {
         <table class="data-table">
           <thead><tr><th>入库单号</th><th>入库日期</th><th>存货编码</th><th>存货名称</th><th>数量</th><th>含税金额</th></tr></thead>
           <tbody>${inbound.map(i => `
-            <tr><td>${esc(i.入库单号 ?? '')}</td><td>${esc(i.入库日期 ?? '')}</td><td>${esc(i._存货编码 ?? '')}</td><td>${esc(i.存货名称 ?? '')}</td><td>${esc(i.数量 ?? '')}</td><td>${this.formatMoney(i.原币价税合计)}</td></tr>
+            <tr><td>${esc(i.入库单号 ?? '')}</td><td>${esc(i.入库日期 ?? '')}</td><td>${esc(i._存货编码 ?? '')}</td><td>${esc(i.存货名称 ?? '')}</td><td>${esc(i.数量 ?? '')}</td><td>${TableUtils.formatMoney(i.原币价税合计)}</td></tr>
           `).join('')}</tbody>
         </table>
       `}
@@ -419,7 +398,7 @@ const SupplierModule = {
         maintainAspectRatio: false,
         plugins: { legend: { display: false } },
         scales: {
-          y: { beginAtZero: true, ticks: { font: { size: 11 } } },
+          y: { beginAtZero: true, suggestedMax: 20, ticks: { font: { size: 11 }, stepSize: 20 } },
           x: { ticks: { font: { size: 11 } } }
         }
       }
@@ -441,7 +420,7 @@ const SupplierModule = {
   },
 
   async exportData() {
-    const suppliers = await db.suppliers.toArray();
+    const suppliers = await DataStore.getSuppliers();
     if (suppliers.length === 0) { alert('没有数据可导出'); return; }
     this.exportToExcel(suppliers, '供应商管理');
   },
@@ -451,10 +430,5 @@ const SupplierModule = {
     const now = new Date();
     const filename = `${sheetName}_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}.xlsx`;
     TableUtils.exportToExcel(data, filename, sheetName);
-  },
-
-  formatMoney(num) {
-    if (num == null || num === '') return '';
-    return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(num);
   }
 };

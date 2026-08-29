@@ -6,6 +6,10 @@ const App = {
   currentModule: 'dashboard',
   sidebarOpen: false,
   sidebarCollapsed: false,
+  // 实体档案导航栈：解决跨实体跳转后返回 pendingEntity 丢失导致空白的问题
+  _navStack: [],
+  // 模块切换状态记忆：搜索/筛选/分页/页大小/tab 等，页面刷新后清空
+  moduleState: {},
 
   // 模块映射表
   modules: {
@@ -14,6 +18,7 @@ const App = {
     query: { title: '查询系统', instance: QueryModule },
     reconciliation: { title: '对账功能', instance: ReconciliationModule },
     orderTrack: { title: '订单跟踪', instance: OrderTrackModule },
+    orderCheck: { title: '订货核对', instance: OrderCheckModule },
     inventoryAlert: { title: '库存预警', instance: InventoryAlertModule },
     orders: { title: '订单列表', instance: OrdersModule },
     inbound: { title: '入库列表', instance: InboundModule },
@@ -22,10 +27,20 @@ const App = {
     lowTurnover: { title: '低周转材料', instance: LowTurnoverModule },
     breach: { title: '违约台账', instance: BreachModule },
     outbound: { title: '出库', instance: OutboundModule },
-    outboundList: { title: '出库列表', instance: OutboundListModule }
+    outboundList: { title: '出库列表', instance: OutboundListModule },
+    // 实体 360 档案（仅作链接跳转目标，不在侧边栏出现）
+    'stock-detail': { title: '存货档案', instance: StockDetailModule },
+    'supplier-detail': { title: '供应商档案', instance: SupplierDetailModule },
+    'order-detail': { title: '订单档案', instance: OrderDetailModule }
   },
 
   async init() {
+    // 🟢 v149：进入工作台 / 刷新工作台时重置所有表头筛选记忆（列宽、对齐、草稿保留）。
+    //   放在最前，确保所有模块渲染前筛选状态已是干净状态。
+    if (typeof TablePrefs !== 'undefined' && TablePrefs.clearFilters) {
+      try { TablePrefs.clearFilters(); } catch (e) { /* 清筛选失败不应阻断初始化 */ }
+    }
+
     this.bindSidebarToggle();
     this.bindSidebarNav();
     this.bindHamburger();
@@ -34,9 +49,20 @@ const App = {
     this.bindGlobalSearch();
     this.startClock();
     this.initTheme();
+    // 🟢 v159：配色引擎注入分组变量（确保模块 render 内 _paintCells 加的类能读到变量）
+    if (typeof ColorTheme !== 'undefined') { try { ColorTheme.applyGroupVars(ColorTheme.loadConfig()); } catch (e) {} }
     this.initSidebarState();
     this.initSidebarCustomizations();
+
+    // 🟢 v188：版本号动态同步——从 CSS 资源 URL 的 ?v= 参数自动派生，
+    // 免去每次发版手动改 config.js 字符串；bump CSS 版本即全链路（徽章+控制台）自动更新。
+    this.syncVersionFromCss();
+    // 渲染当前版本号徽章（用户可见的版本号标识）
+    const _badge = document.getElementById('appVersionBadge');
+    if (_badge) _badge.textContent = ((typeof AppConfig !== 'undefined' && AppConfig.app && AppConfig.app.version) || 'v???');
     this.initSettingsDrawer();
+    this.initColumnResizeObserver();
+    this.initMobileDragGuard();
 
     // 先清理旧版本数据库
     showLoading('正在准备数据库...');
@@ -44,14 +70,25 @@ const App = {
     await db.open();
     console.log('IndexedDB opened, version:', db.verno);
 
+    // v164：云端设置数据初始化（连接 + 恢复搜索历史/出库列表跨设备记忆）
+    if (typeof SyncManager !== 'undefined') {
+      try { SyncManager.init(); } catch (e) { console.warn('SyncManager init 失败:', e); }
+    }
+    if (typeof DataStore !== 'undefined') {
+      try {
+        await DataStore.migrateSearchHistoryToCloud();
+        await DataStore.restoreOutboundFromSettings();
+      } catch (e) { console.warn('设置数据恢复失败:', e); }
+    }
+
     try {
       const imported = await DataLoader.init();
       if (imported) {
         hideLoading(); // 先关闭加载遮罩，再渲染模块
         this.go('dashboard');
       } else {
-        hideLoading();
-        alert('数据导入失败，请刷新页面重试');
+        // 🟢 M7：无可用数据时不弹裸 alert，改为显示空状态引导（从云端同步 / 上传 Excel）
+        this.showEmptyState();
       }
     } catch (err) {
       // 防御：初始化任何意外异常都不能导致整页永久空白且无提示
@@ -60,6 +97,74 @@ const App = {
       try { this.go('dashboard'); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
       alert('初始化出现异常，已尝试继续加载；如仍空白请刷新重试。\n' + (err && err.message ? err.message : err));
     }
+  },
+
+  // 🟢 M7：无可用数据时的空状态引导页（新链接 / 清空本地后首屏）
+  showEmptyState() {
+    hideLoading();
+    const area = document.getElementById('contentArea');
+    if (!area) return;
+    this.currentModule = 'dashboard';
+    document.querySelectorAll('.sidebar-item[data-module]').forEach(item => {
+      item.classList.toggle('active', item.getAttribute('data-module') === 'dashboard');
+    });
+    const titleEl = document.querySelector('.top-bar-left strong');
+    if (titleEl) titleEl.textContent = '库管工作台';
+    area.innerHTML = `
+      <div class="empty-state" style="padding:56px 20px;text-align:center;">
+        <div class="empty-icon" style="font-size:56px;margin-bottom:14px;">📦</div>
+        <div style="font-size:18px;font-weight:600;color:var(--text-primary);margin-bottom:8px;">欢迎使用库管工作台</div>
+        <div style="font-size:13.5px;color:var(--text-secondary);line-height:1.6;max-width:440px;margin:0 auto 26px;">
+          这是新部署的链接，本地还没有数据。你可以从云端同步之前备份的数据，或上传 Excel 文件导入。
+        </div>
+        <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+          <button class="btn-primary" onclick="App._onEmptySync()">☁️ 从云端同步数据</button>
+          <button class="btn-secondary" onclick="DataLoader.reimport()">📤 上传 Excel 导入</button>
+        </div>
+      </div>`;
+  },
+
+  // 空状态「从云端同步」按钮回调：同步成功则进入仪表盘
+  async _onEmptySync() {
+    const ok = await DataLoader.forceSyncFromCloud();
+    if (ok) this.go('dashboard');
+  },
+
+  // ===== 模块切换状态记忆 =====
+  // 保存模块实例的搜索/筛选/分页/tab 等状态；页面刷新后 moduleState 为空，自动重置
+  saveModuleState(inst, key) {
+    if (!inst || !key) return;
+    const state = {};
+    const fields = ['currentFilter', 'searchKW', 'currentPage', 'page', 'pageSize', 'currentTab', 'startDate', 'endDate'];
+    fields.forEach(f => {
+      if (inst[f] !== undefined) {
+        try {
+          // 深拷贝对象，避免恢复前被污染
+          state[f] = typeof inst[f] === 'object' && inst[f] !== null
+            ? JSON.parse(JSON.stringify(inst[f]))
+            : inst[f];
+        } catch (e) {
+          state[f] = inst[f];
+        }
+      }
+    });
+    this.moduleState[key] = state;
+  },
+
+  // 恢复模块实例状态；恢复后不清除缓存，允许反复切换回来都保持同一状态
+  restoreModuleState(inst, key) {
+    if (!inst || !key) return;
+    const state = this.moduleState[key];
+    if (!state) return;
+    Object.keys(state).forEach(f => {
+      if (inst[f] !== undefined) {
+        try {
+          inst[f] = typeof state[f] === 'object' && state[f] !== null
+            ? JSON.parse(JSON.stringify(state[f]))
+            : state[f];
+        } catch (e) { /* 忽略结构不兼容的恢复 */ }
+      }
+    });
   },
 
   // ===== 主题切换 =====
@@ -137,6 +242,8 @@ const App = {
   // ===== 侧边栏导航 =====
   bindSidebarNav() {
     document.querySelectorAll('.sidebar-item[data-module]').forEach(item => {
+      // 去掉默认锚点，避免切换模块时浏览器左下角闪现 #module URL
+      item.setAttribute('href', 'javascript:void(0)');
       item.addEventListener('click', e => {
         e.preventDefault();
         const module = item.getAttribute('data-module');
@@ -229,6 +336,20 @@ const App = {
     btn.addEventListener('click', () => this.openSettingsDrawer());
   },
 
+  // 🟢 v188：从 CSS 资源 URL 的 ?v= 参数自动派生版本号（如 style.css?v=188 → v188）
+  // 发版时只需 bump index.html 里 style.css 的版本查询参数，徽章与控制台水印即自动同步。
+  syncVersionFromCss() {
+    try {
+      const link = document.querySelector('link[rel="stylesheet"][href*="style.css"]');
+      const href = link && link.getAttribute('href') || '';
+      const m = href.match(/[?&]v=(\d+)/);
+      const v = m ? parseInt(m[1], 10) : null;
+      if (v && typeof AppConfig !== 'undefined' && AppConfig.app) {
+        AppConfig.app.version = 'v' + v;
+      }
+    } catch (e) { /* 出错则保留 config.js 中写死的版本 */ }
+  },
+
   openSettingsDrawer() {
     document.getElementById('panelTitle').textContent = '设置';
     const body = document.getElementById('panelBody');
@@ -257,9 +378,8 @@ const App = {
         <div style="margin-bottom:20px;">
           <h4 style="font-size:14px;color:var(--text-main);margin-bottom:10px;">数据管理</h4>
           <div style="display:flex;flex-direction:column;gap:8px;">
-            <button onclick="App.closePanel();SyncManager.showConfigDialog();" class="btn-secondary" style="justify-content:flex-start;">☁️ 云端同步配置</button>
-            <button onclick="App.closePanel();DataLoader.reimport();" class="btn-secondary" style="justify-content:flex-start;">🔄 重新导入数据</button>
-            <button onclick="App.closePanel();DataLoader.restoreBuiltIn();" class="btn-secondary" style="justify-content:flex-start;">♻️ 恢复原始内置数据</button>
+            <button onclick="App.closePanel();SyncManager.showConfigDialog();" class="btn-secondary" style="justify-content:flex-start;">☁️ 云端同步</button>
+            <button onclick="App.closePanel();DataLoader.reimport();" class="btn-secondary" style="justify-content:flex-start;">🔄 数据导入</button>
           </div>
         </div>
 
@@ -273,6 +393,7 @@ const App = {
     document.getElementById('panelOverlay').classList.add('show');
     document.getElementById('panelDialog').classList.add('show');
   },
+
 
   toggleSidebarFromSettings(collapsed) {
     this.sidebarCollapsed = collapsed;
@@ -319,7 +440,7 @@ const App = {
       await meta.instance.render();
     } catch (err) {
       console.error(`${moduleName} render error:`, err);
-      panelBody.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-text">加载出错: ${err.message}</div></div>`;
+      panelBody.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-text">加载出错: ${esc(err.message)}</div></div>`;
     } finally {
       document.getElementById = originalGetElementById;
     }
@@ -331,8 +452,39 @@ const App = {
   },
 
   // ===== 模块切换 =====
-  async go(moduleName) {
+  async go(moduleName, params) {
     if (!this.modules[moduleName]) return;
+    // 🟢 v173：模块切换前关闭可能存在的表格列筛选弹窗（挂在 body 上、不随模块 DOM 销毁），
+    // 否则从弹窗内点击实体链接跳转到详情页时，弹窗会残留在新页面之上
+    if (typeof TableUtils !== 'undefined' && typeof TableUtils._hideFilterPopup === 'function') {
+      TableUtils._hideFilterPopup();
+    }
+    // 🟡 M7：离开上一模块前调用其 onLeave 清理钩子（停止定时器 / 销毁图表实例），避免资源泄漏
+    if (this.currentModule && this.currentModule !== moduleName) {
+      const prev = this.modules[this.currentModule];
+      if (prev && prev.instance) {
+        // 保存上一模块的搜索/筛选/分页/tab 状态（刷新页面后清空）
+        this.saveModuleState(prev.instance, this.currentModule);
+        if (typeof prev.instance.onLeave === 'function') {
+          try { prev.instance.onLeave(); } catch (e) { console.error('[onLeave]', e); }
+        }
+      }
+    }
+    // 🟢 v134：模块切换前统一卸载所有挂在 document.body 上的移动端浮层（mobile-float-thead/firstcol），
+    // 防止旧模块的浮层在 body 残留造成"切换后看不到新表数据"或"下一次手势激活旧浮层"
+    if (typeof TableStickyOverlay !== 'undefined' && TableStickyOverlay.uninstallAll) {
+      try { TableStickyOverlay.uninstallAll(); } catch (e) { console.error('[uninstallAll]', e); }
+    }
+    // 恢复目标模块之前保留的搜索/筛选/分页/tab 等状态（页面刷新后 moduleState 为空，自动重置）
+    this.restoreModuleState(this.modules[moduleName].instance, moduleName);
+
+    // 跨模块联动：进入模块前写入该模块的预设筛选/参数（如从档案跳转入库带供应商筛选）
+    if (params && this.modules[moduleName].instance) {
+      const inst = this.modules[moduleName].instance;
+      if (inst.currentFilter && params.filter) Object.assign(inst.currentFilter, params.filter);
+      if (params.preset) Object.assign(inst, params.preset);
+      if (typeof inst.onPreset === 'function') { try { inst.onPreset(params); } catch (e) {} }
+    }
     // 🟡 渲染令牌（M5）：快速切换模块时，丢弃过期 render 的后续副作用，避免竞态与 DOM 互相覆盖
     const token = (this._goToken = (this._goToken || 0) + 1);
     this.currentModule = moduleName;
@@ -343,14 +495,20 @@ const App = {
     const titleEl = document.querySelector('.top-bar-left strong');
     if (titleEl) titleEl.textContent = this.modules[moduleName].title || '库管工作台';
     const meta = this.modules[moduleName];
+    // 🟢 v194：模块切换时给出加载反馈，避免「旧页面停住」的卡顿感（仅当从其它模块切换过来时）
+    if (this.currentModule && this.currentModule !== moduleName) {
+      try { showLoading('加载 ' + (meta.title || '') + ' …'); } catch (e) {}
+    }
     try {
-      await meta.instance.render();
-      if (token !== this._goToken) return; // 已被更新的模块切换打断，丢弃过期操作
-      // 出库模块：检查是否有从列表页跳转过来的待加载单号
+      await meta.instance.render(token);
+      if (token !== this._goToken) return; // 已被更新的模块切换打断， 丢弃过期操作
+      // 出库模块：检查是否有从列表页跳转过来的待加载单号（render 已 await 完成，obSearchNo 已就绪，无需定时器）
       if (moduleName === 'outbound' && typeof OutboundListModule !== 'undefined') {
-        setTimeout(() => OutboundListModule.checkPendingLoad(), 300);
+        OutboundListModule.checkPendingLoad();
       }
       hideLoading(); // 确保加载遮罩在模块渲染后关闭
+      // 🟢 v159：模块渲染完成后按配色配置重绘（分组变量 + 列/单元格维度）
+      if (typeof ColorTheme !== 'undefined') { try { ColorTheme.repaintAll(); } catch (e) {} }
     } catch (err) {
       console.error(`${moduleName} render error:`, err);
       const area = document.getElementById('contentArea');
@@ -358,6 +516,50 @@ const App = {
         `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-text">加载出错: ${esc(err.message || err)}</div></div>`;
       hideLoading();
     }
+  },
+
+  // ===== 实体档案跳转（打通模块关联）=====
+  // type: 'stock' | 'supplier' | 'order'；key: 实体主键
+  openEntity(type, key) {
+    const def = (typeof EntityLinks !== 'undefined') && EntityLinks[type];
+    if (!def) { console.warn('[openEntity] 未登记的实体类型:', type); return; }
+    key = (key == null ? '' : String(key)).trim();
+    if (!key) return;
+    // 🟢 v173：打开实体档案前，先关闭可能存在的列筛选弹窗（否则残留于新页面之上）
+    if (typeof TableUtils !== 'undefined' && typeof TableUtils._hideFilterPopup === 'function') {
+      TableUtils._hideFilterPopup();
+    }
+    // 跳转前保存当前视图状态，供返回时还原 pendingEntity（避免返回后空白）
+    this._navStack.push({ module: this.currentModule || 'dashboard', pendingEntity: this.pendingEntity });
+    this.pendingEntity = { type, key };
+    this._returnModule = this.currentModule || 'dashboard';
+    this.pushRecent(type, key);
+    this.go(def.detailModule);
+  },
+
+  // 详情页返回：弹栈并还原上一个 pendingEntity，再 go 回上一个模块
+  back() {
+    const prev = this._navStack.pop();
+    if (prev && prev.module) {
+      this.pendingEntity = prev.pendingEntity || null;
+      this._returnModule = prev.module;
+      this.go(prev.module);
+    } else {
+      // 栈空时回首页
+      this.pendingEntity = null;
+      this._returnModule = 'dashboard';
+      this.go('dashboard');
+    }
+  },
+
+  // 最近浏览栈（去重、限长）
+  pushRecent(type, key) {
+    if (!this.recentEntities) this.recentEntities = [];
+    const label = (typeof EntityLinks !== 'undefined') ? EntityLinks.labelOf(type, { [EntityLinks[type].keyField]: key }) : key;
+    const entry = { type, key, label };
+    this.recentEntities = this.recentEntities.filter(e => !(e.type === type && e.key === key));
+    this.recentEntities.push(entry);
+    if (this.recentEntities.length > 8) this.recentEntities = this.recentEntities.slice(-8);
   },
 
   // ===== 时钟 =====
@@ -410,26 +612,66 @@ const App = {
       if (!topBar) return;
       topBar.appendChild(panel);
     }
+    // 按实体聚合（同一实体跨模块合并，点击直达对应档案）
+    let codeMap = null;
+    if (typeof DataLoader !== 'undefined' && typeof DataLoader.getStockNameSpecCodeMap === 'function') {
+      try { codeMap = await DataLoader.getStockNameSpecCodeMap(); } catch (e) { codeMap = null; }
+    }
+    const entities = this.aggregateSearchEntities(results, codeMap);
     panel.innerHTML = `
-      <div style="margin-bottom:8px;font-size:12px;color:var(--text-muted);">"${esc(kw)}" 的搜索结果 (${total}条)</div>
-      ${results.suppliers.length > 0 ? this.buildSearchGroup('🏭 供应商', results.suppliers.slice(0, 3), 'supplier', s => `${esc(s.供应商)} · ${esc(s.类型 || '')}`) : ''}
-      ${results.orders.length > 0 ? this.buildSearchGroup('📝 订单', results.orders.slice(0, 3), 'orders', o => `${esc(o.订单编号)} - ${esc(o.供应商)} · ${esc(o.存货名称)}`) : ''}
-      ${results.inbound.length > 0 ? this.buildSearchGroup('📥 入库', results.inbound.slice(0, 3), 'inbound', i => `${esc(i.入库单号)} - ${esc(i.供应商)} · ${esc(i.存货名称)}`) : ''}
-      ${results.stock.length > 0 ? this.buildSearchGroup('📦 现存', results.stock.slice(0, 3), 'stock', s => `${esc(s.存货名称)} · ${esc(s.规格型号 || '')}`) : ''}
+      <div style="margin-bottom:8px;font-size:12px;color:var(--text-muted);">"${esc(kw)}" 的实体结果 (${entities.length}个)</div>
+      ${entities.length ? entities.map(e => this.renderSearchEntity(e)).join('') : '<div style="font-size:12px;color:var(--text-muted);padding:8px;">未匹配到实体</div>'}
     `;
   },
 
-  buildSearchGroup(title, items, module, formatter) {
-    return `<div style="margin-bottom:8px;">
-      <div style="font-size:12px;font-weight:600;margin-bottom:4px;color:var(--text-secondary);">${title} (${items.length})</div>
-      ${items.map(item => `
-        <div style="padding:8px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--text-primary);"
-             onmousedown="event.preventDefault();App.openPanel('${module}');App.closeSearchPanel();"
-             onmouseover="this.style.background='rgba(122,156,165,0.08)'"
-             onmouseout="this.style.background=''">
-          ${formatter(item)}
-        </div>
-      `).join('')}
+  // 将全局搜索结果聚合为「实体」：同一实体跨模块合并，标注命中的模块，点击直达档案
+  // codeMap: 名称|规格 → 存货编码，用于把订单/入库关联到存货实体
+  aggregateSearchEntities(results, codeMap) {
+    const map = new Map();
+    const add = (type, key, label, module) => {
+      key = (key == null ? '' : String(key)).trim();
+      if (!key) return;
+      const k = type + '|' + key;
+      if (!map.has(k)) map.set(k, { type, key, label: label || key, modules: [] });
+      const ent = map.get(k);
+      if (!ent.modules.includes(module)) ent.modules.push(module);
+      if (label && !ent.label) ent.label = label;
+    };
+    const stockCodeOf = (o) => {
+      // F4：优先用 codeMap 将(名称|规格)归一化为存货编码，避免「存货编号」与「存货编码」两套编码并存时
+      // 把同一存货拆成两个实体、或点击后按存货编号查不到存货档案（开空白）
+      if (codeMap && o.存货名称) {
+        const k = (o.存货名称 + '|' + (o.规格型号 || '')).replace(/\s+/g, '');
+        const c = codeMap.get(k);
+        if (c) return c;
+      }
+      const on = o.存货编号 != null ? String(o.存货编号).trim() : '';
+      return on;
+    };
+    (results.suppliers || []).forEach(s => add('supplier', s.供应商, s.供应商, '供应商管理'));
+    (results.stock || []).forEach(s => add('stock', s.存货编码, (s.存货名称 || '') + (s.规格型号 ? '(' + s.规格型号 + ')' : ''), '现存量'));
+    (results.orders || []).forEach(o => {
+      add('order', o.订单编号, o.订单编号, '订单');
+      if (o.供应商) add('supplier', o.供应商, o.供应商, '订单');
+      const sc = stockCodeOf(o);
+      if (sc) add('stock', sc, o.存货名称 || sc, '订单');
+    });
+    (results.inbound || []).forEach(i => {
+      if (i.供应商) add('supplier', i.供应商, i.供应商, '入库');
+      if (i.存货编码) add('stock', i.存货编码, i.存货名称 || i.存货编码, '入库');
+    });
+    return [...map.values()];
+  },
+
+  // 渲染单个聚合实体：图标 + 名称 + 命中模块徽章，点击打开档案
+  renderSearchEntity(e) {
+    const icon = e.type === 'stock' ? '📦' : e.type === 'supplier' ? '🏭' : e.type === 'order' ? '📝' : '🔗';
+    const mods = e.modules.map(m => `<span class="search-mod">${esc(m)}</span>`).join('');
+    const open = `App.openEntity('${escAttr(e.type)}','${escAttr(e.key)}');App.closeSearchPanel();`;
+    return `<div class="search-entity" onmousedown="event.preventDefault();${open}">
+      <span class="search-entity-icon">${icon}</span>
+      <span class="search-entity-label">${esc(e.label)}</span>
+      <span class="search-entity-mods">${mods}</span>
     </div>`;
   },
 
@@ -447,6 +689,65 @@ const App = {
         document.getElementById('modalOverlay').classList.remove('show');
       }
     });
+  },
+
+  // ===== 列宽拖拽：自动为 #contentArea 内所有 .data-table 初始化拖拽手柄 =====
+  // 用 MutationObserver 监听 DOM 变化（模块切换/筛选/分页/增删行都会重渲染表格），
+  // 批量渲染时防抖一次，确保任意模块、任意时机出现的表格都能手动调列宽，无需逐模块改代码
+  initColumnResizeObserver() {
+    const area = document.getElementById('contentArea');
+    if (!area) return;
+    let rafId = null;
+    const schedule = () => {
+      if (rafId) return;
+      // 🟢 v146：用 rAF 替代 60ms setTimeout——下一帧时浏览器已完成 innerHTML 后的首次 layout，
+      //   th.offsetWidth > 0 成立，可立即锁定列宽；省去 60ms 闪烁窗口。
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        if (typeof TableUtils !== 'undefined' && TableUtils.initColumnResizers) {
+          TableUtils.initColumnResizers(area);
+        }
+        // 🟢 v113：自动为任何「未挂过 ▼」的 .data-table 挂筛选键 + 对齐按钮（通过 data-table-key 识别）
+        if (typeof TableUtils !== 'undefined' && TableUtils.initSortableHeadersAuto) {
+          TableUtils.initSortableHeadersAuto(area);
+        }
+      });
+    };
+    const obs = new MutationObserver(schedule);
+    obs.observe(area, { childList: true, subtree: true });
+    // 首屏立即处理一次（dashboard 可能已渲染）
+    schedule();
+  },
+
+  /**
+   * 🟢 v135：iOS 14+ 默认开启 Web Drag，长按/划过文本会触发系统级蓝色拖拽卡片
+   *   场景：用户在 oc-code-input 等输入框上向右滑时，键盘上方出现 "PE结水管 20*16" 那种浮卡
+   *   兜底：body 监听 dragstart + selectstart，命中 autocomplete 下拉/表格文本就 preventDefault
+   *   注：<input> 默认有内置 select 行为，不会被父级 user-select:none 影响，可继续编辑
+   */
+  initMobileDragGuard() {
+    if (window.innerWidth > 768) return; // 只在窄屏启用
+    const isTextTarget = (el) => {
+      if (!el || el === document.body) return false;
+      // <input>/<textarea>/<select> 永远允许（让用户能选中文本/编辑光标）
+      if (el.closest && (el.closest('input, textarea, select'))) return false;
+      return !!(el.closest && el.closest(
+        '.autocomplete-dropdown, .autocomplete-item, .data-table'
+      ));
+    };
+    const guard = (e) => {
+      if (isTextTarget(e.target)) {
+        try { e.preventDefault(); } catch (_) {}
+        try { e.stopPropagation(); } catch (_) {}
+      }
+    };
+    // 用 capture 阶段拦截，确保在 iOS WebKit 派发 drag preview 之前截掉
+    document.addEventListener('dragstart', guard, true);
+    document.addEventListener('selectstart', guard, true);
+    // 🟢 v139：移除 touchstart 上的 preventDefault——它会掐断滚动手势，
+    //   正是「移动端表格滑不动」的根因。selection/callout 已由 CSS
+    //   (user-select:none / -webkit-touch-callout:none / -webkit-user-drag:none)
+    //   与上面的 dragstart/selectstart 守卫兜底，无需在 touchstart 层兜底。
   }
 };
 

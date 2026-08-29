@@ -25,9 +25,11 @@ const DashboardModule = {
     { id: 'pricing', icon: '💰', label: '合同价格', desc: '报价·比价·审批', iconBg: 'var(--accent-lavender-light)' },
   ],
 
-  async render() {
+  async render(token) {
     const content = document.getElementById('contentArea');
     const stats = await DataStore.getDashboardStats();
+    const completeness = await DataStore.getCompletenessStats();
+    this._completeness = completeness;
 
     // 生成 CoverFlow HTML
     const cfCards = this.coverflowItems.map((item, idx) => {
@@ -41,6 +43,7 @@ const DashboardModule = {
       </div>`;
     }).join('');
 
+    if (token !== undefined && token !== App._goToken) return; // 渲染令牌：过期渲染不再提交 DOM，避免快速切换互相覆盖
     content.innerHTML = `
       <!-- 3D CoverFlow 快捷入口 -->
       <div class="coverflow-wrapper" style="position:relative;padding:0 12px;margin-bottom:18px;">
@@ -52,6 +55,8 @@ const DashboardModule = {
         </div>
         <button class="coverflow-nav next-btn" onclick="DashboardModule.coverflowNext()">›</button>
       </div>
+
+      ${this.recentBarHtml()}
 
       <!-- 数据概览Widget（一行4个：待办 + 3个饼图） -->
       <div class="data-widgets">
@@ -86,13 +91,14 @@ const DashboardModule = {
         </div>
         <div class="glass-card dash-donut-card">
           <div class="glass-card-header">
-            <span class="glass-card-title"><span class="title-icon">📦</span>库存补货分布</span>
+            <span class="glass-card-title"><span class="title-icon">📝</span>订单状态分布</span>
+            <span class="glass-card-action" onclick="App.go('orders')">查看全部 ›</span>
           </div>
           <div class="donut-container">
-            <div class="donut-chart"><canvas id="restockCanvas"></canvas>
-              <div class="donut-center"><div class="big-num">${stats.stockCount}</div><div class="small-label">物料总数</div></div>
+            <div class="donut-chart"><canvas id="orderStatusCanvas"></canvas>
+              <div class="donut-center"><div class="big-num">${stats.orderCount}</div><div class="small-label">订单总数</div></div>
             </div>
-            <div class="donut-legend" id="restockLegend"></div>
+            <div class="donut-legend" id="orderStatusLegend"></div>
           </div>
         </div>
       </div>
@@ -113,17 +119,20 @@ const DashboardModule = {
         </div>
         <div class="kpi-card card-info" onclick="App.openPanel('orders')">
           <div class="kpi-label">年度采购总额</div>
-          <div class="kpi-value" style="font-size:20px;">¥${this.formatMoney(stats.totalOrderAmount)}</div>
+          <div class="kpi-value" style="font-size:20px;">¥${TableUtils.formatMoney(stats.totalOrderAmount)}</div>
         </div>
         <div class="kpi-card card-success" onclick="App.openPanel('inbound')">
           <div class="kpi-label">年度供货总金额</div>
-          <div class="kpi-value" style="font-size:20px;">¥${this.formatMoney(stats.yearInboundAmount)}</div>
+          <div class="kpi-value" style="font-size:20px;">¥${TableUtils.formatMoney(stats.yearInboundAmount)}</div>
         </div>
         <div class="kpi-card card-danger" onclick="App.openPanel('lowTurnover')">
           <div class="kpi-label">低周转物料</div>
           <div class="kpi-value">${stats.lowTurnoverCount}<span class="kpi-unit"> 种</span></div>
         </div>
       </div>
+
+      <!-- 关联完整性看板（打通模块 · 反向利用已建立关系发现孤岛） -->
+      ${this.completenessCardHtml(completeness)}
 
       <!-- 月度入库金额/订单金额趋势 -->
       <div class="glass-card">
@@ -150,16 +159,109 @@ const DashboardModule = {
       </div>
     `;
 
-    // 渲染子组件
-    await this.renderDonut(stats);
+      // 🟡 修复：一次性预拉取并缓存各表，各图表方法共用，避免重复全表扫描
+      this._cacheData = {};
+      await Promise.all([
+        this._getCached('inbound'), this._getCached('orders'), this._getCached('suppliers'),
+        this._getCached('stock'), this._getCached('inventoryAlerts'), this._getCached('lowTurnover')
+      ]);
+      if (token !== undefined && token !== App._goToken) return;
+
+      // 渲染子组件
+      await this.renderDonut(stats);
     await this.renderTodos(stats);
     await this.renderSupplierContractChart();
-    await this.renderRestockChart(stats);
+    await this.renderOrderStatusChart(stats);
     await this.renderMonthlyChart();
     await this.renderTop10Chart();
     await this.renderCompareChart();
     this.updateBadges(stats);
     this.initCoverflow();
+  },
+
+  // 最近浏览：复用 App.recentEntities 栈，点击直达实体档案（无记录时不显示）
+  recentBarHtml() {
+    const rec = (typeof App !== 'undefined' && App.recentEntities) ? App.recentEntities : [];
+    if (!rec.length) return '';
+    const iconOf = (t) => t === 'stock' ? '📦' : t === 'supplier' ? '🏭' : t === 'order' ? '📝' : '🔗';
+    const chips = rec.slice().reverse().map(e => {
+      const lbl = esc(e.label || e.key);
+      return `<span class="recent-chip" onclick="App.openEntity('${escAttr(e.type)}','${escAttr(e.key)}')">${iconOf(e.type)} ${lbl}</span>`;
+    }).join('');
+    return `<div class="glass-card recent-entities">
+      <div class="glass-card-header"><span class="glass-card-title"><span class="title-icon">🕘</span>最近浏览</span></div>
+      <div class="recent-chips">${chips}</div>
+    </div>`;
+  },
+
+  // 关联完整性看板：以「孤岛」指标形式呈现，点击下钻查看明细
+  completenessCardHtml(c) {
+    if (!c) return '';
+    const items = [
+      { kind: 'stockNoInbound', icon: '📦', label: '存货无入库', count: c.counts.stockNoInbound, total: c.totals.stock, sev: c.counts.stockNoInbound > 0 },
+      { kind: 'stockNoOrder', icon: '📦', label: '存货无订单', count: c.counts.stockNoOrder, total: c.totals.stock, sev: c.counts.stockNoOrder > 0 },
+      { kind: 'supNoPrice', icon: '🏭', label: '供应商无合同价', count: c.counts.supNoPrice, total: c.totals.supplier, sev: c.counts.supNoPrice > 0 },
+      { kind: 'supNoInbound', icon: '🏭', label: '供应商无入库', count: c.counts.supNoInbound, total: c.totals.supplier, sev: c.counts.supNoInbound > 0 },
+      { kind: 'ordersNoInbound', icon: '📝', label: '订单未入库', count: c.counts.ordersNoInbound, total: c.totals.order, sev: c.counts.ordersNoInbound > 0 }
+    ];
+    const chips = items.map(it => `
+      <div class="completeness-item ${it.sev ? 'has-issue' : 'ok'}"
+           onclick="DashboardModule.showCompletenessDetail('${it.kind}')">
+        <span class="completeness-icon">${it.icon}</span>
+        <span class="completeness-count">${it.count}</span>
+        <span class="completeness-label">${it.label}</span>
+      </div>`).join('');
+    const issueTotal = items.reduce((s, it) => s + (it.sev ? it.count : 0), 0);
+    return `<div class="glass-card completeness-card">
+      <div class="glass-card-header">
+        <span class="glass-card-title"><span class="title-icon">🔗</span>关联完整性看板</span>
+        <span class="glass-card-action" style="color:${issueTotal > 0 ? 'var(--status-warning,#b7791f)' : 'var(--status-success,#38a169)'};">
+          ${issueTotal > 0 ? `${issueTotal} 处待完善` : '关联完整 ✓'}
+        </span>
+      </div>
+      <div class="completeness-grid">${chips}</div>
+      <div class="completeness-hint">点击任意指标，下钻查看缺失关联的实体明细</div>
+    </div>`;
+  },
+
+  // 关联完整性下钻：复用全局弹窗，列出缺失关联的实体（带可点击链接直达档案）
+  async showCompletenessDetail(kind) {
+    const c = this._completeness;
+    if (!c) return;
+    const overlay = document.getElementById('modalOverlay');
+    const titleEl = document.getElementById('modalTitle');
+    const bodyEl = document.getElementById('modalBody');
+    if (!overlay || !bodyEl) return;
+
+    let title = '', headers = [], rows = [];
+    if (kind === 'stockNoInbound' || kind === 'stockNoOrder') {
+      const codes = kind === 'stockNoInbound' ? c.stockNoInbound : c.stockNoOrder;
+      title = kind === 'stockNoInbound' ? '存货无入库记录' : '存货无订单记录';
+      headers = ['存货编码', '存货名称', '规格型号'];
+      const byCode = new Map((c._stockRows || []).map(r => [String(r.存货编码), r]));
+      rows = codes.slice(0, 300).map(code => {
+        const r = byCode.get(code) || {};
+        const name = r.存货名称 || code;
+        return [`<strong>${esc(name ?? '')}</strong>`, esc(r.存货名称 || ''), esc(r.规格型号 || '')];
+      });
+    } else if (kind === 'supNoPrice' || kind === 'supNoInbound') {
+      const names = kind === 'supNoPrice' ? c.supNoPrice : c.supNoInbound;
+      title = kind === 'supNoPrice' ? '供应商无合同价' : '供应商无入库记录';
+      headers = ['供应商'];
+      rows = names.slice(0, 300).map(n => [TableUtils.link('supplier', n, n)]);
+    } else if (kind === 'ordersNoInbound') {
+      title = '未入库订单（仍有未入库量）';
+      headers = ['订单编号', '供应商', '存货名称', '未入库量'];
+      rows = c.ordersNoInbound.slice(0, 300).map(o => [
+        TableUtils.link('order', o.订单编号, o.订单编号), esc(o.供应商 || ''), esc(o.存货名称 || ''), this.fmt(o.未入库量)
+      ]);
+    }
+
+    titleEl.textContent = title + (rows.length ? `（${rows.length} 条）` : '');
+    bodyEl.innerHTML = rows.length
+      ? `<div class="todo-detail-table"><table class="data-table"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c2 => `<td>${c2}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
+      : '<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-text">暂无缺失记录</div></div>';
+    overlay.classList.add('show');
   },
 
   // ===== 3D CoverFlow =====
@@ -219,6 +321,26 @@ const DashboardModule = {
 
   stopAutoCoverflow() {
     if (this.coverflowTimer) { clearInterval(this.coverflowTimer); this.coverflowTimer = null; }
+  },
+
+  // 🟡 M7：离开仪表盘时清理（停止自动轮播定时器 + 移除全局键盘监听），由 App.go 的 onLeave 钩子调用
+  onLeave() {
+    this.stopAutoCoverflow();
+    if (this._coverflowKeyHandler) {
+      document.removeEventListener('keydown', this._coverflowKeyHandler);
+      this._coverflowKeyHandler = null;
+    }
+    // 🟡 修复：离开时销毁所有 Chart 实例，避免内存泄漏
+    ['donutChart', 'chart', 'top10Chart', 'compareChart', 'supplierContractChart', 'restockChart'].forEach(k => {
+      if (this[k]) { try { this[k].destroy(); } catch (e) {} this[k] = null; }
+    });
+  },
+
+  // 🟡 修复：全表数据缓存，各图表方法共用，避免重复全表扫描
+  _getCached(table) {
+    if (!this._cacheData) this._cacheData = {};
+    if (!this._cacheData[table]) this._cacheData[table] = db[table].toArray();
+    return this._cacheData[table];
   },
 
   openCoverflowItem(moduleId) {
@@ -296,10 +418,12 @@ const DashboardModule = {
     if (this.donutChart) { this.donutChart.destroy(); this.donutChart = null; }
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     const safe = stats.stockCount - stats.needRestockCount;
+    // 🟡 修复：仅按"种"划分物料健康度（安全库存 + 需补货 = 物料总数 = 中心值）。
+    // 在途订单单位为"条"（未入库订单行数），是独立指标，不在本甜甜圈内参与占比，
+    // 避免"条/种"混算导致分片之和 ≠ 中心值、图例误导。
     const segs = [
       { label: '安全库存', value: safe, unit: '种', color: isDark ? '#34D399' : '#6DBF9F' },
-      { label: '需补货', value: stats.needRestockCount, unit: '种', color: isDark ? '#FB7185' : '#D49595' },
-      { label: '在途订单', value: stats.pendingInbound, unit: '条', color: isDark ? '#FBBF24' : '#D4A870' }
+      { label: '需补货', value: stats.needRestockCount, unit: '种', color: isDark ? '#FB7185' : '#D49595' }
     ].filter(s => s.value > 0);
     this.donutChart = new Chart(canvas, {
       type: 'doughnut',
@@ -361,13 +485,13 @@ const DashboardModule = {
 
     if (type === 'restock') {
       title = '需补货物料明细';
-      let list = await db.inventoryAlerts.toArray();
+      let list = await this._getCached('inventoryAlerts');
 
       // 补货值统一处理在现存量交叉补全之后进行（见下方）
 
       // 从库存表交叉补全现存量 + 重算补货值
       try {
-        const stockRows = await db.stock.toArray();
+        const stockRows = await this._getCached('stock');
         const stockByCode = new Map();
         const stockByNameSpec = new Map();
         stockRows.forEach(s => {
@@ -395,22 +519,22 @@ const DashboardModule = {
       rows = list.slice(0, 300).map(a => [a.存货编码 ?? '', a.存货名称 ?? '', a.规格型号 ?? '', this.fmt(a.现存量), this.fmt(a.补货值), this.fmt(a.最低库存预警)]);
     } else if (type === 'pendingInbound') {
       title = '未完成入库订单';
-      const list = (await db.orders.toArray()).filter(o => parseFloat(o.未入库量) > 0);
-      // 填充存货编码
-      if (codeMap) list.forEach(o => { if (o.存货名称) { const k=(o.存货名称+'|'+(o.规格型号||'')).replace(/\s+/g,''); o._存货编码=codeMap.get(k)||''; } });
+      const list = (await this._getCached('orders')).filter(o => parseFloat(o.未入库量) > 0);
+      // 填充存货编码（双路取码）
+      if (typeof DataLoader !== 'undefined' && DataLoader.fillStockCode) list.forEach(o => DataLoader.fillStockCode(o, codeMap));
       headers = ['订单编号', '供应商', '存货编码', '存货名称', '规格型号', '订货量', '未入库量'];
       rows = list.slice(0, 300).map(o => [o.订单编号 ?? '', o.供应商 ?? '', o._存货编码 ?? '', o.存货名称 ?? '', o.规格型号 ?? '', this.fmt(o.数量), this.fmt(o.未入库量)]);
     } else if (type === 'pendingApproval') {
       title = '未审批通过订单';
-      const list = (await db.orders.toArray()).filter(o => o.审批状态 && o.审批状态 !== '审批通过');
-      // 填充存货编码（显示全部行项，不按订单编号去重）
-      if (codeMap) list.forEach(o => { if (o.存货名称) { const k=(o.存货名称+'|'+(o.规格型号||'')).replace(/\s+/g,''); o._存货编码=codeMap.get(k)||''; } });
+      const list = (await this._getCached('orders')).filter(o => o.审批状态 && o.审批状态 !== '审批通过');
+      // 填充存货编码（双路取码，显示全部行项，不按订单编号去重）
+      if (typeof DataLoader !== 'undefined' && DataLoader.fillStockCode) list.forEach(o => DataLoader.fillStockCode(o, codeMap));
       headers = ['订单编号', '日期', '供应商', '存货编码', '存货名称', '规格型号', '审批状态', '未入库量'];
       rows = list.slice(0, 300).map(o => [o.订单编号 ?? '', o.日期 || o.已下单时间 || '', o.供应商 ?? '', o._存货编码 ?? '', o.存货名称 ?? '', o.规格型号 ?? '', o.审批状态 || '', this.fmt(o.未入库量)]);
     } else if (type === 'contract') {
       title = '临近到期供应商（30-90天）';
       const now = new Date();
-      const list = (await db.suppliers.toArray())
+      const list = (await this._getCached('suppliers'))
         .map(s => {
           if (!s.年度合同到期时间) return null;
           const diff = Math.ceil((new Date(s.年度合同到期时间) - now) / 86400000);
@@ -422,7 +546,7 @@ const DashboardModule = {
       rows = list.slice(0, 300).map(({ s, diff }) => [s.供应商 ?? '', s.年度合同到期时间 ?? '', diff + ' 天', '关注']);
     } else if (type === 'lowTurnover') {
       title = '低周转物料';
-      const list = await db.lowTurnover.toArray();
+      const list = await this._getCached('lowTurnover');
       headers = ['存货编码', '存货名称', '规格型号', '现存数量', '暂无法使用量'];
       rows = list.slice(0, 300).map(l => [l.存货编码 ?? '', l.物料名称 || l.存货名称 || '', l.规格 || l.规格型号 || '', this.fmt(l.现存数量), this.fmt(l.暂无法使用量)]);
     }
@@ -437,7 +561,7 @@ const DashboardModule = {
   fmt(v) {
     if (v === null || v === undefined || v === '') return '';
     const n = parseFloat(v);
-    return isNaN(n) ? v : this.formatMoney(n);
+    return isNaN(n) ? v : TableUtils.formatMoney(n);
   },
 
   updateBadges(stats) {
@@ -454,8 +578,8 @@ const DashboardModule = {
     if (!canvas) return;
     if (this.chart) { this.chart.destroy(); this.chart = null; }
 
-    const inbound = await db.inbound.toArray();
-    const orders = await db.orders.toArray();
+    const inbound = await this._getCached('inbound');
+    const orders = await this._getCached('orders');
 
     // 入库金额按月汇总
     const inboundByMonth = {};
@@ -510,22 +634,22 @@ const DashboardModule = {
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { position: 'top', labels: { usePointStyle: true, padding: 20, font: { size: 11 }, color: isDark ? '#94A3B8' : '#64748B' } }
+          legend: { position: 'top', labels: { usePointStyle: true, padding: 20, font: { size: 11 }, color: TableUtils.chartTextColor(isDark) } }
         },
         scales: {
           y1: {
             type: 'linear', position: 'left',
             grid: { color: isDark ? 'rgba(56,189,248,0.06)' : 'rgba(148,163,184,0.08)' },
-            ticks: { font: { size: 10 }, color: isDark ? '#94A3B8' : '#64748B', callback: v => this.formatMoney(v) }
+            ticks: { font: { size: 10 }, color: TableUtils.chartTextColor(isDark), callback: v => TableUtils.formatMoney(v) }
           },
           y2: {
             type: 'linear', position: 'right',
             grid: { drawOnChartArea: false },
-            ticks: { font: { size: 10 }, color: isDark ? '#94A3B8' : '#64748B', callback: v => this.formatMoney(v) }
+            ticks: { font: { size: 10 }, color: TableUtils.chartTextColor(isDark), callback: v => TableUtils.formatMoney(v) }
           },
           x: {
             grid: { display: false },
-            ticks: { font: { size: 10 }, color: isDark ? '#94A3B8' : '#64748B', maxRotation: 30 }
+            ticks: { font: { size: 10 }, color: TableUtils.chartTextColor(isDark), maxRotation: 30 }
           }
         }
       }
@@ -538,7 +662,7 @@ const DashboardModule = {
     if (!canvas) return;
     if (this.top10Chart) { this.top10Chart.destroy(); this.top10Chart = null; }
 
-    const inbound = await db.inbound.toArray();
+    const inbound = await this._getCached('inbound');
     const now = new Date();
     const sixMonths = [];
     for (let i = 5; i >= 0; i--) {
@@ -564,7 +688,7 @@ const DashboardModule = {
       .slice(0, 10);
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-    const colors = ['#3B82C4','#6DBF9F','#A78BFA','#D49595','#D4A870','#38BDF8','#34D399','#FB7185','#FBBF24','#8B5CF6'];
+    const colors = TableUtils.CHART_PALETTE;
 
     const datasets = top10.map((item, idx) => ({
       label: item.name.length > 8 ? item.name.substring(0, 8) + '…' : item.name,
@@ -583,17 +707,17 @@ const DashboardModule = {
       options: {
         responsive: true, maintainAspectRatio: false,
         plugins: {
-          legend: { position: 'top', labels: { usePointStyle: true, padding: 12, font: { size: 10 }, color: isDark ? '#94A3B8' : '#64748B', boxWidth: 8 } }
+          legend: { position: 'top', labels: { usePointStyle: true, padding: 12, font: { size: 10 }, color: TableUtils.chartTextColor(isDark), boxWidth: 8 } }
         },
         scales: {
           y: {
             stacked: false,
             grid: { color: isDark ? 'rgba(56,189,248,0.06)' : 'rgba(148,163,184,0.08)' },
-            ticks: { font: { size: 10 }, color: isDark ? '#94A3B8' : '#64748B' }
+            ticks: { font: { size: 10 }, color: TableUtils.chartTextColor(isDark) }
           },
           x: {
             grid: { display: false },
-            ticks: { font: { size: 10 }, color: isDark ? '#94A3B8' : '#64748B', maxRotation: 30 }
+            ticks: { font: { size: 10 }, color: TableUtils.chartTextColor(isDark), maxRotation: 30 }
           }
         }
       }
@@ -606,8 +730,8 @@ const DashboardModule = {
     if (!canvas) return;
     if (this.compareChart) { this.compareChart.destroy(); this.compareChart = null; }
 
-    const inbound = await db.inbound.toArray();
-    const orders = await db.orders.toArray();
+    const inbound = await this._getCached('inbound');
+    const orders = await this._getCached('orders');
     const now = new Date();
     const sixMonths = [];
     for (let i = 5; i >= 0; i--) {
@@ -661,26 +785,26 @@ const DashboardModule = {
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { position: 'top', labels: { usePointStyle: true, padding: 20, font: { size: 11 }, color: isDark ? '#94A3B8' : '#64748B' } }
+          legend: { position: 'top', labels: { usePointStyle: true, padding: 20, font: { size: 11 }, color: TableUtils.chartTextColor(isDark) } }
         },
         scales: {
           y: {
             type: 'linear', position: 'left',
-            title: { display: true, text: '入库量', color: isDark ? '#94A3B8' : '#64748B', font: { size: 11 } },
+            title: { display: true, text: '入库量', color: TableUtils.chartTextColor(isDark), font: { size: 11 } },
             grid: { color: isDark ? 'rgba(56,189,248,0.06)' : 'rgba(148,163,184,0.08)' },
-            ticks: { font: { size: 10 }, color: isDark ? '#94A3B8' : '#64748B' },
+            ticks: { font: { size: 10 }, color: TableUtils.chartTextColor(isDark) },
             beginAtZero: true
           },
           y1: {
             type: 'linear', position: 'right',
-            title: { display: true, text: '订货量', color: isDark ? '#94A3B8' : '#64748B', font: { size: 11 } },
+            title: { display: true, text: '订货量', color: TableUtils.chartTextColor(isDark), font: { size: 11 } },
             grid: { drawOnChartArea: false },
-            ticks: { font: { size: 10 }, color: isDark ? '#94A3B8' : '#64748B' },
+            ticks: { font: { size: 10 }, color: TableUtils.chartTextColor(isDark) },
             beginAtZero: true
           },
           x: {
             grid: { display: false },
-            ticks: { font: { size: 10 }, color: isDark ? '#94A3B8' : '#64748B', maxRotation: 30 }
+            ticks: { font: { size: 10 }, color: TableUtils.chartTextColor(isDark), maxRotation: 30 }
           }
         }
       }
@@ -693,7 +817,7 @@ const DashboardModule = {
     if (!canvas) return;
     if (this.supplierContractChart) { this.supplierContractChart.destroy(); this.supplierContractChart = null; }
 
-    const suppliers = await db.suppliers.toArray();
+    const suppliers = await this._getCached('suppliers');
     const now = new Date();
     const thirtyDays = 30;
     const ninetyDays = 90;
@@ -765,45 +889,38 @@ const DashboardModule = {
     });
   },
 
-  // ===== 库存补货分布饼图（复用 getDashboardStats 统一数据，保证与待办/KPI/库存储康度完全一致） =====
-  async renderRestockChart(stats) {
-    const canvas = document.getElementById('restockCanvas');
+  // ===== 订单状态分布环形图（待审/已审/在途，按订单编号去重计数；复用 getDashboardStats 统一数据） =====
+  async renderOrderStatusChart(stats) {
+    const canvas = document.getElementById('orderStatusCanvas');
     if (!canvas) return;
-    if (this.restockChart) { this.restockChart.destroy(); this.restockChart = null; }
+    if (this.orderStatusChart) { this.orderStatusChart.destroy(); this.orderStatusChart = null; }
 
-    // 直接使用统一计算的 stats 值，不再单独查询数据库
-    const needRestock = stats.needRestockCount || 0;
-    const stockCount = stats.stockCount || 0;
-    const pendingInbound = stats.pendingInbound || 0;
-    const safe = Math.max(0, stockCount - needRestock);
-
-    // 在途和需补货可能有重叠
-    const both = Math.min(needRestock, pendingInbound);
-    const onlyNeedRestock = Math.max(0, needRestock - both);
-    const onlyOnTheWay = Math.max(0, pendingInbound - both);
-
-    const legend = document.getElementById('restockLegend');
+    // 直接使用统一计算的 stats 值（已按订单编号去重），不再单独查询数据库
+    const pendingReview = stats.pendingReview || 0;   // 待审：审批状态 ≠ 审批通过
+    const approved = stats.approved || 0;            // 已审：审批通过
+    const inTransit = stats.inTransit || 0;          // 在途：未入库量 > 0（未完全入库）
+    const legend = document.getElementById('orderStatusLegend');
     if (legend) {
       legend.innerHTML = `
-        <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#D49595;"></span>需补货 ${needRestock} 种</div>
-        <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#D4A870;"></span>在途订单 ${pendingInbound} 种</div>
-        <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#6DBF9F;"></span>库存安全 ${safe} 种</div>
+        <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#FBBF24;"></span>待审 ${pendingReview} 单</div>
+        <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#6DBF9F;"></span>已审 ${approved} 单</div>
+        <div class="donut-legend-item"><span class="donut-legend-dot" style="background:#D49595;"></span>在途 ${inTransit} 单</div>
       `;
     }
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-    this.restockChart = new Chart(canvas, {
+    this.orderStatusChart = new Chart(canvas, {
       type: 'doughnut',
       data: {
         datasets: [{
-          data: [onlyNeedRestock, onlyOnTheWay, both, safe].filter(v => v > 0),
+          data: [pendingReview, approved, inTransit].filter(v => v > 0),
           backgroundColor: isDark
-            ? ['#FB7185', '#FBBF24', '#A78BFA', '#34D399']
-            : ['#D49595', '#D4A870', '#A78BFA', '#6DBF9F'],
+            ? ['#FBBF24', '#34D399', '#FB7185']
+            : ['#FBBF24', '#6DBF9F', '#D49595'],
           borderColor: isDark ? '#0F172A' : '#FFFFFF',
           borderWidth: 2,
           hoverOffset: 8,
-          offset: [0, 0, 0, 0]
+          offset: [0, 0, 0]
         }]
       },
       options: {
@@ -817,9 +934,5 @@ const DashboardModule = {
         }
       }
     });
-  },
-
-  formatMoney(num) {
-    return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(num || 0);
   }
 };

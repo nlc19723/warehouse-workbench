@@ -1,9 +1,9 @@
 // ============================================
-// Service Worker v7 — PWA 离线安装版
+// Service Worker v8 — PWA 离线安装版
 //     预缓存应用外壳（支持离线打开/安装为桌面应用）
 //     库文件 Cache-First / 应用文件 Network-First（带离线回退）
 // ============================================
-const CACHE_NAME = 'warehouse-workbench-v7';
+const CACHE_NAME = 'warehouse-workbench-v21';
 
 // 预缓存：应用外壳（离线可打开的最低文件集）
 const PRECACHE = [

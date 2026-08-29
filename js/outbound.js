@@ -9,10 +9,16 @@ const OutboundModule = {
   defaultRows: 15,        // 默认空白行数
   autoAddRows: 5,        // 到最后一行时自动增加的行数
 
-  async render() {
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    // 🔴 修复单例状态污染：每次进入模块重置为「新增模式」，避免残留 editingMode/currentOrderNo 误删其他出库单
+    this.currentOrderNo = '';
+    this.editingMode = false;
+    const myToken = token;
     const content = document.getElementById('contentArea');
     const today = new Date().toISOString().split('T')[0];
     const projects = await DataStore.getOutboundProjects();
+    if (myToken !== undefined && myToken !== App._goToken) return;
 
     content.innerHTML = `
       <!-- 操作栏 -->
@@ -32,18 +38,20 @@ const OutboundModule = {
         <div class="glass-card-header">
           <span class="glass-card-title"><span class="title-icon">📤</span>出库单信息</span>
         </div>
-        <div style="display:grid;grid-template-columns:auto auto auto auto;gap:12px 24px;padding:16px;">
-          <div style="display:flex;align-items:center;gap:8px;">
+        <div class="ob-header-grid" style="display:grid;grid-template-columns:auto auto auto auto;gap:12px 24px;padding:16px;">
+          <div class="ob-field">
             <label style="font-size:12.5px;font-weight:600;color:var(--text-muted);white-space:nowrap;">出库单号</label>
-            <button id="obPrevBtn" onclick="OutboundModule.navigateOrder(-1)" title="上一单"
-              style="width:30px;height:34px;border:1px solid var(--card-border);border-radius:8px;background:linear-gradient(180deg,var(--card-bg),rgba(0,0,0,0.04));box-shadow:0 2px 4px rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,0.6);color:var(--text-main);font-size:14px;cursor:pointer;transition:all 0.15s;">◀</button>
-            <input type="text" id="obOrderNo" placeholder="自动生成或手动输入" style="width:180px;height:34px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:13px;background:var(--card-bg);color:var(--text-main);">
-            <button id="obNextBtn" onclick="OutboundModule.navigateOrder(1)" title="下一单"
-              style="width:30px;height:34px;border:1px solid var(--card-border);border-radius:8px;background:linear-gradient(180deg,var(--card-bg),rgba(0,0,0,0.04));box-shadow:0 2px 4px rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,0.6);color:var(--text-main);font-size:14px;cursor:pointer;transition:all 0.15s;">▶</button>
+            <div class="ob-orderno-row">
+              <button id="obPrevBtn" onclick="OutboundModule.navigateOrder(-1)" title="上一单"
+                style="width:40px;height:44px;border:1px solid var(--card-border);border-radius:8px;background:linear-gradient(180deg,var(--card-bg),rgba(0,0,0,0.04));box-shadow:0 2px 4px rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,0.6);color:var(--text-main);font-size:16px;cursor:pointer;transition:all 0.15s;">◀</button>
+              <input type="text" id="obOrderNo" placeholder="自动生成或手动输入" style="width:100%;height:44px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:16px;background:var(--card-bg);color:var(--text-main);">
+              <button id="obNextBtn" onclick="OutboundModule.navigateOrder(1)" title="下一单"
+                style="width:40px;height:44px;border:1px solid var(--card-border);border-radius:8px;background:linear-gradient(180deg,var(--card-bg),rgba(0,0,0,0.04));box-shadow:0 2px 4px rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,0.6);color:var(--text-main);font-size:16px;cursor:pointer;transition:all 0.15s;">▶</button>
+            </div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <label style="font-size:12.5px;font-weight:600;color:var(--text-muted);white-space:nowrap;">出库时间</label>
-            <input type="date" id="obDate" value="${today}" style="width:130px;height:34px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:13px;background:var(--card-bg);color:var(--text-main);">
+            <input type="text" id="obDate" value="${today}" readonly class="dp-input" style="width:130px;height:34px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:13px;background:var(--card-bg);color:var(--text-main);">
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <label style="font-size:12.5px;font-weight:600;color:var(--text-muted);white-space:nowrap;">项目名称</label>
@@ -71,14 +79,28 @@ const OutboundModule = {
     // 自动生成单号（如果为空）
     if (!document.getElementById('obOrderNo').value) {
       const nextNo = await this.generateNextOrderNo();
-      document.getElementById('obOrderNo').value = nextNo;
+      if (myToken !== undefined && myToken !== App._goToken) return; // 🔴 竞态：等待期间切走则丢弃过期渲染
+      const obNoEl = document.getElementById('obOrderNo');
+      if (obNoEl) obNoEl.value = nextNo;
     }
 
     // 渲染默认空白行
     this.renderDetailRows();
 
+    // 挂载出库时间自定义日期选择器（替换原生 type=date）
+    if (typeof DatePicker !== 'undefined') DatePicker.mount('obDate');
+
     // 绑定项目名称联想（来源：入库列表去重后的项目名称）
     setTimeout(() => this.bindProjectAutocomplete(), 100);
+  },
+
+  // 🟡 修复：离开出库模块时清理 document 级 click 监听，避免监听器泄漏
+  onLeave() {
+    if (this._docClickHandler) {
+      document.removeEventListener('click', this._docClickHandler);
+      this._docClickHandler = null;
+      this._docClickBound = false;
+    }
   },
 
   // 项目名称智能联想（从入库列表去重后的项目名称，按最近入库时间倒序）
@@ -118,7 +140,7 @@ const OutboundModule = {
 
     // ─── 第 2 步：异步从 DB 加载项目（不阻塞监听器挂载）───
     try {
-      const all = await db.inbound.toArray();
+      const all = await DataStore.getRows('inbound');
       const projectTimeMap = new Map();
       all.forEach(r => {
         if (!r.项目名称) return;
@@ -186,7 +208,7 @@ const OutboundModule = {
     const container = document.getElementById('obDetailTable');
     let html = `
       <div id="obTableContainer" style="display:flex;justify-content:flex-start;">
-        <table class="data-table" style="width:auto;table-layout:fixed;">
+        <table class="data-table" style="width:auto;table-layout:fixed;" data-table-key="outbound">
           <thead>
             <tr>
               <th style="width:40px;text-align:center;">序号</th>
@@ -209,20 +231,20 @@ const OutboundModule = {
         <tr data-row="${idx}">
           <td style="text-align:center;font-size:12px;color:var(--text-muted);">${idx + 1}</td>
           <td style="position:relative;">
-            <input type="text" class="ob-code-input" placeholder="输入编码联想..."
+            <input type="text" class="ob-code-input ob-input" placeholder="输入编码联想..."
               value="${r.存货编码 || ''}"
               data-row="${idx}" autocomplete="off"
-              style="width:100%;height:32px;border:1px solid var(--card-border);border-radius:6px;padding:0 8px;font-size:12px;background:var(--card-bg);color:var(--text-main);outline:none;box-sizing:border-box;">
+              >
           </td>
-          <td><input type="text" class="ob-name-input" readonly placeholder="自动填充"
+          <td><input type="text" class="ob-name-input ob-detail-input" readonly placeholder="自动填充"
             value="${r.存货名称 || ''}" data-row="${idx}"
-            style="width:100%;height:32px;border:1px solid var(--card-border);border-radius:6px;padding:0 8px;font-size:12px;background:rgba(0,0,0,0.03);color:var(--text-body);outline:none;box-sizing:border-box;"></td>
-          <td><input type="text" class="ob-spec-input" readonly placeholder="自动填充"
+            ></td>
+          <td><input type="text" class="ob-spec-input ob-detail-input" readonly placeholder="自动填充"
             value="${r.规格型号 || ''}" data-row="${idx}"
-            style="width:100%;height:32px;border:1px solid var(--card-border);border-radius:6px;padding:0 8px;font-size:12px;background:rgba(0,0,0,0.03);color:var(--text-body);outline:none;box-sizing:border-box;"></td>
+            ></td>
           <td style="text-align:right;"><input type="number" class="ob-qty-input" placeholder="0"
             value="${r.出库数量 || ''}" data-row="${idx}" min="0" step="any"
-            style="width:80px;height:32px;border:1px solid var(--card-border);border-radius:6px;padding:0 8px;font-size:12px;background:var(--card-bg);color:var(--text-main);outline:none;text-align:right;"></td>
+            ></td>
           <td style="text-align:center;"><button onclick="OutboundModule.removeRow(${idx})" style="border:none;background:none;color:var(--status-danger);cursor:pointer;font-size:15px;padding:2px 4px;" title="删除此行">🗑️</button></td>
         </tr>`;
     });
@@ -362,19 +384,24 @@ const OutboundModule = {
       });
     }
 
-    // 点击外部关闭联想（只绑一次，避免重复调用 bindAutocomplete 时累积监听器）
+    // 点击外部关闭联想（只绑一次，离开模块时移除，避免监听器泄漏）
     if (!this._docClickBound) {
       this._docClickBound = true;
-      document.addEventListener('click', (e) => {
+      this._docClickHandler = (e) => {
         if (!e.target.closest('.autocomplete-dropdown') && !e.target.closest('.ob-code-input')) {
           this.hideAutocomplete();
         }
-      });
+      };
+      document.addEventListener('click', this._docClickHandler);
     }
   },
 
   // 显示联想下拉
+  // 🟢 v136：async race 守卫，与 order-check.js 同因
+  _showToken: 0,
   async showAutocomplete(inputEl, keyword) {
+    this._showToken += 1;
+    const myToken = this._showToken;
     // 先移除其他已打开的下拉
     document.querySelectorAll('.autocomplete-dropdown').forEach(d => d.remove());
 
@@ -395,6 +422,9 @@ const OutboundModule = {
 
     if (results.length === 0) return;
 
+    // 🟢 v136：await 期间可能已有更新的调用抢走 token，本调用直接放弃
+    if (myToken !== this._showToken) return;
+
     // 构建下拉浮层 HTML
     let itemsHtml = '';
     results.forEach(r => {
@@ -404,6 +434,9 @@ const OutboundModule = {
         <span class="autocomplete-spec">${esc(r.规格型号 || '')}</span>
       </div>`;
     });
+
+    // 🟢 v136：防御性清理
+    document.querySelectorAll('.autocomplete-dropdown').forEach(d => d.remove());
 
     const dropdown = document.createElement('div');
     dropdown.className = 'autocomplete-dropdown';
@@ -490,19 +523,19 @@ const OutboundModule = {
     tr.innerHTML = `
       <td style="text-align:center;font-size:12px;color:var(--text-muted);">${newRowIdx + 1}</td>
       <td style="position:relative;">
-        <input type="text" class="ob-code-input" placeholder="输入编码联想..."
+        <input type="text" class="ob-code-input ob-input" placeholder="输入编码联想..."
           data-row="${newRowIdx}" autocomplete="off"
-          style="width:100%;height:32px;border:1px solid var(--card-border);border-radius:6px;padding:0 8px;font-size:12px;background:var(--card-bg);color:var(--text-main);outline:none;box-sizing:border-box;">
+          >
       </td>
-      <td><input type="text" class="ob-name-input" readonly placeholder="自动填充"
+      <td><input type="text" class="ob-name-input ob-detail-input" readonly placeholder="自动填充"
         data-row="${newRowIdx}"
-        style="width:100%;height:32px;border:1px solid var(--card-border);border-radius:6px;padding:0 8px;font-size:12px;background:rgba(0,0,0,0.03);color:var(--text-body);outline:none;box-sizing:border-box;"></td>
-      <td><input type="text" class="ob-spec-input" readonly placeholder="自动填充"
+        ></td>
+      <td><input type="text" class="ob-spec-input ob-detail-input" readonly placeholder="自动填充"
         data-row="${newRowIdx}"
-        style="width:100%;height:32px;border:1px solid var(--card-border);border-radius:6px;padding:0 8px;font-size:12px;background:rgba(0,0,0,0.03);color:var(--text-body);outline:none;box-sizing:border-box;"></td>
+        ></td>
       <td style="text-align:right;"><input type="number" class="ob-qty-input" placeholder="0"
         data-row="${newRowIdx}" min="0" step="any"
-        style="width:80px;height:32px;border:1px solid var(--card-border);border-radius:6px;padding:0 8px;font-size:12px;background:var(--card-bg);color:var(--text-main);outline:none;text-align:right;"></td>
+        ></td>
       <td style="text-align:center;"><button onclick="OutboundModule.removeRow(${newRowIdx})" style="border:none;background:none;color:var(--status-danger);cursor:pointer;font-size:15px;padding:2px 4px;" title="删除此行">🗑️</button></td>
     `;
     tbody.appendChild(tr);
@@ -711,6 +744,9 @@ const OutboundModule = {
 
   // 录入/保存（带重复校验和提示）
   async saveOrder() {
+    if (this._busy) { this.showMsg('⏳ 正在保存，请稍候…', true); return; }
+    this._busy = true;
+    try {
     const { orderNo, date, project, receiver, details } = this.collectFormData();
 
     // 校验
@@ -786,6 +822,9 @@ const OutboundModule = {
       console.error('保存出库单失败:', err);
       this.showMsg('❌ 保存失败: ' + err.message, true);
     }
+    } finally {
+      this._busy = false;
+    }
   },
 
   // 激活编辑（配合搜索使用）
@@ -800,6 +839,8 @@ const OutboundModule = {
 
   // 删除当前出库单（带成功/失败提示）
   async deleteOrder() {
+    if (this._busy) { this.showMsg('⏳ 正在删除，请稍候…', true); return; }
+    this._busy = true;
     try {
       const orderNo = this.currentOrderNo || document.getElementById('obSearchNo').value.trim();
       if (!orderNo) {
@@ -827,15 +868,20 @@ const OutboundModule = {
     } catch (err) {
       console.error('删除失败:', err);
       this.showMsg('❌ 删除失败: ' + err.message, true);
+    } finally {
+      this._busy = false;
     }
   },
 
   // 异步增量同步 outbound 到云端（不阻塞 UI，失败仅在 console 提示）
+  // v164+：双通道——① 工作 bundle 增量（保留分享链接兼容）② 设置数据 outbound_list（跨设备长期记忆）
   _syncOutboundToCloud() {
-    if (typeof DataLoader === 'undefined' || !DataLoader.pushOutboundToCloud) return;
-    DataLoader.pushOutboundToCloud().catch(err => {
-      console.warn('[出库] 增量同步失败:', err.message || err);
-    });
+    if (typeof DataLoader !== 'undefined' && DataLoader.pushOutboundToCloud) {
+      DataLoader.pushOutboundToCloud().catch(err => console.warn('[出库] 增量同步失败:', err.message || err));
+    }
+    if (typeof DataStore !== 'undefined' && DataStore.syncOutboundToSettings) {
+      DataStore.syncOutboundToSettings().catch(err => console.warn('[出库] 设置同步失败:', err.message || err));
+    }
   },
 
   // 打印
@@ -853,10 +899,10 @@ const OutboundModule = {
       details.forEach((d, i) => {
         rowsHtml += `<tr>
           <td style="text-align:center;">${i + 1}</td>
-          <td>${d.code ?? ''}</td>
-          <td>${d.name ?? ''}</td>
-          <td>${d.spec ?? ''}</td>
-          <td style="text-align:right;">${d.qty || 0}</td>
+          <td>${esc(d.code ?? '')}</td>
+          <td>${esc(d.name ?? '')}</td>
+          <td>${esc(d.spec ?? '')}</td>
+          <td style="text-align:right;">${esc(d.qty || 0)}</td>
         </tr>`;
       });
     } else {
@@ -872,10 +918,10 @@ const OutboundModule = {
           打印时间：${new Date().toLocaleString('zh-CN')}
         </p>
         <table style="width:100%;border-collapse:collapse;margin-bottom:16px;font-size:13px;">
-          <tr><td style="padding:6px 10px;border:1px solid #ddd;width:25%;background:#f9f9f9;font-weight:600;">出库单号</td><td style="padding:6px 10px;border:1px solid #ddd;">${printNo}</td>
-              <td style="padding:6px 10px;border:1px solid #ddd;width:25%;background:#f9f9f9;font-weight:600;">出库时间</td><td style="padding:6px 10px;border:1px solid #ddd;">${printDate}</td></tr>
-          <tr><td style="padding:6px 10px;border:1px solid #ddd;background:#f9f9f9;font-weight:600;">项目名称</td><td style="padding:6px 10px;border:1px solid #ddd;">${printProject}</td>
-              <td style="padding:6px 10px;border:1px solid #ddd;background:#f9f9f9;font-weight:600;">领用人员</td><td style="padding:6px 10px;border:1px solid #ddd;">${printReceiver}</td></tr>
+          <tr><td style="padding:6px 10px;border:1px solid #ddd;width:25%;background:#f9f9f9;font-weight:600;">出库单号</td><td style="padding:6px 10px;border:1px solid #ddd;">${esc(printNo)}</td>
+              <td style="padding:6px 10px;border:1px solid #ddd;width:25%;background:#f9f9f9;font-weight:600;">出库时间</td><td style="padding:6px 10px;border:1px solid #ddd;">${esc(printDate)}</td></tr>
+          <tr><td style="padding:6px 10px;border:1px solid #ddd;background:#f9f9f9;font-weight:600;">项目名称</td><td style="padding:6px 10px;border:1px solid #ddd;">${esc(printProject)}</td>
+              <td style="padding:6px 10px;border:1px solid #ddd;background:#f9f9f9;font-weight:600;">领用人员</td><td style="padding:6px 10px;border:1px solid #ddd;">${esc(printReceiver)}</td></tr>
         </table>
         <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
           <thead><tr style="background:#f0f0f0;">
@@ -918,10 +964,8 @@ const OutboundModule = {
 // ─── 全局 Toast 通知系统（顶部居中浮窗）───
 const Toast = {
   show(msg, type = 'success', duration = 3500) {
-    // 移除已有的 toast（保留最新一条）
-    document.querySelectorAll('.ob-toast-notification').forEach(t => {
-      if (t !== document.querySelector('.ob-toast-notification:last-of-type')) t.remove();
-    });
+    // 移除所有已有 toast，保证「只留最新一条」（O7）
+    document.querySelectorAll('.ob-toast-notification').forEach(t => t.remove());
 
     const toast = document.createElement('div');
     toast.className = `ob-toast-notification ob-toast-${type}`;
@@ -968,17 +1012,24 @@ const OutboundListModule = {
   currentPage: 1,
   pageSize: 20,
 
-  async render() {
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     const content = document.getElementById('contentArea');
     const projects = await DataStore.getOutboundProjects();
+    // 🟡 F2：render 开头 await 后、提交 DOM 前用渲染时的局部 token 守卫，避免过期 render 覆盖新 DOM
+    if (myToken !== undefined && myToken !== App._goToken) return;
+
+    // 清理可能遗留的旧日期选择器弹窗（render 会重建 input）
+    if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
 
     content.innerHTML = `
       <div class="filter-bar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:0;">
         <input type="text" id="oblKw" placeholder="搜索单号/编码/名称/领用人..." value="${this.currentFilter.keyword || ''}"
           onkeydown="if(event.key==='Enter')OutboundListModule.applyFilter()">
-        <input type="date" id="oblStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date">
+        <input type="text" id="oblStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date dp-input" placeholder="起始日期" readonly>
         <span class="filter-sep">至</span>
-        <input type="date" id="oblEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date">
+        <input type="text" id="oblEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date dp-input" placeholder="结束日期" readonly>
         <select id="oblProject" title="按项目筛选">
           <option value="">全部项目</option>
           ${projects.map(p => `<option value="${escAttr(p)}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
@@ -993,20 +1044,41 @@ const OutboundListModule = {
       <div id="oblPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
 
-    await this.loadData();
+    if (window.enhanceSearchSelect) {
+      enhanceSearchSelect('oblProject', { placeholder: '搜索项目', widthMode: 'half' });
+    }
+
+    // 挂载自定义日期选择器（替换原生 type=date，保持 id 与 change 事件不变）
+    if (typeof DatePicker !== 'undefined') {
+      DatePicker.mount('oblStartDate');
+      DatePicker.mount('oblEndDate');
+    }
+
+    await this.loadData(myToken);
   },
 
-  async loadData() {
+  async loadData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const result = await DataStore.getOutbound(this.currentFilter, this.currentPage, this.pageSize);
     const { items, total, totalPages } = result;
 
     // KPI 统计（🟡 M6：基于全量筛选结果，而非仅当前分页，避免分页导致数值偏低）
-    const allLimit = (window.AppConfig && AppConfig.app && AppConfig.app.kpiAllLimit) || 1000000;
-    const allFiltered = await DataStore.getOutbound(this.currentFilter, 1, allLimit);
+    // 当选择「全部」时，当前结果已是全量，避免再查一次
+    let allFiltered;
+    if (this.pageSize === 'all') {
+      allFiltered = result;
+    } else {
+      const allLimit = (window.AppConfig && AppConfig.app && AppConfig.app.kpiAllLimit) || 1000000;
+      allFiltered = await DataStore.getOutbound(this.currentFilter, 1, allLimit);
+    }
     const orderNos = [...new Set(allFiltered.items.map(i => i.出库单号).filter(Boolean))];
     const totalQty = allFiltered.items.reduce((s, i) => s + (parseFloat(i.出库数量) || 0), 0);
 
-    document.getElementById('oblSummary').innerHTML = `
+    if (rt !== undefined && rt !== App._goToken) return;
+    const _obl = document.getElementById('oblSummary');
+    if (!_obl) return; // 🟡 F2 兜底：DOM 已被其它 render 替换（如 outbound 录入覆盖列表），放弃过期提交
+    _obl.innerHTML = `
       <div class="kpi-grid" style="display:flex;gap:12px;justify-content:flex-start;flex-wrap:wrap;">
         <div class="kpi-card card-info" style="width:150px;"><div class="kpi-label">出库单数</div><div class="kpi-value">${orderNos.length}</div></div>
         <div class="kpi-card card-info" style="width:150px;"><div class="kpi-label">明细条数</div><div class="kpi-value">${total}</div></div>
@@ -1052,13 +1124,13 @@ const OutboundListModule = {
           <tbody>
             ${items.map((item, idx) => `
               <tr>
-                <td class="ob-td-center">${(this.currentPage - 1) * this.pageSize + idx + 1}</td>
+                <td class="ob-td-center">${(this.currentPage - 1) * (this.pageSize === 'all' ? items.length : this.pageSize) + idx + 1}</td>
                 <td class="ob-td-center"><a href="#outbound" onclick="OutboundListModule.goToEntry('${escAttr(item.出库单号 || '')}'); return false;" style="color:var(--primary);text-decoration:none;font-weight:600;">${esc(item.出库单号 ?? '')}</a></td>
                 <td style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escAttr(item.项目名称 || '')}">${esc(item.项目名称 ?? '')}</td>
                 <td class="ob-td-center">${esc(item.领用人员 ?? '')}</td>
                 <td class="ob-td-center">${esc(item.出库时间 ?? '')}</td>
-                <td class="ob-td-center" style="font-family:monospace;font-size:11.5px;">${esc(item.存货编码 ?? '')}</td>
-                <td class="ob-td-center" style="font-size:11.5px;" title="${escAttr(item.存货名称 || '')}">${esc(item.存货名称 ?? '')}</td>
+                <td class="ob-td-center" style="font-family:monospace;font-size:11.5px;">${TableUtils.link('stock', item.存货编码 ?? '', item.存货编码 ?? '')}</td>
+                <td class="ob-td-center" style="font-size:11.5px;" title="${escAttr(item.存货名称 || '')}"><strong>${esc(item.存货名称 ?? '')}</strong></td>
                 <td class="ob-td-center" style="font-size:11.5px;">${esc(item.规格型号 ?? '')}</td>
                 <td class="ob-td-center" style="font-weight:600;">${item.出库数量 != null ? parseFloat(item.出库数量).toLocaleString('zh-CN',{maximumFractionDigits:2}) : ''}</td>
               </tr>
@@ -1070,6 +1142,7 @@ const OutboundListModule = {
 
     this.renderPagination(total, totalPages);
     TableUtils.initSmartSelect('oblTableArea');
+    TableUtils.initSortableHeaders('oblTableArea');
   },
 
   // 点击单号跳转到录入页
@@ -1080,40 +1153,25 @@ const OutboundListModule = {
     if (typeof App !== 'undefined' && App.go) App.go('outbound');
   },
 
-  // 检查是否有待加载的单号（在 render 开头调用）
+  // 检查是否有待加载的单号（go('outbound') 渲染完成后调用）
   checkPendingLoad() {
     const pendingNo = sessionStorage.getItem('_ob_load_order_no');
     if (!pendingNo) return;
     sessionStorage.removeItem('_ob_load_order_no');
-    // 🔴 延迟执行（S1）：仅当仍停留在出库录入模块时才加载，
-    // 避免切换模块后 obSearchNo 不存在导致 searchOrder 崩溃，或误把待加载单号套用到其它模块
-    setTimeout(() => {
-      if (typeof App === 'undefined' || App.currentModule !== 'outbound') return;
-      const el = document.getElementById('obSearchNo');
-      if (!el) return;
-      el.value = pendingNo;
-      OutboundModule.searchOrder();
-    }, 200);
+    // render 已完成（go 中 await 后才调用本函数），obSearchNo 已就绪；
+    // 仅当仍停留在出库录入模块时才加载，避免切换模块后误套用到其它模块（F6 修复竞态）
+    if (typeof App === 'undefined' || App.currentModule !== 'outbound') return;
+    const el = document.getElementById('obSearchNo');
+    if (!el) return;
+    el.value = pendingNo;
+    OutboundModule.searchOrder();
   },
 
   renderPagination(total, totalPages) {
-    const page = this.currentPage;
-    const html = [];
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>`);
-    html.push(`<span class="page-btns">`);
-    html.push(`<button onclick="OutboundListModule.goPage(1)" ${page===1?'disabled':''}>«</button>`);
-    html.push(`<button onclick="OutboundListModule.goPage(${page-1})" ${page===1?'disabled':''}>‹</button>`);
-    const start=Math.max(1,page-2), end=Math.min(totalPages,start+4);
-    for(let i=start;i<=end;i++) html.push(`<button class="${i===page?'active':''}" onclick="OutboundListModule.goPage(${i})">${i}</button>`);
-    html.push(`<button onclick="OutboundListModule.goPage(${page+1})" ${page===totalPages?'disabled':''}>›</button>`);
-    html.push(`<button onclick="OutboundListModule.goPage(${totalPages})" ${page===totalPages?'disabled':''}>»</button>`);
-    html.push(`</span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">每页 <select onchange="OutboundListModule.changePageSize(+this.value)" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;"><option value="20" ${this.pageSize===20?'selected':''}>20</option><option value="50" ${this.pageSize===50?'selected':''}>50</option><option value="100" ${this.pageSize===100?'selected':''}>100</option></select> 条</span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">跳至 <input type="number" id="oblPageJumper" min="1" max="${totalPages}" value="${page}" onkeydown="if(event.key==='Enter')OutboundListModule.goPage(+this.value)" style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;"> / ${totalPages} 页</span>`);
-    document.getElementById('oblPagination').innerHTML = html.join('');
+    TableUtils.renderPagination('oblPagination', { module: 'OutboundListModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
   },
 
-  changePageSize(size) { this.pageSize=size; this.currentPage=1; this.loadData(); },
+  changePageSize(size) { this.pageSize = size === 'all' ? 'all' : parseInt(size, 10); this.currentPage=1; this.loadData(); },
   goPage(p) { this.currentPage=p; this.loadData(); },
   applyFilter() {
     this.currentFilter = {

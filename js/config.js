@@ -20,7 +20,9 @@ window.AppConfig = {
     url: 'https://audzjztaffbtmxshwadn.supabase.co',
     anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF1ZHpqenRhZmZidG14c2h3YWRuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4OTU5ODksImV4cCI6MjEwMTQ3MTk4OX0.RPPyThgZZMBldysxkuIMBqP6E8WRKhpEOZNQe5itJAg',
     bucket: 'workbench-data',
-    file: 'data.json'
+    file: 'data.json',                       // 工作数据（日常累积，导入/手动推送）
+    baseFile: 'base.json',                   // 基准数据（系统底账，与 data.json 分离）
+    baseSource: ''                           // 基准数据来源：本地 Excel 已不随包分发，需经「导入 Excel」或 Supabase 同步
   },
 
   // ────────────────────────────────────────
@@ -40,8 +42,13 @@ window.AppConfig = {
   // ────────────────────────────────────────
   app: {
     name: '库管系统工作台',
-    version: 'v101',
-    dataPath: 'data/库管系统.xlsx',
+    // 🟢 v188：版本号改为「动态派生」——运行时由 app.js 的 syncVersionFromCss()
+    //   从 index.html 中 style.css 的 ?v= 参数自动读取（如 ?v=188 → 'v188'），
+    //   覆盖本处写死的兜底值。发版只需 bump CSS 版本查询参数，徽章+控制台水印全链路自动同步。
+    //   本值仅作为脚本加载失败/无 ?v= 时的兜底。
+    version: 'v188',
+    beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
+    dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
     pages: {
       outboundListPageSize: 20   // 出库列表每页固定条数
@@ -49,7 +56,7 @@ window.AppConfig = {
   }
 };
 
-console.log('[AppConfig] 已加载 v' + window.AppConfig.app.version + ' · Supabase URL: ' + window.AppConfig.supabase.url);
+console.log('[AppConfig] 已加载 ' + window.AppConfig.app.version + ' · Supabase URL: ' + window.AppConfig.supabase.url);
 
 
 // ============================================

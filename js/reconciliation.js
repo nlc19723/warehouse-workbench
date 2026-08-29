@@ -10,8 +10,11 @@ const ReconciliationModule = {
   currentData: [],
   trendChart: null,
 
-  async render() {
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     this.suppliers = await DataStore.getOrderSuppliers();
+    if (myToken !== undefined && myToken !== App._goToken) return;
 
     // 计算默认日期范围：上上月26日 至 上月25日
     // 例：现在是 2026/8 → 上上月=6月、上月=7月 → 2026/6/26 至 2026/7/25
@@ -28,16 +31,27 @@ const ReconciliationModule = {
     const defaultStart = `${prevPrevYear}-${pad(prevPrevMonth)}-26`;
     const defaultEnd   = `${prevYear}-${pad(prevMonth)}-25`;
 
+    const saved = this.currentFilter || {};
+    const startDate = saved.startDate || defaultStart;
+    const endDate = saved.endDate || defaultEnd;
+    const supplier = saved.supplier || '';
+
     const content = document.getElementById('contentArea');
+
+    // 清理可能遗留的旧日期选择器弹窗（render 会重建 input）
+    if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
+
     content.innerHTML = `
       <div class="filter-bar">
         <select id="recSupplier">
           <option value="">选择供应商</option>
-          ${this.suppliers.map(s => `<option value="${s}">${s}</option>`).join('')}
+          ${this.suppliers.map(s => `<option value="${s}" ${supplier === s ? 'selected' : ''}>${s}</option>`).join('')}
         </select>
-        <input type="date" id="recStartDate" value="${defaultStart}">
+        <input type="text" id="recStartDate" value="${startDate}" class="dp-input" placeholder="起始日期" readonly>
         <span style="color:var(--text-secondary);">至</span>
-        <input type="date" id="recEndDate" value="${defaultEnd}">
+        <input type="text" id="recEndDate" value="${endDate}" class="dp-input" placeholder="结束日期" readonly>
+        <button class="glass-btn-3d" onclick="ReconciliationModule.shiftPrevMonth()" title="把两个日期的月份都 -1 并自动查询">📅 上个月</button>
+        <button class="glass-btn-3d" onclick="ReconciliationModule.shiftNextMonth()" title="把两个日期的月份都 +1 并自动查询">📅 下个月</button>
         <button class="search-glass" onclick="ReconciliationModule.applyFilter()">查询</button>
         <button class="secondary" onclick="ReconciliationModule.exportData()">📥 导出</button>
       </div>
@@ -47,10 +61,58 @@ const ReconciliationModule = {
       <div id="recPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
 
-    await this.applyFilter();
+    if (window.enhanceSearchSelect) {
+      enhanceSearchSelect('recSupplier', { placeholder: '搜索供应商', widthMode: 'full' });
+    }
+
+    // 挂载自定义日期选择器（替换原生 type=date，保持 id 与 change 事件不变）
+    if (typeof DatePicker !== 'undefined') {
+      DatePicker.mount('recStartDate');
+      DatePicker.mount('recEndDate');
+    }
+
+    await this.applyFilter(myToken);
   },
 
-  async applyFilter() {
+  // 把左边两个日期的月份都 +1 并立即查询（跨年自动进位；超出月末自动夹紧）
+  shiftNextMonth() {
+    ['recStartDate', 'recEndDate'].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el || !el.value) return;
+      const d = new Date(el.value + 'T00:00:00');
+      if (isNaN(d.getTime())) return;
+      // 月份 +1，跨年自动进位；JS new Date(y, m, day) 当 day 越界会自动进位到下月，
+      // 故先取下月最后一天作为"上限日"，再用 min(原日, 上限) 达到月末夹紧。
+      const targetYear = d.getFullYear() + Math.floor((d.getMonth() + 1) / 12);
+      const targetMonth0 = (d.getMonth() + 1) % 12;       // 0~11
+      const lastDayOfTarget = new Date(targetYear, targetMonth0 + 1, 0).getDate();
+      const finalDay = Math.min(d.getDate(), lastDayOfTarget);
+      el.value = `${targetYear}-${String(targetMonth0 + 1).padStart(2,'0')}-${String(finalDay).padStart(2,'0')}`;
+    });
+
+    this.applyFilter();
+  },
+
+  // 把左边两个日期的月份都 -1 并立即查询（跨年自动进位；超出月末自动夹紧）
+  shiftPrevMonth() {
+    ['recStartDate', 'recEndDate'].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el || !el.value) return;
+      const d = new Date(el.value + 'T00:00:00');
+      if (isNaN(d.getTime())) return;
+      // 月份 -1，跨年自动进位（1月→上年12月）；同样先取下月最后一天作上限夹紧月末。
+      const targetYear = d.getFullYear() + Math.floor((d.getMonth() - 1) / 12); // getMonth()=0(1月)→-1年
+      const targetMonth0 = (d.getMonth() + 11) % 12;     // 0~11，上个月
+      const lastDayOfTarget = new Date(targetYear, targetMonth0 + 1, 0).getDate();
+      const finalDay = Math.min(d.getDate(), lastDayOfTarget);
+      el.value = `${targetYear}-${String(targetMonth0 + 1).padStart(2,'0')}-${String(finalDay).padStart(2,'0')}`;
+    });
+    this.applyFilter();
+  },
+
+  async applyFilter(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const supplier = document.getElementById('recSupplier').value;
     const startDate = document.getElementById('recStartDate').value;
     const endDate = document.getElementById('recEndDate').value;
@@ -58,7 +120,14 @@ const ReconciliationModule = {
     this.currentFilter = { supplier, startDate, endDate };
     this.currentPage = 1;
 
-    let inbound = await db.inbound.toArray();
+    let inbound = await DataStore.getRows('inbound');
+
+    // 供应商→年度合同金额 映射（"按供应商汇总"占比列分母：入库金额 ÷ 合同金额）
+    let supplierContracts = {};
+    try {
+      const suppliersAll = await db.suppliers.toArray();
+      suppliersAll.forEach(s => { supplierContracts[s.供应商] = parseFloat(s.年度合同金额) || 0; });
+    } catch (e) {}
 
     if (supplier) {
       inbound = inbound.filter(i => i.供应商 === supplier);
@@ -77,13 +146,13 @@ const ReconciliationModule = {
       const key = i.供应商 || '未知';
       if (!summary[key]) summary[key] = { qty: 0, amount: 0, uniqueNos: new Set() };
       summary[key].qty += parseFloat(i.数量) || 0;
-      summary[key].amount += parseFloat(i.原币价税合计) || 0;
+      summary[key].amount = Math.round((summary[key].amount + (parseFloat(i.原币价税合计) || 0)) * 100) / 100;
       if (i.入库单号) summary[key].uniqueNos.add(i.入库单号);
     });
 
     const supplierList = Object.entries(summary).sort((a, b) => b[1].amount - a[1].amount);
-    const totalAmount = supplierList.reduce((s, e) => s + e[1].amount, 0);
 
+    if (rt !== undefined && rt !== App._goToken) return;
     document.getElementById('recSummary').innerHTML = `
       <div class="chart-stats-row" style="margin-bottom:14px;">
         <!-- 左侧：按供应商汇总 (2/3) -->
@@ -91,14 +160,14 @@ const ReconciliationModule = {
           <div class="glass-card-header"><span class="glass-card-title"><span class="title-icon">📊</span>按供应商汇总</span></div>
           <div class="table-wrapper" style="max-height:260px;">
             <table class="data-table">
-              <thead><tr><th>供应商</th><th>入库单数</th><th>入库量</th><th>金额(元)</th><th>占比</th></tr></thead>
+              <thead><tr><th>供应商</th><th>入库单数</th><th>入库量</th><th>金额(元)</th><th title="分子=所选日期范围内入库金额；分母=该供应商年度合同金额（自然年）">占合同比</th></tr></thead>
               <tbody>${supplierList.map(([name, info]) => `
                 <tr>
                   <td><strong>${esc(name)}</strong></td>
                   <td>${info.uniqueNos.size}</td>
-                  <td>${this.formatNum(info.qty)}</td>
-                  <td>${this.formatMoney(info.amount)}</td>
-                  <td>${totalAmount > 0 ? ((info.amount / totalAmount) * 100).toFixed(1) + '%' : ''}</td>
+                  <td>${TableUtils.formatNum(info.qty)}</td>
+                  <td>${TableUtils.formatMoney(info.amount)}</td>
+                  <td>${(() => { const ca = supplierContracts[name] || 0; return ca > 0 ? ((info.amount / ca) * 100).toFixed(1) + '%' : '—'; })()}</td>
                 </tr>
               `).join('')}</tbody>
             </table>
@@ -119,17 +188,21 @@ const ReconciliationModule = {
     `;
 
     this.currentData = inbound;
-    this.renderTable();
+    this.renderTable(rt);
     // 渲染供应商趋势图
     await this.renderSupplierTrendChart(supplier, inbound);
   },
 
-  renderTable() {
+  renderTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const data = this.currentData;
     const total = data.length;
-    const totalPages = Math.ceil(total / this.pageSize);
+    const pageSize = this.pageSize === 'all' ? total : this.pageSize;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
     const page = Math.min(this.currentPage, Math.max(1, totalPages));
-    const items = data.slice((page - 1) * this.pageSize, page * this.pageSize);
+    this.currentPage = page;
+    const items = data.slice((page - 1) * pageSize, page * pageSize);
 
     const area = document.getElementById('recTableArea');
     if (items.length === 0) {
@@ -149,13 +222,13 @@ const ReconciliationModule = {
               <tr>
                 <td>${esc(i.入库日期 ?? '')}</td>
                 <td>${esc(i.入库单号 ?? '')}</td>
-                <td>${esc(i.供应商 ?? '')}</td>
-                <td>${esc(i.存货编码 ?? '')}</td>
+                <td>${TableUtils.link('supplier', i.供应商 ?? '', i.供应商 ?? '')}</td>
+                <td>${TableUtils.link('stock', i.存货编码 ?? '', i.存货编码 ?? '')}</td>
                 <td>${esc(i.存货名称 ?? '')}</td>
                 <td>${esc(i.规格型号 ?? '')}</td>
                 <td>${i.数量}</td>
-                <td>${this.formatMoney(i.原币含税单价)}</td>
-                <td>${this.formatMoney(i.原币价税合计)}</td>
+                <td>${TableUtils.formatMoney(i.原币含税单价)}</td>
+                <td>${TableUtils.formatMoney(i.原币价税合计)}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -163,39 +236,15 @@ const ReconciliationModule = {
       </div>
     `;
 
-    const html = [];
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>`);
-    html.push(`<span class="page-btns">`);
-    html.push(`<button onclick="ReconciliationModule.goPage(1)" ${page === 1 ? 'disabled' : ''}>«</button>`);
-    html.push(`<button onclick="ReconciliationModule.goPage(${page - 1})" ${page === 1 ? 'disabled' : ''}>‹</button>`);
-    const start = Math.max(1, page - 2);
-    const end = Math.min(totalPages, start + 4);
-    for (let i = start; i <= end; i++) {
-      html.push(`<button class="${i === page ? 'active' : ''}" onclick="ReconciliationModule.goPage(${i})">${i}</button>`);
-    }
-    html.push(`<button onclick="ReconciliationModule.goPage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>›</button>`);
-    html.push(`<button onclick="ReconciliationModule.goPage(${totalPages})" ${page === totalPages ? 'disabled' : ''}>»</button>`);
-    html.push(`</span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      每页 <select onchange="ReconciliationModule.changePageSize(parseInt(this.value))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
-        <option value="20" ${this.pageSize===20?'selected':''}>20</option>
-        <option value="50" ${this.pageSize===50?'selected':''}>50</option>
-        <option value="100" ${this.pageSize===100?'selected':''}>100</option>
-      </select> 条
-    </span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      跳至 <input type="number" id="recPageJumper" min="1" max="${totalPages}" value="${page}"
-        onkeydown="if(event.key==='Enter')ReconciliationModule.goPage(parseInt(this.value))"
-        style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
-      / ${totalPages} 页
-    </span>`);
-    document.getElementById('recPagination').innerHTML = html.join('');
+    // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
+    TableUtils.renderPagination('recPagination', { module: 'ReconciliationModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
     TableUtils.initSmartSelect('recTableArea');
+    TableUtils.initSortableHeaders('recTableArea');
   },
 
   changePageSize(size) {
-    this.pageSize = size;
+    this.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     this.currentPage = 1;
     this.renderTable();
   },
@@ -238,11 +287,11 @@ const ReconciliationModule = {
         const d = new Date(i.入库日期);
         return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
       });
-      return matched.reduce((s, i) => s + (parseFloat(i.原币价税合计) || 0), 0);
+      return Math.round(matched.reduce((s, i) => s + (parseFloat(i.原币价税合计) || 0), 0) * 100) / 100;
     });
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-    const textColor = isDark ? '#94A3B8' : '#64748B';
+    const textColor = TableUtils.chartTextColor(isDark);
     const gridColor = isDark ? 'rgba(148,163,184,0.12)' : 'rgba(148,163,184,0.18)';
 
     const chartLabel = selectedSupplier
@@ -305,14 +354,5 @@ const ReconciliationModule = {
         }
       }
     });
-  },
-
-  formatMoney(num) {
-    if (num == null || num === '') return '';
-    return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
-  },
-
-  formatNum(num) {
-    return new Intl.NumberFormat('zh-CN').format(Math.round(num));
   }
 };

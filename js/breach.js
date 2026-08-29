@@ -4,12 +4,17 @@
 
 const BreachModule = {
   currentData: [],
+  currentFilter: { keyword: '' },
+  currentPage: 1,
+  pageSize: 20,
 
-  async render() {
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     const content = document.getElementById('contentArea');
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="breachKw" placeholder="搜索供应商名称..." onkeydown="if(event.key==='Enter')BreachModule.applyFilter()">
+        <input type="text" id="breachKw" placeholder="搜索供应商名称..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')BreachModule.applyFilter()">
         <button class="search-glass" onclick="BreachModule.applyFilter()">🔍 搜索</button>
         <button class="secondary" onclick="BreachModule.resetFilter()">重置</button>
         <button class="secondary" onclick="BreachModule.exportData()">📥 导出</button>
@@ -24,12 +29,14 @@ const BreachModule = {
       <div id="breachTableArea"></div>
     `;
 
-    await this.loadData();
+    await this.loadData(myToken);
   },
 
-  async loadData() {
-    let records = await db.breach.toArray();
-    const kw = document.getElementById('breachKw')?.value.trim().toLowerCase();
+  async loadData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
+    let records = await DataStore.getBreachRecords();
+    const kw = (this.currentFilter.keyword || '').trim().toLowerCase();
     if (kw) {
       records = records.filter(r => r.公司名称 && r.公司名称.toLowerCase().includes(kw));
     }
@@ -38,6 +45,7 @@ const BreachModule = {
     const totalDelay = records.reduce((s, r) => s + (parseFloat(r.延迟天数) || 0), 0);
     const companySet = new Set(records.map(r => r.公司名称).filter(Boolean));
 
+    if (rt !== undefined && rt !== App._goToken) return;
     document.getElementById('breachStats').innerHTML = `
       <div class="kpi-card card-danger">
         <div class="kpi-label">违约记录数</div>
@@ -53,7 +61,7 @@ const BreachModule = {
       </div>
       <div class="kpi-card card-danger">
         <div class="kpi-label">扣款总额</div>
-        <div class="kpi-value">¥${this.formatMoney(totalAmount)}</div>
+        <div class="kpi-value">¥${TableUtils.formatMoney(totalAmount)}</div>
       </div>
     `;
 
@@ -90,10 +98,12 @@ const BreachModule = {
     });
 
     this.currentData = records;
-    this.renderTable();
+    this.renderTable(rt);
   },
 
-  renderTable() {
+  renderTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const data = this.currentData;
     const area = document.getElementById('breachTableArea');
     if (data.length === 0) {
@@ -124,17 +134,17 @@ const BreachModule = {
           <tbody>
             ${data.map(r => `
               <tr>
-                <td><strong>${esc(r.公司名称)}</strong></td>
-                <td>${esc(r.涉及订单号 ?? '')}</td>
-                <td>${esc(r.存货编码 ?? '')}</td>
+                <td><strong>${TableUtils.link('supplier', r.公司名称 ?? '', r.公司名称 ?? '')}</strong></td>
+                <td>${(() => { const v = (r.涉及订单号 ?? '').toString().trim(); return v ? TableUtils.link('order', v, v) : ''; })()}</td>
+                <td>${(() => { const v = (r.存货编码 ?? '').toString().trim(); return v ? TableUtils.link('stock', v, v) : ''; })()}</td>
                 <td>${esc(r.存货名称 ?? '')}</td>
                 <td>${esc(r.规格型号 ?? '')}</td>
-                <td>¥${this.formatMoney(r.单价)}</td>
+                <td>¥${TableUtils.formatMoney(r.单价)}</td>
                 <td>${r.数量}</td>
                 <td>${esc(r.到货时间 ?? '')}</td>
                 <td><span class="tag ${parseFloat(r.延迟天数) >= 8 ? 'tag-danger' : 'tag-warning'}">${r.延迟天数 || 0} 天</span></td>
                 <td>${r.扣款比例 ? r.扣款比例 + '%' : ''}</td>
-                <td><strong>¥${this.formatMoney(r.扣款金额)}</strong></td>
+                <td><strong>¥${TableUtils.formatMoney(r.扣款金额)}</strong></td>
                 <td>${r.违约次数 || 0}</td>
                 <td>${esc(r.备注 ?? '')}</td>
               </tr>
@@ -145,19 +155,21 @@ const BreachModule = {
     `;
 
     TableUtils.initSmartSelect('breachTableArea');
+    TableUtils.initSortableHeaders('breachTableArea');
   },
 
-  applyFilter() { this.loadData(); },
+  applyFilter() {
+    this.currentFilter.keyword = (document.getElementById('breachKw')?.value || '').trim();
+    this.loadData();
+  },
   resetFilter() {
-    document.getElementById('breachKw').value = '';
+    this.currentFilter = { keyword: '' };
+    const input = document.getElementById('breachKw');
+    if (input) input.value = '';
     this.loadData();
   },
   exportData() {
     // 🟢 O1：统一导出（行为与原逻辑一致）
     TableUtils.exportToExcel(this.currentData, `违约台账_${new Date().toISOString().split('T')[0]}.xlsx`, '违约台账');
-  },
-  formatMoney(num) {
-    if (num == null || num === '') return '';
-    return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
   }
 };

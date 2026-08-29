@@ -7,23 +7,49 @@ const InboundModule = {
   currentPage: 1,
   pageSize: 20,
 
-  async render() {
+  // 默认固定日期区间：3 个月前的 1 号 → 今日（按本地时区格式化）
+  getDefaultDateRange() {
+    const pad = n => String(n).padStart(2, '0');
+    const today = new Date();
+    const end = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+    const start = new Date(today.getFullYear(), today.getMonth() - 3, 1);
+    const startStr = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`;
+    return { start: startStr, end };
+  },
+
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     const content = document.getElementById('contentArea');
-    // 🟢 O6：合并重复的 db.inbound.toArray() 查询（原两处并行 IIFE 各查一次）
-    const allInbound = await db.inbound.toArray();
+
+    // 清理可能遗留的旧日期选择器弹窗（render 会重建 input）
+    if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
+    // 🟢 O6：只查一次全表，后续统计/图表/表格都复用缓存，避免重复 IO
+    const allInbound = await DataStore.getRows('inbound');
+    this._allInbound = allInbound;
     const [suppliers, projects] = await Promise.all([
       Promise.resolve([...new Set(allInbound.map(i => i.供应商).filter(Boolean))].sort()),
       Promise.resolve([...new Set(allInbound.map(i => i.项目名称).filter(Boolean))].sort())
     ]);
 
+    // 初始化固定日期区间（若尚未设置）
+    const dr = this.getDefaultDateRange();
+    if (!this.currentFilter) this.currentFilter = {};
+    if (!this.currentFilter.startDate) this.currentFilter.startDate = dr.start;
+    if (!this.currentFilter.endDate) this.currentFilter.endDate = dr.end;
+
+    if (myToken !== undefined && myToken !== App._goToken) return;
+
     content.innerHTML = `
       <div class="filter-bar filter-bar-two-row" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;padding:0;">
         <div class="filter-row filter-row-main" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
-          <input type="text" id="inboundKw" class="filter-search-short" placeholder="搜索入库单号、供应商、物料..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')InboundModule.applyFilter()">
+          <input type="text" id="inboundKw" class="filter-search-short" placeholder="搜索订单编号、入库单号、供应商、物料..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')InboundModule.applyFilter()">
           <div class="filter-row-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:4px;">
-            <input type="date" id="inboundStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date" title="起始日期">
+            <input type="text" id="inboundStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="InboundModule.onDateChange()" readonly>
             <span class="filter-sep">至</span>
-            <input type="date" id="inboundEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date" title="结束日期">
+            <input type="text" id="inboundEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="InboundModule.onDateChange()" readonly>
+          </div>
+          <div class="filter-row-buttons" style="display:flex;gap:6px;">
             <button class="search-glass" onclick="InboundModule.applyFilter()">筛选</button>
             <button class="secondary" onclick="InboundModule.resetFilter()">重置</button>
             <button class="secondary" onclick="InboundModule.exportData()">📥 导出</button>
@@ -60,11 +86,24 @@ const InboundModule = {
       <div id="inboundPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
 
-    await this.loadData();
+    if (window.enhanceSearchSelect) {
+      enhanceSearchSelect('inboundSupplier', { placeholder: '搜索供应商', widthMode: 'full' });
+      enhanceSearchSelect('inboundProject', { placeholder: '搜索项目', widthMode: 'half' });
+    }
+
+    // 挂载自定义日期选择器（替换原生 type=date，保持 id 与 change 事件不变）
+    if (typeof DatePicker !== 'undefined') {
+      DatePicker.mount('inboundStartDate');
+      DatePicker.mount('inboundEndDate');
+    }
+
+    await this.loadData(myToken);
   },
 
-  async loadData() {
-    const allInbound = await db.inbound.toArray();
+  async loadData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
+    const allInbound = this._allInbound || await DataStore.getRows('inbound');
 
     // ===== 先应用当前筛选条件（用于统计和图表）=====
     let filteredInbound = this._applyFilters(allInbound);
@@ -73,8 +112,17 @@ const InboundModule = {
     const uniqueCount = uniqueInboundNos.size;
     const totalAmount = filteredInbound.reduce((s, i) => s + (parseFloat(i.原币价税合计) || 0), 0);
     const totalQty = filteredInbound.reduce((s, i) => s + (parseFloat(i.数量) || 0), 0);
+    const supplierCount = [...new Set(allInbound.map(i => i.供应商).filter(Boolean))].length;
+    const projectCount = [...new Set(allInbound.map(i => i.项目名称).filter(Boolean))].length;
 
-    document.getElementById('inboundSummary').innerHTML = `
+    // 先渲染表格和趋势图，再把统计卡片统一写入，避免 KPI 先单独闪现
+    this.currentData = filteredInbound;
+    await this.renderTable(rt);
+    this.renderTrendChart(filteredInbound);
+
+    if (rt !== undefined && rt !== App._goToken) return;
+    const summary = document.getElementById('inboundSummary');
+    if (summary) summary.innerHTML = `
       <div class="kpi-card card-info">
         <div class="kpi-label">入库单数</div>
         <div class="kpi-value">${uniqueCount}</div>
@@ -82,19 +130,15 @@ const InboundModule = {
       </div>
       <div class="kpi-card card-success">
         <div class="kpi-label">入库总金额</div>
-        <div class="kpi-value">¥${this.formatMoney(totalAmount)}</div>
-        <div class="kpi-sub">总数量 ${this.formatNum(totalQty)}</div>
+        <div class="kpi-value">¥${TableUtils.formatMoney(totalAmount)}</div>
+        <div class="kpi-sub">总数量 ${TableUtils.formatNum(totalQty)}</div>
       </div>
       <div class="kpi-card card-info">
         <div class="kpi-label">入库供应商</div>
-        <div class="kpi-value">${[...new Set(allInbound.map(i => i.供应商).filter(Boolean))].length}</div>
-        <div class="kpi-sub">涉及项目 ${[...new Set(allInbound.map(i => i.项目名称).filter(Boolean))].length} 个</div>
+        <div class="kpi-value">${supplierCount}</div>
+        <div class="kpi-sub">涉及项目 ${projectCount} 个</div>
       </div>
     `;
-
-    this.currentPage = 1;
-    this.renderTable();
-    this.renderTrendChart(filteredInbound);
   },
 
   // 内部筛选：复用 currentFilter 逻辑
@@ -108,6 +152,7 @@ const InboundModule = {
         const kw = f.keyword.toLowerCase();
         result = result.filter(i =>
           (i.入库单号 && String(i.入库单号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+          (i.表体订单号 && String(i.表体订单号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
           (i.供应商 && i.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
           (i.存货名称 && i.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw))
         );
@@ -124,10 +169,19 @@ const InboundModule = {
     return result;
   },
 
-  async renderTable() {
-    const result = await DataStore.getInbound(this.currentFilter, this.currentPage, this.pageSize);
-    const { items, totalPages } = result;
+  async renderTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
 
+    const data = this.currentData || [];
+    const total = data.length;
+    const pageSize = this.pageSize === 'all' ? total : this.pageSize;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
+    const page = Math.min(this.currentPage, Math.max(1, totalPages));
+    this.currentPage = page;
+    const items = data.slice((page - 1) * pageSize, page * pageSize);
+
+    if (rt !== undefined && rt !== App._goToken) return;
     const area = document.getElementById('inboundTableArea');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无入库数据</div></div>';
@@ -137,9 +191,10 @@ const InboundModule = {
 
     area.innerHTML = `
       <div class="table-wrapper">
-        <table class="data-table">
+        <table class="data-table" data-table-key="inbound">
           <thead>
             <tr>
+              <th>订单编号</th>
               <th>入库日期</th>
               <th>入库单号</th>
               <th>供应商</th>
@@ -150,23 +205,22 @@ const InboundModule = {
               <th>入库量</th>
               <th>含税单价</th>
               <th>含税金额</th>
-              <th>税率</th>
             </tr>
           </thead>
           <tbody>
             ${items.map(i => `
               <tr>
+                <td>${(() => { const v = (i.表体订单号 ?? '').toString().trim(); return v ? TableUtils.link('order', v, v) : ''; })()}</td>
                 <td>${esc(i.入库日期 ?? '')}</td>
                 <td><strong>${esc(i.入库单号 ?? '')}</strong></td>
-                <td>${esc(i.供应商 ?? '')}</td>
+                <td>${TableUtils.link('supplier', i.供应商 ?? '', i.供应商 ?? '')}</td>
                 <td>${esc(i.项目名称 ?? '')}</td>
-                <td>${esc(i.存货编码 ?? '')}</td>
-                <td>${esc(i.存货名称 ?? '')}</td>
+                <td>${TableUtils.link('stock', i.存货编码 ?? '', i.存货编码 ?? '')}</td>
+                <td><strong>${esc(i.存货名称 ?? '')}</strong></td>
                 <td>${esc(i.规格型号 ?? '')}</td>
                 <td>${i.数量}</td>
-                <td>${this.formatMoney(i.原币含税单价)}</td>
-                <td>${this.formatMoney(i.原币价税合计)}</td>
-                <td>${i.税率 ? esc(i.税率) + '%' : ''}</td>
+                <td>${TableUtils.formatMoney(i.原币含税单价)}</td>
+                <td>${TableUtils.formatMoney(i.原币价税合计)}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -174,47 +228,13 @@ const InboundModule = {
       </div>
     `;
 
-    this.renderPagination(items.length, totalPages);
+    this.renderPagination(total, totalPages);
     TableUtils.initSmartSelect('inboundTableArea');
-    TableUtils.initSortableHeaders('inboundTableArea', this.currentData || [], (sorted) => {
-      this.currentData = sorted;
-      this.currentPage = 1;
-      this.renderTable();
-    });
+    TableUtils.initSortableHeaders('inboundTableArea');
   },
 
   renderPagination(total, totalPages) {
-    const page = this.currentPage;
-    const html = [];
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>`);
-    html.push(`<span class="page-btns">`);
-    html.push(`<button onclick="InboundModule.goPage(1)" ${page === 1 ? 'disabled' : ''}>«</button>`);
-    html.push(`<button onclick="InboundModule.goPage(${page - 1})" ${page === 1 ? 'disabled' : ''}>‹</button>`);
-    const start = Math.max(1, page - 2);
-    const end = Math.min(totalPages, start + 4);
-    for (let i = start; i <= end; i++) {
-      html.push(`<button class="${i === page ? 'active' : ''}" onclick="InboundModule.goPage(${i})">${i}</button>`);
-    }
-    html.push(`<button onclick="InboundModule.goPage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>›</button>`);
-    html.push(`<button onclick="InboundModule.goPage(${totalPages})" ${page === totalPages ? 'disabled' : ''}>»</button>`);
-    html.push(`</span>`);
-
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      每页 <select onchange="InboundModule.changePageSize(parseInt(this.value))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
-        <option value="20" ${this.pageSize===20?'selected':''}>20</option>
-        <option value="50" ${this.pageSize===50?'selected':''}>50</option>
-        <option value="100" ${this.pageSize===100?'selected':''}>100</option>
-      </select> 条
-    </span>`);
-
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      跳至 <input type="number" id="inboundPageJumper" min="1" max="${totalPages}" value="${page}"
-        onkeydown="if(event.key==='Enter')InboundModule.goPage(parseInt(this.value))"
-        style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
-      / ${totalPages} 页
-    </span>`);
-
-    document.getElementById('inboundPagination').innerHTML = html.join('');
+    TableUtils.renderPagination('inboundPagination', { module: 'InboundModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
   },
 
   renderTrendChart(allInbound) {
@@ -253,7 +273,7 @@ const InboundModule = {
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     const gridColor = isDark ? 'rgba(148,163,184,0.12)' : 'rgba(148,163,184,0.18)';
-    const textColor = isDark ? '#94A3B8' : '#64748B';
+    const textColor = TableUtils.chartTextColor(isDark);
 
     this._trendChart = new Chart(ctx, {
       type: 'line',
@@ -333,9 +353,19 @@ const InboundModule = {
   },
 
   changePageSize(size) {
-    this.pageSize = size;
+    this.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     this.currentPage = 1;
     this.renderTable();
+  },
+
+  onDateChange() {
+    const start = document.getElementById('inboundStartDate')?.value || '';
+    const end = document.getElementById('inboundEndDate')?.value || '';
+    if (!this.currentFilter) this.currentFilter = {};
+    this.currentFilter.startDate = start;
+    this.currentFilter.endDate = end;
+    this.currentPage = 1;
+    this.loadData();
   },
 
   applyFilter() {
@@ -351,7 +381,8 @@ const InboundModule = {
   },
 
   resetFilter() {
-    this.currentFilter = {};
+    const dr = this.getDefaultDateRange();
+    this.currentFilter = { startDate: dr.start, endDate: dr.end };
     this.currentPage = 1;
     this.pageSize = 20;
     this.render();
@@ -365,12 +396,4 @@ const InboundModule = {
     TableUtils.exportToExcel(result.items, `入库列表_${new Date().toISOString().split('T')[0]}.xlsx`, '入库列表');
   },
 
-  formatNum(num) {
-    return new Intl.NumberFormat('zh-CN').format(Math.round(num));
-  },
-
-  formatMoney(num) {
-    if (num == null || num === '') return '';
-    return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
-  }
 };

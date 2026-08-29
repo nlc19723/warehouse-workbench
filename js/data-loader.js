@@ -4,7 +4,7 @@
 
 const DataLoader = {
   // Excel 源文件相对路径（与 config.js 中的 app.dataPath 保持一致，避免两处硬编码不同步）
-  filePath: (typeof AppConfig !== 'undefined' && AppConfig.app && AppConfig.app.dataPath) || 'data/库管系统.xlsx',
+  filePath: (typeof AppConfig !== 'undefined' && AppConfig.app && AppConfig.app.dataPath) || '',
 
   // 参与云端同步的数据表（meta 是元数据表，单独处理）
   // 注：materialClass / monthlyStats 自 v1 起从未被任何 loader 写入，属死代码，已从同步范围移除
@@ -25,54 +25,68 @@ const DataLoader = {
   },
 
   async _doInit() {
-    // 1) 本地已有数据 → 立即显示，后台静默尝试云端同步
+    // 先初始化云端连接（仅"手动保存过配置"的用户才会 isOnline=true，
+    // 详见 SyncManager.init：内置共享配置不再自动上线，未连接用户不会碰云端）
+    try {
+      if (typeof SyncManager !== 'undefined') SyncManager.init();
+    } catch (e) { /* ignore */ }
+
+    // 1) 本地已有完整数据 → 立即显示（首屏不阻塞），后台静默从云端拉取并按"云端优先覆盖本地"策略同步
     const imported = await DataStore.isDataImported();
     if (imported) {
-      // 校验本地核心表是否完整；历史上出现过“标记已导入但部分表为空”导致整页空白，
-      // 因此不完整时必须放弃本地缓存，改从云端/Excel 重新导入。
       const localComplete = await this._allCoreTablesPopulated();
       if (localComplete) {
-        console.log('本地数据已存在，直接使用');
-        // 后台尝试从云端拉取更新（不阻塞页面）
-        this._syncFromCloudInBackground();
+        console.log('[同步] 本地有完整数据，立即显示；后台静默执行：云端→本地（云端不一致则覆盖本地）');
+        hideLoading();
+        this._syncFromCloudInBackground();  // 云端优先覆盖本地，不阻塞首屏
         return true;
       }
       console.warn('[data-loader] 本地数据不完整（缺表），放弃本地缓存改从云端/Excel 导入');
     }
 
-    // 2) 无本地数据，尝试从云端拉取（8 秒超时）
-    try {
-      if (typeof SyncManager !== 'undefined') SyncManager.init();
-    } catch (e) { /* ignore */ }
-
+    // 2) 本地无完整数据：已连接云端则先拉云端工作数据；否则直接 Excel 兜底
     if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
+      showLoading('正在从云端同步数据...', { variant:'capsule' });
       try {
         const bundle = await this._pullWithTimeout(8000);
-        // ⚠️ 校验云端 bundle 完整性：9 张核心表必须都存在且有数据。
-        // 历史上曾因导入 bug 把残缺 bundle 推到云端，导致新用户只拿到部分表 → 全表空白。
-        // 若 bundle 不完整，回退到内置 Excel 导入（导入后会覆盖云端残缺 bundle）。
+        // 校验云端 bundle 完整性：9 张核心表必须都存在且有数据（避免残缺 bundle 覆盖本地）
         if (bundle && bundle.tables && this._isBundleComplete(bundle)) {
-          showLoading('正在从云端同步最新数据...');
+          showLoading('正在从云端同步最新数据...', { variant:'capsule' });
           await this.loadBundleFromCloud(bundle);
-          // 防御性校验：云端还原后实际落库的核心表可能仍缺（网络返回了部分响应等），
-          // 若任一核心表为空，判定还原不完整，继续走 Excel 导入兜底。
           const restored = await this._allCoreTablesPopulated();
           hideLoading();
           if (restored) {
-            console.log('已从云端同步数据');
+            console.log('[同步] 已从云端拉取工作数据并覆盖本地');
             return true;
           }
-          console.warn('[data-loader] 云端还原后仍缺核心表，改从内置 Excel 导入兜底');
-        }
-        if (bundle && bundle.tables && !this._isBundleComplete(bundle)) {
-          console.warn('[data-loader] 云端 bundle 不完整（缺表或空表），改从内置 Excel 导入以修复');
+          console.warn('[data-loader] 云端还原后仍缺核心表，尝试基准/Excel 兜底');
+        } else {
+          console.warn('[data-loader] 云端工作数据缺失/不完整/超时，尝试基准/Excel 兜底');
         }
       } catch (e) {
-        console.warn('云端拉取失败:', e.message || e);
+        console.warn('云端工作数据拉取失败:', e.message || e);
+      }
+      // 🟢 基准数据自动垫底：工作数据缺失或还原不完整时，用云端 base.json 铺一套系统底账
+      try {
+        const baseBundle = await this._pullBaseWithTimeout(8000);
+        if (baseBundle && baseBundle.tables && this._isBundleComplete(baseBundle)) {
+          await DataStore.clearAll();
+          await new Promise(r => setTimeout(r, 300));
+          showLoading('正在以云端基准数据打底...', { variant:'capsule' });
+          await this.seedFromBase(baseBundle);
+          hideLoading();
+          if (await this._allCoreTablesPopulated()) {
+            console.log('本地空库，已用云端基准数据垫底');
+            return true;
+          }
+          console.warn('[data-loader] 云端基准数据还原后仍缺核心表，改从内置 Excel 导入兜底');
+        }
+      } catch (e) {
+        console.warn('云端基准拉取失败:', e.message || e);
       }
     }
 
-    // 3) 都没有，读取内置 Excel
+    // 3) 都没有，读取内置 Excel 兜底
     return await this.importFromExcel();
   },
 
@@ -97,42 +111,55 @@ const DataLoader = {
     }
   },
 
-  // 后台静默从云端拉取更新（不阻塞页面）
+  // 后台静默同步（云端优先覆盖本地；本地已有数据立即显示，不阻塞首屏）
+  // 策略：
+  //   1. 仅在已连接云端（SyncManager.isOnline）时执行；未连接直接返回
+  //   2. 拉取云端工作数据；与本地时间戳比对，**不一致就云端覆盖本地**（云端优先）
+  //   3. 一致则跳过，保持现状
+  //   4. 用户后续操作（如"上传并导入"或数据更改）走 pushAllToCloud 实时回写云端
   async _syncFromCloudInBackground() {
     try {
       if (typeof SyncManager !== 'undefined') SyncManager.init();
     } catch (e) { return; }
-    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+      console.log('[同步] 未连接云端，跳过后台同步');
+      return;
+    }
+
     // 显示同步中状态
     const stEl = document.getElementById('syncStatusText');
     const scEl = document.getElementById('syncStatus');
     if (stEl) { stEl.textContent = '同步中…'; stEl.style.color = '#0284c7'; }
     if (scEl) { scEl.classList.remove('online'); scEl.style.background = 'linear-gradient(135deg,rgba(2,132,199,0.12),rgba(14,165,233,0.08))'; }
+
     try {
       const bundle = await this._pullWithTimeout(8000);
-      // 仅当云端 bundle 完整时才覆盖本地，避免用残缺数据污染本地
+      // 仅处理云端 bundle 完整的情况；残缺/缺失直接跳过（绝不用残缺数据覆盖本地）
       if (bundle && bundle.tables && bundle.savedAt && this._isBundleComplete(bundle)) {
         const localTime = await DataStore.getImportTime();
-        if (!localTime || bundle.savedAt > localTime) {
-          console.log('云端有更新，自动同步中...');
-          if (stEl) stEl.textContent = '更新中…';
+        // 云端优先：云端与本地不一致（云端更新或本地无时间戳）→ 用云端覆盖本地
+        const cloudNewerOrLocalUnknown = !localTime || bundle.savedAt !== localTime;
+        if (cloudNewerOrLocalUnknown) {
+          console.log('[同步] 云端与本地不一致（云端 savedAt=' + bundle.savedAt + ', 本地=' + localTime + '），执行云端→本地覆盖');
+          if (stEl) stEl.textContent = '云端更新中…';
           await this.loadBundleFromCloud(bundle);
-          console.log('云端数据已更新，刷新视图');
-          // 仅当没有打开的弹窗/侧边面板时才重渲染当前模块，
-          // 避免后台同步把用户正在操作的对话框/抽屉"顶掉"或打断录入。
+          console.log('[同步] 云端数据已覆盖本地');
+          // 仅当没有打开的弹窗/侧边面板时才重渲染当前模块，避免打断用户操作
           const modalOpen = document.getElementById('modalOverlay') && document.getElementById('modalOverlay').classList.contains('show');
           const panelOpen = document.getElementById('panelOverlay') && document.getElementById('panelOverlay').classList.contains('show');
           if (!modalOpen && !panelOpen && typeof App !== 'undefined' && App.currentModule) {
             App.go(App.currentModule);
           } else {
-            console.log('后台同步已完成，但检测到有打开的弹窗/面板，跳过强制重渲染以避免打断操作');
+            console.log('[同步] 后台覆盖完成，但检测到有打开的弹窗/面板，跳过重渲染');
           }
         } else {
-          console.log('本地已是最新，无需更新');
+          console.log('[同步] 云端与本地一致，无需覆盖（本地=' + localTime + '）');
         }
+      } else {
+        console.log('[同步] 云端数据不可用（缺失/不完整/超时），保持本地数据');
       }
     } catch (e) {
-      console.warn('后台同步失败:', e.message || e);
+      console.warn('[同步] 后台同步失败:', e.message || e);
     }
     // 恢复正常状态
     if (typeof SyncManager !== 'undefined') SyncManager.updateUI();
@@ -153,6 +180,28 @@ const DataLoader = {
         clearTimeout(timer);
         reject(err);
       });
+    });
+  },
+
+  // 带超时的云端「基准」拉取
+  _pullBaseWithTimeout(ms) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { resolve(null); }, ms);
+      SyncManager.pullBase().then(result => {
+        clearTimeout(timer);
+        resolve(result);
+      }).catch(() => { clearTimeout(timer); resolve(null); });
+    });
+  },
+
+  // 通用超时包装（M7）：防止任何云端请求无响应时永久卡住初始化/推送
+  _withTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error((label || 'request') + ' 超时(' + ms + 'ms)'));
+      }, ms);
+      Promise.resolve(promise).then(res => { clearTimeout(timer); resolve(res); })
+        .catch(err => { clearTimeout(timer); reject(err); });
     });
   },
 
@@ -186,7 +235,28 @@ const DataLoader = {
     return true;
   },
 
+  // 把云端「基准数据」(base.json) 垫底写入本地（不清空现有工作数据）
+  // 用于：本地为空时先铺一套系统底账，后续再叠加工作数据
+  async seedFromBase(baseBundle) {
+    if (!baseBundle || !baseBundle.tables) return false;
+    const tables = baseBundle.tables || {};
+    let wrote = 0;
+    for (const name of this.TABLES) {
+      const rows = Array.isArray(tables[name]) ? tables[name] : [];
+      if (rows.length) {
+        try {
+          await this.bulkAddSafe(db[name], rows);
+          wrote += rows.length;
+        } catch (e) { console.error(`基准垫底 ${name} 失败:`, e); }
+      }
+    }
+    if (wrote > 0) await DataStore.markDataImported();
+    console.log(`基准数据已垫底写入本地（共 ${wrote} 条）`);
+    return wrote > 0;
+  },
+
   // 打包全量数据并推送到云端（覆盖式），导入/重新导入后自动调用
+  // v164+：内置双版本滚动——推送前把云端现有 bundle 的 tables 存为 prevWork（上一份）
   async pushAllToCloud() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     // 防御：仅当 9 张核心表全部有数据时才推送，绝不把残缺 bundle 推到云端
@@ -201,18 +271,118 @@ const DataLoader = {
       for (const name of this.TABLES) {
         tables[name] = await db[name].toArray();
       }
+      // 双版本滚动：把云端现有 bundle 的 tables 降级为 prevWork（上一份）
+      let prevWork = null;
+      try {
+        const existing = await SyncManager.pullDataPrivate();
+        if (existing && existing.tables && Object.keys(existing.tables).length) {
+          prevWork = { savedAt: existing.savedAt || null, tables: existing.tables };
+        }
+      } catch (e) { /* 首次推送无 existing，忽略 */ }
       const bundle = {
         version: DB_VERSION,
         savedAt: new Date().toISOString(),
-        tables
+        tables,
+        prevWork
       };
-      const ok = await SyncManager.pushData(bundle);
-      if (ok) console.log('已推送到云端，分享链接将自动更新');
+      const ok = await this._withTimeout(SyncManager.pushData(bundle), 25000, 'pushData');
+      if (ok) console.log('已推送到云端（双版本滚动已生效）');
       return ok;
     } catch (e) {
       console.error('打包推送失败:', e);
       return false;
     }
+  },
+
+  // 恢复上一份工作数据：把云端 bundle.prevWork.tables 提为当前 tables，prevWork 清空
+  // 返回 true 表示成功恢复；false 表示无上一份数据
+  async restorePrevWork() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+      alert('请先连接云端后再恢复上一份数据');
+      return false;
+    }
+    const bundle = await SyncManager.pullDataPrivate();
+    if (!bundle || !bundle.prevWork || !bundle.prevWork.tables) {
+      alert('云端没有可恢复的上一份数据。\n\n原因：上一份数据只在「两次及以上导入/上传」后才存在。\n如果你只导入过一次，或上一份已被恢复过，就没有可恢复的版本。\n\n如需回到更早的数据，请改用「🔄 重新导入基准」（需先「标记为基准」）。');
+      return false;
+    }
+    try {
+      showLoading('正在恢复上一份工作数据...', { variant:'capsule' });
+      // 把 prevWork 提为当前，prevWork 清空（原 v2 被丢弃，符合"最新+上一份"两份约定）
+      const restored = {
+        version: DB_VERSION,
+        savedAt: new Date().toISOString(),
+        tables: bundle.prevWork.tables,
+        prevWork: null
+      };
+      const ok = await SyncManager.pushData(restored);
+      if (!ok) { alert('恢复失败：云端写入异常'); return false; }
+      // 拉取回本地，覆盖当前工作数据
+      await this._applyBundleToLocal(restored);
+      hideLoading();
+      alert('✅ 已恢复上一份工作数据（' + (bundle.prevWork.savedAt ? new Date(bundle.prevWork.savedAt).toLocaleString('zh-CN') : '未知时间') + '）');
+      if (typeof App !== 'undefined' && App.currentModule) App.go(App.currentModule);
+      return true;
+    } catch (e) {
+      hideLoading();
+      console.error('恢复上一份失败:', e);
+      alert('恢复失败：' + (e.message || e));
+      return false;
+    }
+  },
+
+  // 把云端 bundle 写入本地 IndexedDB（恢复/初始化共用）
+  async _applyBundleToLocal(bundle) {
+    if (!bundle || !bundle.tables) return false;
+    for (const name of Object.keys(bundle.tables)) {
+      if (db[name]) {
+        await db[name].clear();
+        if (bundle.tables[name] && bundle.tables[name].length) await db[name].bulkPut(bundle.tables[name]);
+      }
+    }
+    return true;
+  },
+
+  // 把当前本地全量数据"标记为基准"并单独推送到云端 base.json
+  // 与 data.json（工作数据）分离，作为系统固定底账
+  async markCurrentAsBase() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+      alert('请先连接云端后再标记基准数据');
+      return false;
+    }
+    if (!(await this._allCoreTablesPopulated())) {
+      alert('当前存在空表，无法标记为基准（基准必须完整）');
+      return false;
+    }
+    let ok = false;
+    try {
+      showLoading('正在打包基准数据并上传到云端...', { variant:'truck' });
+      const tables = {};
+      for (const name of this.TABLES) {
+        tables[name] = await db[name].toArray();
+      }
+      const bundle = {
+        version: DB_VERSION,
+        savedAt: new Date().toISOString(),
+        type: 'base',
+        source: AppConfig.supabase.baseSource || '',
+        tables
+      };
+      ok = await SyncManager.pushBase(bundle);
+    } catch (e) {
+      console.error('标记基准失败:', e);
+      alert('标记基准失败：' + (e.message || e));
+      return false;
+    } finally {
+      hideLoading();
+    }
+    if (ok) {
+      const savedAt = new Date().toLocaleString('zh-CN');
+      alert('✅ 基准数据已备份到云端（base.json）\n\n时间：' + savedAt + '\n\n说明：此操作仅把当前工作台数据「复制一份」到云端作为系统底账，\n本地现有数据完全不受影响、不会被移动或清空。\n后续空库/新设备打开时，才会自动以这份基准打底。');
+    } else {
+      alert('❌ 基准数据上传失败\n\n请检查网络连接或 Supabase 存储桶权限（需开启 anon 可写）。');
+    }
+    return ok;
   },
 
   // 仅增量推送「出库」表到云端（不覆盖其他表）
@@ -250,30 +420,69 @@ const DataLoader = {
 
   // 从 Excel 文件导入数据（首次启动，读取内置文件或用户替换的文件）
   async importFromExcel() {
-    showLoading('正在读取 Excel 数据...');
+    showLoading('正在读取 Excel 数据...', { variant:'truck' });
     try {
       let arrayBuffer;
 
-      // 优先使用用户替换的内置工作簿
-      const custom = await DataStore.getCustomWorkbook();
-      if (custom) {
-        arrayBuffer = custom;
-        console.log('[data-loader] 使用替换后的内置工作簿');
-      } else {
-        // 回退到原始内置文件
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 30000);
-        const response = await fetch(this.filePath, { signal: controller.signal });
-        clearTimeout(timer);
-        if (!response.ok) throw new Error('无法读取 Excel 文件');
-        arrayBuffer = await response.arrayBuffer();
+      // 🟢 健壮性(M7)：dataPath 为空时（config.js 已注释"无内置数据文件"），
+      // 立即返回 false 走空状态引导，避免 fetch('') 把首页 HTML 当 Excel 解析并空转数十秒。
+      if (!this.filePath) {
+        console.warn('[data-loader] dataPath 为空，无内置数据文件，直接进入空状态引导');
+        return false;
       }
+
+      // 回退到原始内置文件（v111 起「导入替换内置工作簿」入口已移除，customWorkbook 不复存在，O2）
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30000);
+      const response = await fetch(this.filePath, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!response.ok) throw new Error('无法读取 Excel 文件');
+      arrayBuffer = await response.arrayBuffer();
 
       return await this.importFromArrayBuffer(arrayBuffer, '首次导入');
     } catch (err) {
       console.error('数据导入失败:', err);
       hideLoading();
-      alert('数据导入失败: ' + err.message);
+      // 🟡 M6：首次启动无数据兜底 —— 给出明确引导而非静默 alert
+      alert('数据导入失败：' + err.message + '\n\n请先通过「导入 Excel」上传数据文件，或在设置中配置云端同步（Supabase）后再试。');
+      return false;
+    }
+  },
+
+  // 🟢 M7：手动触发「从云端同步」（空状态引导按钮调用）。
+  // 依次尝试 data.json → base.json，完整则落库；都不完整给出明确提示，绝不卡住 spinner。
+  async forceSyncFromCloud() {
+    try {
+      if (typeof SyncManager !== 'undefined') SyncManager.init();
+      if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+        alert('云端未连接：请先在「设置」中配置 Supabase 同步，或改用「上传 Excel 导入」。');
+        return false;
+      }
+      showLoading('正在从云端同步数据...', { variant:'capsule' });
+      let bundle = await this._pullWithTimeout(8000, 'pullData');
+      if (bundle && bundle.tables && this._isBundleComplete(bundle)) {
+        await this.loadBundleFromCloud(bundle);
+        await DataStore.markDataImported();
+        hideLoading();
+        console.log('[data-loader] 已从云端同步工作数据');
+        return true;
+      }
+      let baseBundle = await this._pullBaseWithTimeout(8000);
+      if (baseBundle && baseBundle.tables && this._isBundleComplete(baseBundle)) {
+        await DataStore.clearAll();
+        await new Promise(r => setTimeout(r, 300));
+        await this.seedFromBase(baseBundle);
+        hideLoading();
+        console.log('[data-loader] 已用云端基准数据垫底');
+        return true;
+      }
+      hideLoading();
+      alert('云端暂无可用的完整数据（data.json / base.json 均缺失或不完整）。\n请改用「上传 Excel 导入」，或先在别的设备把数据「同步到云端」。');
+      return false;
+    } catch (e) {
+      hideLoading();
+      console.error('[data-loader] forceSyncFromCloud 失败:', e);
+      alert('从云端同步失败：' + (e && e.message ? e.message : e));
       return false;
     }
   },
@@ -286,7 +495,7 @@ const DataLoader = {
     try {
       // 🔴 失效存货编码缓存（M3）：重新导入后，旧映射已失效，否则新数据下编码错乱
       this._stockNameSpecCodeMap = null;
-      showLoading('正在解析数据...');
+      showLoading('正在解析数据...', { variant:'truck' });
     let workbook;
     try {
       workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
@@ -311,15 +520,26 @@ const DataLoader = {
       { name: '违约', fn: () => this.loadBreach(workbook) }
     ];
 
-    for (const task of tasks) {
-      try {
-        showLoading(`正在导入${task.name}数据...`);
-        await task.fn();
-      } catch (err) {
-        console.error(`${task.name}数据${label}失败:`, err);
-        // 继续导入其他数据，不中断整体流程
+    // DATA-01 修复：多表导入以事务包裹，任一张表写入失败则整体回滚，避免留"半截数据"。
+    // 行为保持：成功路径与原来完全一致；仅当某表失败时不再保留已写的前几张表。
+    const TABLE_NAMES = ['suppliers','orders','inbound','stock','inventoryAlerts','orderChecks','pricing','lowTurnover','breach'];
+    let importErrors = [];
+    await db.transaction('rw', TABLE_NAMES, async () => {
+      for (const task of tasks) {
+        try {
+          showLoading(`正在导入${task.name}数据...`, { variant:'fluid' });
+          await task.fn();
+        } catch (err) {
+          importErrors.push({ name: task.name, err });
+          console.error(`${task.name}数据${label}失败:`, err);
+          // 继续导入其他数据，不中断整体流程（事务内异常会被捕获，最终统一回滚）
+        }
       }
-    }
+      // 任一表失败则整体回滚：抛出异常使 Dexie 丢弃本事务内所有写入
+      if (importErrors.length > 0) {
+        throw new Error(`导入未完成（${importErrors.length} 张表失败），已回滚本次导入以保证数据一致`);
+      }
+    });
 
     await DataStore.markDataImported();
 
@@ -339,7 +559,7 @@ const DataLoader = {
     }
   },
 
-  // 重新导入数据：支持上传 .xlsx / .xls 文件，或重新导入内置数据
+  // 数据导入：支持上传 .xlsx / .xls 文件，或从云端重新导入基准数据
   reimport() {
     // 若已有模态框打开则先关闭
     const modalOverlay = document.getElementById('modalOverlay');
@@ -349,11 +569,19 @@ const DataLoader = {
     const modalTitle = document.getElementById('modalTitle');
     if (!modalBody || !modalTitle) return;
 
-    modalTitle.textContent = '重新导入数据';
+    // 根据云端连接状态，动态调整按钮文案与提示（让用户明确按钮会做什么）
+    const cloudOnline = (typeof SyncManager !== 'undefined') && !!SyncManager.isOnline;
+    const btnIcon  = cloudOnline ? '📤' : '📥';
+    const btnText  = cloudOnline ? '上传并导入' : '仅导入本地';
+    const btnTitle = cloudOnline
+      ? '将本次导入数据同步到云端（覆盖云端工作数据）'
+      : '云端未连接，本次仅导入到本地数据库';
+
+    modalTitle.textContent = '数据导入';
     modalBody.innerHTML = `
       <div style="width:100%;">
         <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:14px;line-height:1.5;">
-          支持 <b>.xlsx</b>、<b>.xls</b> 与 <b>.xlsm</b> 格式。可上传新的数据文件覆盖当前数据，或重新导入系统内置的数据。
+          支持 <b>.xlsx</b>、<b>.xls</b> 与 <b>.xlsm</b> 格式。可上传新的数据文件覆盖当前数据，或从云端重新导入「基准数据」。
         </p>
         <div style="margin-bottom:18px;display:flex;justify-content:center;">
           <div style="display:flex;flex-direction:column;align-items:center;">
@@ -366,16 +594,62 @@ const DataLoader = {
             </div>
           </div>
         </div>
-        <div class="btn-group" style="border-top:none;margin-top:14px;padding-top:0;display:flex;gap:10px;justify-content:center;">
-          <button onclick="DataLoader.reimportFromDefault()" class="btn-secondary" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">🔄 重新导入内置</button>
-          <button onclick="DataLoader.replaceAndImportBuiltIn()" class="btn-primary" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">📥 导入替换内置</button>
-          <button onclick="DataLoader.reimportFromFile()" class="btn-primary" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">📤 上传并导入</button>
+        <div id="reimportCloudHint" style="font-size:11.5px;text-align:center;margin-bottom:12px;padding:6px 10px;border-radius:6px;${
+          cloudOnline
+            ? 'background:#ecfdf5;color:#15803d;border:1px solid #bbf7d0;'
+            : 'background:#fffbeb;color:#b45309;border:1px solid #fde68a;'
+        }">
+          ${cloudOnline
+            ? '● 云端已连接 — 导入将自动同步到云端（覆盖云端工作数据）'
+            : '● 云端未连接 — 仅导入到本地。如需同步到云端，请先在「⚙ 云配置」中连接。'
+          }
+        </div>
+        <div class="btn-group" style="border-top:none;margin-top:6px;padding-top:0;display:flex;gap:10px;justify-content:center;">
+          <button onclick="DataLoader.reimportFromBase()" class="btn-secondary" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">🔄 重新导入基准</button>
+          <button onclick="DataLoader.restorePrevWork()" class="btn-secondary" title="将云端上一份工作数据恢复为当前使用数据" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">♻️ 恢复上一份</button>
+          <button onclick="DataLoader.restoreFromCloudWork()" class="btn-secondary" title="直接从云端最新工作数据（data.json）恢复本地，绕过基准污染" style="flex:1;max-width:155px;padding:9px 0;font-size:12.5px;">☁️ 云端恢复</button>
+          <button onclick="DataLoader.reimportFromFile()" id="reimportUploadBtn" class="btn-primary" title="${btnTitle}" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">${btnIcon} ${btnText}</button>
         </div>
       </div>
     `;
     // 使用紧凑弹窗宽度
     document.getElementById('modal').classList.add('modal-compact');
     modalOverlay.classList.add('show');
+  },
+
+  // 从云端工作数据（data.json）直接恢复本地——绕过 base.json 污染风险
+  // 与"重新导入基准"不同：这里拉的是最新工作数据（含 prevWork 滚动链），不是基准底账
+  async restoreFromCloudWork() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+      alert('请先连接云端后再恢复工作数据');
+      return false;
+    }
+    try {
+      showLoading('正在从云端拉取工作数据...', { variant:'capsule' });
+      const bundle = await SyncManager.pullData();
+      if (!bundle || !bundle.tables || !this._isBundleComplete(bundle)) {
+        hideLoading();
+        alert('云端工作数据缺失或不完整，无法恢复。\n请改用「📤 上传 Excel 导入」或「🔄 重新导入基准」。');
+        return false;
+      }
+      const supplierCnt = (bundle.tables.suppliers || []).length;
+      if (!window.confirm('⚠ 此操作将「清空本地全部工作数据」，并用云端最新工作数据（' + supplierCnt + ' 家供应商）完全替换。\n\n确定要继续吗？')) {
+        hideLoading();
+        return false;
+      }
+      await DataStore.clearAll();
+      await new Promise(r => setTimeout(r, 300));
+      await this.loadBundleFromCloud(bundle);
+      hideLoading();
+      alert('✅ 已用云端工作数据替换本地（共 ' + supplierCnt + ' 家供应商）。');
+      if (typeof App !== 'undefined' && App.currentModule) App.go(App.currentModule);
+      return true;
+    } catch (err) {
+      hideLoading();
+      console.error('从云端恢复工作数据失败:', err);
+      alert('恢复失败: ' + (err.message || err));
+      return false;
+    }
   },
 
   // 从上传的文件导入
@@ -391,12 +665,19 @@ const DataLoader = {
       alert('仅支持 .xlsx、.xls 或 .xlsm 格式的文件');
       return;
     }
+    // 云端连接状态——按钮行为完全以此为准：未连接→仅本地导入；已连接→导入+上传
+    const cloudOnline = (typeof SyncManager !== 'undefined') && !!SyncManager.isOnline;
     try {
       const arrayBuffer = await file.arrayBuffer();
       const ok = await this.importFromArrayBuffer(arrayBuffer, '文件导入');
       if (ok) {
         document.getElementById('modalOverlay').classList.remove('show');
-        alert('数据导入成功！');
+        // 反馈：与按钮文案保持一致，让用户清楚本次到底做了什么
+        if (cloudOnline) {
+          alert('数据导入成功，并已同步到云端。');
+        } else {
+          alert('数据已导入到本地。\n\n⚠ 当前云端未连接，本次未上传云端。如需把本次数据分享给同事，请在「⚙ 云配置」连接云端后，点击云端工作条上的「↥ 上传」按钮。');
+        }
         // 刷新当前视图
         if (typeof App !== 'undefined' && App.currentModule) {
           App.go(App.currentModule);
@@ -409,90 +690,41 @@ const DataLoader = {
     }
   },
 
-  // 重新导入内置 Excel
-  async reimportFromDefault() {
+  // 重新导入基准：从云端拉取 base.json 覆盖本地（作为系统底账）
+  async reimportFromBase() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+      alert('请先连接云端后再重新导入基准');
+      return false;
+    }
     try {
-      const ok = await this.importFromExcel();
-      if (ok) {
-        document.getElementById('modalOverlay').classList.remove('show');
-        alert('内置数据已重新导入！');
-        if (typeof App !== 'undefined' && App.currentModule) {
-          App.go(App.currentModule);
-        }
+      showLoading('正在从云端拉取基准数据...', { variant:'capsule' });
+      const bundle = await SyncManager.pullBase();
+      if (!bundle || !bundle.tables) {
+        hideLoading();
+        alert('云端暂无基准数据，请先「标记为基准」生成基准。');
+        return false;
       }
-    } catch (err) {
-      console.error('内置数据导入失败:', err);
+      // 破坏性操作确认：导入基准会清空本地全部工作数据，并替换为云端基准
+      const supplierCnt = (bundle.tables.suppliers || []).length;
+      const confirmMsg = '⚠ 此操作将「清空本地全部工作数据」，并用云端基准（' + supplierCnt + ' 家供应商）完全替换。\n\n确定要继续吗？';
+      if (!window.confirm(confirmMsg)) {
+        hideLoading();
+        return false;
+      }
+      await DataStore.clearAll();
+      await new Promise(r => setTimeout(r, 300));
+      await this.seedFromBase(bundle);
       hideLoading();
-      alert('导入失败: ' + err.message);
-    }
-  },
-
-  // 导入替换内置数据：上传新 Excel → 存为新的内置工作簿 → 立即导入
-  async replaceAndImportBuiltIn() {
-    const fileInput = document.getElementById('reimportFile');
-    if (!fileInput || !fileInput.files || !fileInput.files.length) {
-      alert('请先选择一个 Excel 文件作为替换的内置数据源');
-      return;
-    }
-    const file = fileInput.files[0];
-    const name = (file.name || '').toLowerCase();
-    if (!name.endsWith('.xlsx') && !name.endsWith('.xls') && !name.endsWith('.xlsm')) {
-      alert('仅支持 .xlsx、.xls 或 .xlsm 格式');
-      return;
-    }
-
-    try {
-      showLoading('正在读取并存储替换工作簿...');
-      const arrayBuffer = await file.arrayBuffer();
-
-      // 1) 先校验文件能否正常解析（避免存入损坏文件）
-      XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
-
-      // 2) 存储到 IndexedDB 作为新的"内置数据"
-      await DataStore.saveCustomWorkbook(arrayBuffer);
-      console.log('[data-loader] 替换工作簿已保存 (' + (arrayBuffer.byteLength / 1024 / 1024).toFixed(1) + ' MB)');
-
-      // 3) 立即从该文件导入
-      showLoading('正在从替换工作簿导入数据...');
-      const ok = await this.importFromArrayBuffer(arrayBuffer, '替换导入');
-
-      if (ok) {
-        document.getElementById('modalOverlay').classList.remove('show');
-        alert('✅ 内置数据已替换并导入成功！\n后续"重新导入内置"将使用此新文件。\n如需恢复原始文件，可在设置中清除。');
-        if (typeof App !== 'undefined' && App.currentModule) {
-          App.go(App.currentModule);
-        }
+      alert('✅ 已用云端基准数据替换本地工作数据（共 ' + supplierCnt + ' 家供应商）。\n\n本地原有数据已被覆盖，如需恢复可重新导入 Excel 或上传工作数据。');
+      if (typeof App !== 'undefined' && App.currentModule) {
+        App.go(App.currentModule);
       }
+      return true;
     } catch (err) {
-      console.error('替换导入失败:', err);
+      console.error('从云端导入基准失败:', err);
       hideLoading();
-      if (err.message.includes('解析失败') || err.message.includes('不支持')) {
-        alert('文件解析失败，请确认是有效的 .xlsx / .xls / .xlsm 文件');
-      } else {
-        alert('替换导入失败: ' + err.message);
-      }
-    }
-  },
-
-  // 恢复原始内置数据：清除用户替换的工作簿后，重新导入系统内置文件
-  // （importFromExcel 会先检查替换工作簿，清除后自动回退到原始内置文件）
-  async restoreBuiltIn() {
-    try {
-      showLoading('正在恢复原始内置数据...');
-      await DataStore.clearCustomWorkbook();
-      const ok = await this.importFromExcel();
-      if (ok) {
-        const modalOverlay = document.getElementById('modalOverlay');
-        if (modalOverlay) modalOverlay.classList.remove('show');
-        alert('✅ 已恢复为原始内置数据！');
-        if (typeof App !== 'undefined' && App.currentModule) {
-          App.go(App.currentModule);
-        }
-      }
-    } catch (err) {
-      console.error('恢复原始内置数据失败:', err);
-      hideLoading();
-      alert('恢复失败: ' + err.message);
+      alert('导入基准失败: ' + (err.message || err));
+      return false;
     }
   },
 
@@ -576,7 +808,7 @@ const DataLoader = {
 
   // 1. 供应商管理 (headerRow=1) — 已入库金额多源匹配
   async loadSuppliers(workbook) {
-    showLoading('正在导入供应商数据...');
+    showLoading('正在导入供应商数据...', { variant:'fluid' });
     const rows = this.parseSheet(workbook, '供应商管理', 1);
 
     // 智能匹配已入库金额列名（Excel 可能含各种日期前缀）
@@ -646,7 +878,7 @@ const DataLoader = {
 
   // 2. 采购订单列表 (headerRow=1)
   async loadOrders(workbook) {
-    showLoading('正在导入订单数据...');
+    showLoading('正在导入订单数据...', { variant:'fluid' });
     const rows = this.parseSheet(workbook, '采购订单列表', 1);
     const clean = rows.map(r => ({
       序号: this.parseNum(r['序号']),
@@ -678,7 +910,7 @@ const DataLoader = {
 
   // 3. 入库列表 (headerRow=1)
   async loadInbound(workbook) {
-    showLoading('正在导入入库数据...');
+    showLoading('正在导入入库数据...', { variant:'fluid' });
     const rows = this.parseSheet(workbook, '供货2023.9.1-新入库', 1);
     const clean = rows.map(r => ({
       序号: this.parseNum(r['序号']),
@@ -708,7 +940,7 @@ const DataLoader = {
 
   // 4. 现存量 (headerRow=1)
   async loadStock(workbook) {
-    showLoading('正在导入库存数据...');
+    showLoading('正在导入库存数据...', { variant:'fluid' });
     const rows = this.parseSheet(workbook, '中心库房现存量', 1);
     const clean = rows.map(r => ({
       仓库名称: r['仓库名称'] || '',
@@ -725,7 +957,7 @@ const DataLoader = {
 
   // 5. 库存预警 — 补货值取J列"是否需补货"原始数值（按位置硬编码，不依赖名称匹配）
   async loadInventoryAlerts(workbook) {
-    showLoading('正在导入库存预警数据...');
+    showLoading('正在导入库存预警数据...', { variant:'fluid' });
 
     const sheet = workbook.Sheets['库存预警数量'];
     if (!sheet) { console.warn('[data-loader] ⚠️ 工作表"库存预警数量"不存在！可用工作表:', Object.keys(workbook.Sheets)); return; }
@@ -831,7 +1063,7 @@ const DataLoader = {
 
   // 6. 订货核对 (headerRow=2)
   async loadOrderChecks(workbook) {
-    showLoading('正在导入订货数据...');
+    showLoading('正在导入订货数据...', { variant:'fluid' });
     const rows = this.parseSheet(workbook, '订货', 2);
     const clean = rows.map(r => ({
       存货编码: r['存货编码'] ? String(r['存货编码']) : '',
@@ -853,7 +1085,7 @@ const DataLoader = {
 
   // 7. 供应商价格 (headerRow=1)
   async loadPricing(workbook) {
-    showLoading('正在导入价格数据...');
+    showLoading('正在导入价格数据...', { variant:'fluid' });
     const rows = this.parseSheet(workbook, '供应商价格', 1);
     const clean = rows.map(r => ({
       序号: this.parseNum(r['序号']),
@@ -879,7 +1111,7 @@ const DataLoader = {
 
   // 8. 低周转材料 (headerRow=2)
   async loadLowTurnover(workbook) {
-    showLoading('正在导入低周转数据...');
+    showLoading('正在导入低周转数据...', { variant:'fluid' });
     const rows = this.parseSheet(workbook, '低周转材料', 2);
     const clean = rows.map(r => ({
       仓库名称: r['仓库名称'] || '',
@@ -896,7 +1128,7 @@ const DataLoader = {
 
   // 9. 违约台账 — 精确定位"延迟天数"列序号取值（不依赖名字匹配/猜列号）
   async loadBreach(workbook) {
-    showLoading('正在导入违约数据...');
+    showLoading('正在导入违约数据...', { variant:'fluid' });
 
     const sheet = workbook.Sheets['违约台账'];
     const raw2d = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
@@ -1027,17 +1259,22 @@ const DataLoader = {
     return map.get(key) || '';
   },
 
-  // 批量填充：对一组记录数组，按(存货名称+规格型号)查表填入 _存货编码 字段
-  // 返回原数组引用（就地修改，不创建新数组）
-  async enrichWithStockCode(records) {
-    const map = await this.getStockNameSpecCodeMap();
-    records.forEach(r => {
-      if (r.存货名称) {
-        const key = TableUtils.buildStockKey(r.存货名称, r.规格型号);
-        r._存货编码 = map.get(key) || '';
-      }
-    });
-    return records;
+  // 🟢 v147：双路取码填入 _存货编码（解决「订单用存货编号 / 现存+入库用存货编码」两套并存时丢码）。
+  //   ① 记录自身的直接字段：优先 存货编码（入库/现存自带），其次 存货编号（订单 Excel 导入字段）；
+  //   ② 若两者皆空，按 (存货名称+规格型号) 经现存量 codeMap 匹配兜底。
+  //   就地修改 record._存货编码，不返回值。
+  fillStockCode(record, codeMap) {
+    if (!record) return;
+    const directEnc = record.存货编码 != null ? String(record.存货编码).trim() : '';
+    const directNo  = record.存货编号 != null ? String(record.存货编号).trim() : '';
+    const direct = directEnc || directNo;
+    if (direct) { record._存货编码 = direct; return; }
+    if (codeMap && record.存货名称) {
+      const key = TableUtils.buildStockKey(record.存货名称, record.规格型号);
+      record._存货编码 = codeMap.get(key) || '';
+    } else {
+      record._存货编码 = '';
+    }
   },
 
   // 工具方法：从 Excel 单元格值还原正确的日期字符串
@@ -1058,20 +1295,184 @@ const DataLoader = {
       const correct = new Date((serial - 25569) * 86400000); // UTC 午夜
       return `${correct.getUTCFullYear()}-${String(correct.getUTCMonth() + 1).padStart(2, '0')}-${String(correct.getUTCDate()).padStart(2, '0')}`;
     }
-    // 非日期值（数字、字符串、空值等）→ 原样返回，绝不转换
+    // 🟢 v195：兜底识别"未被 SheetJS 解析为 Date 的 Excel 数字序列号"——某些列（如「实际到货日期」）
+    //   在 Excel 里被存为文本/常规格式，cellDates 拿不到 Date 对象；按合理区间（20000~80000
+    //   约 1954-10 ~ 2118-12）识别为日期序列号并转 YYYY-MM-DD；区间外或非数字保持原样。
+    if (typeof val === 'number' && val >= 20000 && val <= 80000 && Number.isFinite(val)) {
+      const correct = new Date(Math.round((val - 25569) * 86400000));
+      if (!isNaN(correct.getTime())) {
+        return `${correct.getUTCFullYear()}-${String(correct.getUTCMonth() + 1).padStart(2, '0')}-${String(correct.getUTCDate()).padStart(2, '0')}`;
+      }
+    }
+    // 其他类型（字符串、空值等）→ 原样返回
     return val;
   }
 };
 
-// 加载遮罩工具函数
-function showLoading(text) {
-  const overlay = document.getElementById('loadingOverlay');
-  const textEl = document.getElementById('loadingText');
-  if (overlay) overlay.style.display = 'flex';
-  if (textEl) textEl.textContent = text || '加载中...';
-}
+// 暴露到 window，使配置弹窗的内联 onclick 能访问到
+window.DataLoader = DataLoader;
 
-function hideLoading() {
-  const overlay = document.getElementById('loadingOverlay');
-  if (overlay) overlay.style.display = 'none';
-}
+// ====================================================================
+// 加载遮罩 HUD —— 按场景分形态
+//   variant: 'truck'   货车进度条  (打包下载 / Excel / 云端上传, 有精确百分比)
+//            'capsule' 胶囊波      (云端同步 / 拉取 / 打底 / 恢复, 不确定进度自走)
+//            'fluid'   粒子流体    (各表批量导入, 不确定进度自走)
+//            undefined 经典 spinner (模块加载 / 档案加载, 不改动)
+// 用法:
+//   showLoading('加载中...')                              → 经典 spinner
+//   showLoading('打包中...', { variant:'truck', progress:42 })
+//   showLoading('同步中...', { variant:'capsule' })       → 不确定进度自走
+//   showLoading('导入中...', { variant:'fluid' })         → 不确定进度自走
+//   hideLoading()                                         → 隐藏并复位
+// ====================================================================
+const LoadingHUD = (function () {
+  const VARIANTS = ['truck', 'capsule', 'fluid'];
+  let capsuleIdx = 0, capsuleTimer = null, fluidRAF = null, fluidState = null, fluidProg = 0;
+
+  function els() {
+    return {
+      overlay: document.getElementById('loadingOverlay'),
+      text: document.getElementById('loadingText'),
+      spinner: document.getElementById('loadingSpinner'),
+      truckWrap: document.getElementById('loadingTruckWrap'),
+      truck: document.getElementById('loadingTruck'),
+      seg: document.getElementById('loadingSeg'),
+      pct: document.getElementById('loadingPct'),
+      capsWrap: document.getElementById('loadingCapsWrap'),
+      caps: document.getElementById('loadingCaps'),
+      fluidWrap: document.getElementById('loadingFluidWrap'),
+      fluidBase: document.getElementById('loadingFluidBase'),
+      fluidCanvas: document.getElementById('loadingFluidCanvas')
+    };
+  }
+
+  // 隐藏全部形态节点, 复位经典 spinner
+  function reset(e) {
+    if (e.spinner) e.spinner.style.display = '';
+    if (e.text) e.text.style.marginTop = '';
+    if (e.truckWrap) { e.truckWrap.hidden = true; e.truckWrap.style.display = 'none'; }
+    if (e.capsWrap) { e.capsWrap.hidden = true; e.capsWrap.style.display = 'none'; }
+    if (e.fluidWrap) { e.fluidWrap.hidden = true; e.fluidWrap.style.display = 'none'; }
+    if (capsuleTimer) { clearInterval(capsuleTimer); capsuleTimer = null; }
+    if (fluidRAF) { cancelAnimationFrame(fluidRAF); fluidRAF = null; }
+    if (e.caps) e.caps.innerHTML = '';
+    if (e.fluidBase) e.fluidBase.style.width = '0%';
+  }
+
+  function showVariant(e, variant) {
+    if (e.spinner) e.spinner.style.display = 'none';
+    if (e.text) e.text.style.marginTop = '0';
+    if (variant === 'truck' && e.truckWrap) { e.truckWrap.hidden = false; e.truckWrap.style.display = 'flex'; }
+    if (variant === 'capsule' && e.capsWrap) { e.capsWrap.hidden = false; e.capsWrap.style.display = 'flex'; }
+    if (variant === 'fluid' && e.fluidWrap) { e.fluidWrap.hidden = false; e.fluidWrap.style.display = 'flex'; }
+  }
+
+  // 货车: 车尾对齐进度点, p=0 尾贴左端, p=100 头贴右端
+  function setTruck(truck, seg, p) {
+    if (!truck || !seg) return;
+    const W = seg.clientWidth || 360, TW = truck.offsetWidth || 64;
+    const x = (p / 100) * (W - TW);
+    truck.style.left = x + 'px';
+  }
+
+  // 胶囊波: 不确定进度 → 持续向右推进再循环
+  function startCapsule(e) {
+    if (!e.caps) return;
+    const N = 20;
+    e.caps.innerHTML = '';
+    const bars = [];
+    for (let i = 0; i < N; i++) { const s = document.createElement('span'); e.caps.appendChild(s); bars.push(s); }
+    let pos = 0;
+    capsuleIdx = 0;
+    capsuleTimer = setInterval(() => {
+      pos = (pos + 1) % (N + 6);
+      bars.forEach((b, i) => {
+        b.className = '';
+        const h = 8 + (i % 5) * 4;
+        b.style.height = h + 'px';
+        if (i < pos && i >= pos - N) {
+          if (i === pos - 1) b.classList.add('head');
+          else b.classList.add('on');
+        }
+      });
+    }, 90);
+  }
+
+  // 粒子流体: 不确定进度 → 粒子持续从左汇入
+  function startFluid(e) {
+    const cv = e.fluidCanvas; if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const ps = [];
+    for (let i = 0; i < 48; i++) ps.push({
+      x: Math.random() * cv.width, y: Math.random() * cv.height,
+      vx: Math.random() * .6 + .2, vy: (Math.random() - .5) * .4,
+      r: Math.random() * 1.4 + .5
+    });
+    fluidState = { cv, ctx, ps }; fluidProg = 0;
+    const loop = () => {
+      if (!fluidState) return;
+      const { ctx, cv, ps } = fluidState;
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      const limit = cv.width * 0.96;
+      ps.forEach(p => {
+        p.x += p.vx; if (p.x > cv.width) p.x = 0;
+        p.y += p.vy; if (p.y < 0) p.y = cv.height; if (p.y > cv.height) p.y = 0;
+        if (p.x <= limit) {
+          ctx.globalAlpha = .85;
+          ctx.fillStyle = p.x > limit - 30 ? '#fff' : '#7ec8f0';
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+        }
+      });
+      ctx.globalAlpha = 1;
+      fluidRAF = requestAnimationFrame(loop);
+    };
+    loop();
+  }
+
+  // 设备判定: 复用工作台约定 innerWidth <= 768 为移动端
+  function isMobile() {
+    return (window.innerWidth || document.documentElement.clientWidth || 0) <= 768;
+  }
+
+  function show(text, opts) {
+    const e = els();
+    if (!e.overlay) return;
+    e.overlay.style.display = 'flex';
+    if (e.text) e.text.textContent = text || '加载中...';
+    reset(e);
+
+    const explicit = opts && VARIANTS.includes(opts.variant) ? opts.variant : null;
+    // 未显式指定形态时: 移动端默认粒子流体, 桌面端保持经典 spinner
+    const variant = explicit || (isMobile() ? 'fluid' : null);
+    const progress = opts && typeof opts.progress === 'number' ? Math.max(0, Math.min(100, opts.progress)) : null;
+
+    if (variant === 'truck') {
+      showVariant(e, 'truck');
+      const p = progress === null ? 0 : progress;
+      setTruck(e.truck, e.seg, p);
+      if (e.pct) e.pct.textContent = Math.round(p) + '%';
+    } else if (variant === 'capsule') {
+      showVariant(e, 'capsule');
+      startCapsule(e);
+    } else if (variant === 'fluid') {
+      showVariant(e, 'fluid');
+      startFluid(e);
+    } else {
+      // 经典 spinner (含只传 progress 但无 variant 的情况 → 仍走经典)
+      if (e.spinner) e.spinner.style.display = '';
+      if (e.text) e.text.style.marginTop = '';
+    }
+  }
+
+  function hide() {
+    const e = els();
+    if (e.overlay) e.overlay.style.display = 'none';
+    reset(e);
+  }
+
+  return { show, hide, setTruck };
+})();
+
+// 对外接口(向后兼容旧调用 showLoading(text) / hideLoading())
+function showLoading(text, opts) { LoadingHUD.show(text, opts); }
+function hideLoading() { LoadingHUD.hide(); }

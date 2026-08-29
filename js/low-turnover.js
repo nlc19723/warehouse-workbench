@@ -4,14 +4,17 @@
 
 const LowTurnoverModule = {
   currentData: [],
+  currentFilter: { keyword: '' },
   currentPage: 1,
   pageSize: 20,
 
-  async render() {
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     const content = document.getElementById('contentArea');
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="ltKw" placeholder="搜索物料名称..." onkeydown="if(event.key==='Enter')LowTurnoverModule.applyFilter()">
+        <input type="text" id="ltKw" placeholder="搜索物料名称..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')LowTurnoverModule.applyFilter()">
         <button class="search-glass" onclick="LowTurnoverModule.applyFilter()">🔍 搜索</button>
         <button class="secondary" onclick="LowTurnoverModule.resetFilter()">重置</button>
         <button class="secondary" onclick="LowTurnoverModule.exportData()">📥 导出</button>
@@ -22,12 +25,14 @@ const LowTurnoverModule = {
       <div id="ltPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
 
-    await this.loadData();
+    await this.loadData(myToken);
   },
 
-  async loadData() {
-    let items = await db.lowTurnover.toArray();
-    const kw = document.getElementById('ltKw')?.value.trim().toLowerCase();
+  async loadData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
+    let items = await DataStore.getLowTurnover();
+    const kw = (this.currentFilter.keyword || '').trim().toLowerCase();
     if (kw) {
       items = items.filter(i =>
         (i.存货名称 && i.存货名称.toLowerCase().includes(kw)) ||
@@ -38,6 +43,7 @@ const LowTurnoverModule = {
     const totalQty = items.reduce((s, c) => s + (parseFloat(c.现存数量) || 0), 0);
     const totalUnavailable = items.reduce((s, c) => s + (parseFloat(c.暂无法使用量) || 0), 0);
 
+    if (rt !== undefined && rt !== App._goToken) return;
     document.getElementById('ltSummary').innerHTML = `
       <div class="kpi-grid">
         <div class="kpi-card card-warning">
@@ -46,26 +52,29 @@ const LowTurnoverModule = {
         </div>
         <div class="kpi-card card-info">
           <div class="kpi-label">现存总量</div>
-          <div class="kpi-value">${this.formatNum(totalQty)}</div>
+          <div class="kpi-value">${TableUtils.formatNum(totalQty)}</div>
         </div>
         <div class="kpi-card card-danger">
           <div class="kpi-label">暂无法使用量</div>
-          <div class="kpi-value">${this.formatNum(totalUnavailable)}</div>
+          <div class="kpi-value">${TableUtils.formatNum(totalUnavailable)}</div>
         </div>
       </div>
     `;
 
     this.currentData = items;
-    this.currentPage = 1;
-    this.renderTable();
+    this.renderTable(rt);
   },
 
-  renderTable() {
+  renderTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const data = this.currentData;
     const total = data.length;
-    const totalPages = Math.ceil(total / this.pageSize);
+    const pageSize = this.pageSize === 'all' ? total : this.pageSize;
+    const totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 1;
     const page = Math.min(this.currentPage, Math.max(1, totalPages));
-    const items = data.slice((page - 1) * this.pageSize, page * this.pageSize);
+    this.currentPage = page;
+    const items = data.slice((page - 1) * pageSize, page * pageSize);
 
     const area = document.getElementById('ltTableArea');
     if (items.length === 0) {
@@ -95,11 +104,11 @@ const LowTurnoverModule = {
               return `
                 <tr class="${available <= 0 ? 'row-danger' : ''}">
                   <td>${esc(i.仓库名称 ?? '')}</td>
-                  <td>${esc(i.存货编码 ?? '')}</td>
-                  <td><strong>${esc(i.存货名称)}</strong></td>
+                  <td>${TableUtils.link('stock', i.存货编码 ?? '', i.存货编码 ?? '')}</td>
+                  <td><strong>${esc(i.存货名称 ?? '')}</strong></td>
                   <td>${esc(i.规格型号 ?? '')}</td>
-                  <td>${this.formatNum(total)}</td>
-                  <td>${this.formatNum(unavailable)}</td>
+                  <td>${TableUtils.formatNum(total)}</td>
+                  <td>${TableUtils.formatNum(unavailable)}</td>
                 </tr>
               `;
             }).join('')}
@@ -108,54 +117,34 @@ const LowTurnoverModule = {
       </div>
     `;
 
-    const html = [];
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>`);
-    html.push(`<span class="page-btns">`);
-    html.push(`<button onclick="LowTurnoverModule.goPage(1)" ${page === 1 ? 'disabled' : ''}>«</button>`);
-    html.push(`<button onclick="LowTurnoverModule.goPage(${page - 1})" ${page === 1 ? 'disabled' : ''}>‹</button>`);
-    const start = Math.max(1, page - 2);
-    const end = Math.min(totalPages, start + 4);
-    for (let i = start; i <= end; i++) {
-      html.push(`<button class="${i === page ? 'active' : ''}" onclick="LowTurnoverModule.goPage(${i})">${i}</button>`);
-    }
-    html.push(`<button onclick="LowTurnoverModule.goPage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>›</button>`);
-    html.push(`<button onclick="LowTurnoverModule.goPage(${totalPages})" ${page === totalPages ? 'disabled' : ''}>»</button>`);
-    html.push(`</span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      每页 <select onchange="LowTurnoverModule.changePageSize(parseInt(this.value))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
-        <option value="20" ${this.pageSize===20?'selected':''}>20</option>
-        <option value="50" ${this.pageSize===50?'selected':''}>50</option>
-        <option value="100" ${this.pageSize===100?'selected':''}>100</option>
-      </select> 条
-    </span>`);
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      跳至 <input type="number" id="ltPageJumper" min="1" max="${totalPages}" value="${page}"
-        onkeydown="if(event.key==='Enter')LowTurnoverModule.goPage(parseInt(this.value))"
-        style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
-      / ${totalPages} 页
-    </span>`);
-    document.getElementById('ltPagination').innerHTML = html.join('');
+    // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
+    TableUtils.renderPagination('ltPagination', { module: 'LowTurnoverModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
     TableUtils.initSmartSelect('ltTableArea');
+    TableUtils.initSortableHeaders('ltTableArea');
   },
 
   changePageSize(size) {
-    this.pageSize = size;
+    this.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     this.currentPage = 1;
     this.renderTable();
   },
 
-  applyFilter() { this.loadData(); },
+  applyFilter() {
+    this.currentFilter.keyword = (document.getElementById('ltKw')?.value || '').trim();
+    this.currentPage = 1;
+    this.loadData();
+  },
   resetFilter() {
-    document.getElementById('ltKw').value = '';
+    this.currentFilter = { keyword: '' };
+    this.currentPage = 1;
+    const input = document.getElementById('ltKw');
+    if (input) input.value = '';
     this.loadData();
   },
   goPage(p) { this.currentPage = p; this.renderTable(); },
   exportData() {
     // 🟢 O1：统一导出（行为与原逻辑一致）
     TableUtils.exportToExcel(this.currentData, `低周转_${new Date().toISOString().split('T')[0]}.xlsx`, '低周转');
-  },
-  formatNum(num) {
-    return new Intl.NumberFormat('zh-CN').format(Math.round(num || 0));
   }
 };

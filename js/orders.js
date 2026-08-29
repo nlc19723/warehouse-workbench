@@ -7,27 +7,51 @@ const OrdersModule = {
   currentPage: 1,
   pageSize: 20,
 
-  async render() {
+  // 计算默认订单日期区间：最小订单日期 至 今日
+  getDefaultDateRange(orders) {
+    const pad = n => String(n).padStart(2, '0');
+    const today = new Date();
+    const end = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+    let minDate = '';
+    if (orders && orders.length > 0) {
+      const dates = orders.map(o => o.日期).filter(Boolean).sort();
+      if (dates.length > 0) minDate = dates[0];
+    }
+    return { start: minDate || end, end };
+  },
+
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
     const content = document.getElementById('contentArea');
-    const [suppliers, projects, statuses] = await Promise.all([
-      DataStore.getOrderSuppliers(),
-      DataStore.getOrderProjects(),
-      (async () => {
-        const all = await db.orders.toArray();
-        return [...new Set(all.map(o => o.审批状态).filter(Boolean))];
-      })()
-    ]);
+    const allOrders = await DataStore.getRows('orders');
+    const suppliers = [...new Set(allOrders.map(o => o.供应商).filter(Boolean))].sort();
+    const projects = [...new Set(allOrders.map(o => o.项目名称).filter(Boolean))].sort();
+    const statuses = [...new Set(allOrders.map(o => o.审批状态).filter(Boolean))];
+
+    // 首次进入：根据实际数据填充默认日期区间
+    const dr = this.getDefaultDateRange(allOrders);
+    if (!this.currentFilter) this.currentFilter = {};
+    if (!this.currentFilter.startDate) this.currentFilter.startDate = dr.start;
+    if (!this.currentFilter.endDate) this.currentFilter.endDate = dr.end;
+
+    if (myToken !== undefined && myToken !== App._goToken) return;
+
+    // 清理可能遗留的旧日期选择器弹窗（render 会重建 input）
+    if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
 
     content.innerHTML = `
       <div class="filter-bar" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;padding:0;align-items:flex-start;">
         <div class="filter-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
           <input type="text" id="orderKw" class="filter-search-short" placeholder="搜索订单编号、供应商、存货名称..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')OrdersModule.applyFilter()">
-          <input type="date" id="orderStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date" title="起始日期">
+          <input type="text" id="orderStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="OrdersModule.onDateChange()" readonly>
           <span class="filter-sep">至</span>
-          <input type="date" id="orderEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date" title="结束日期">
-          <button class="search-glass" onclick="OrdersModule.applyFilter()">筛选</button>
-          <button class="secondary" onclick="OrdersModule.resetFilter()">重置</button>
-          <button class="secondary" onclick="OrdersModule.exportData()">📥 导出</button>
+          <input type="text" id="orderEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="OrdersModule.onDateChange()" readonly>
+          <div class="filter-row-buttons" style="display:flex;gap:6px;">
+            <button class="search-glass" onclick="OrdersModule.applyFilter()">筛选</button>
+            <button class="secondary" onclick="OrdersModule.resetFilter()">重置</button>
+            <button class="secondary" onclick="OrdersModule.exportData()">📥 导出</button>
+          </div>
         </div>
         <div class="filter-row" style="display:flex;gap:10px;margin:0;padding:0;">
           <select id="orderSupplier" title="按供应商筛选" style="max-width:200px;">
@@ -64,11 +88,18 @@ const OrdersModule = {
       <div id="orderPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
 
-    await this.loadData();
+    if (window.enhanceSearchSelect) {
+      enhanceSearchSelect('orderSupplier', { placeholder: '搜索供应商', widthMode: 'full' });
+      enhanceSearchSelect('orderProject', { placeholder: '搜索项目', widthMode: 'half' });
+    }
+
+    await this.loadData(myToken);
   },
 
-  async loadData() {
-    const allOrders = await db.orders.toArray();
+  async loadData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
+    const allOrders = await DataStore.getRows('orders');
 
     // ===== 先应用当前筛选条件到全量数据（用于统计和图表）=====
     let filteredOrders = this._applyFilters(allOrders);
@@ -85,11 +116,12 @@ const OrdersModule = {
 
     const totalAmount = filteredOrders.reduce((s, o) => s + (parseFloat(o.原币价税合计) || 0), 0);
 
+    if (rt !== undefined && rt !== App._goToken) return;
     document.getElementById('orderSummary').innerHTML = `
       <div class="kpi-card card-info">
         <div class="kpi-label">订单总数</div>
         <div class="kpi-value">${uniqueTotal}</div>
-        <div class="kpi-sub">总金额 ¥${this.formatMoney(totalAmount)}</div>
+        <div class="kpi-sub">总金额 ¥${TableUtils.formatMoney(totalAmount)}</div>
       </div>
       <div class="kpi-card card-warning">
         <div class="kpi-label">未审批通过</div>
@@ -103,9 +135,14 @@ const OrdersModule = {
       </div>
     `;
 
-    this.currentPage = 1;
-    this.renderTable();
+    await this.renderTable(rt);
     this.renderTrendChart(filteredOrders);
+
+    // 挂载自定义日期选择器（替换原生 type=date，保持 id 与 change 事件不变）
+    if (typeof DatePicker !== 'undefined') {
+      DatePicker.mount('orderStartDate');
+      DatePicker.mount('orderEndDate');
+    }
   },
 
   // 内部筛选：复用 currentFilter 逻辑（与 DataStore.getOrders 一致）
@@ -136,21 +173,23 @@ const OrdersModule = {
     return result;
   },
 
-  async renderTable() {
+  async renderTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
     const result = await DataStore.getOrders(this.currentFilter, this.currentPage, this.pageSize);
-    let { items, totalPages } = result;
+    let { items, total, totalPages } = result;
+    this.currentPage = Math.min(this.currentPage, Math.max(1, totalPages || 1));
 
-    // 从现存量基础档案匹配填充存货编码
-    if (typeof DataLoader !== 'undefined' && items.length > 0) {
-      const codeMap = await DataLoader.getStockNameSpecCodeMap();
-      items.forEach(o => {
-        if (o.存货名称) {
-          const key = (o.存货名称 + '|' + (o.规格型号 || '')).replace(/\s+/g, '');
-          o._存货编码 = codeMap.get(key) || '';
-        }
-      });
+    // 填充存货编码（双路取码，详见 DataLoader.fillStockCode）
+    if (items.length > 0 && typeof DataLoader !== 'undefined') {
+      let codeMap = null;
+      if (DataLoader.getStockNameSpecCodeMap) {
+        try { codeMap = await DataLoader.getStockNameSpecCodeMap(); } catch (e) { codeMap = null; }
+      }
+      items.forEach(o => DataLoader.fillStockCode(o, codeMap));
     }
 
+    if (rt !== undefined && rt !== App._goToken) return;
     const area = document.getElementById('orderTableArea');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无订单数据</div></div>';
@@ -160,7 +199,7 @@ const OrdersModule = {
 
     area.innerHTML = `
       <div class="table-wrapper">
-        <table class="data-table">
+        <table class="data-table" data-table-key="orders">
           <thead>
             <tr>
               <th>订单编号</th>
@@ -171,7 +210,7 @@ const OrdersModule = {
               <th>存货名称</th>
               <th>规格型号</th>
               <th>订单量</th>
-              <th>未入库订单量</th>
+              <th style="width:80px;">未入库订单量</th>
               <th>含税单价</th>
               <th>含税金额</th>
               <th>状态</th>
@@ -180,17 +219,17 @@ const OrdersModule = {
           <tbody>
             ${items.map(o => `
               <tr>
-                <td><strong>${esc(o.订单编号)}</strong></td>
+                <td><strong>${TableUtils.link('order', o.订单编号 ?? '', o.订单编号 ?? '')}</strong></td>
                 <td>${esc(o.日期 ?? '')}</td>
-                <td>${esc(o.供应商 ?? '')}</td>
+                <td>${TableUtils.link('supplier', o.供应商 ?? '', o.供应商 ?? '')}</td>
                 <td>${esc(o.项目名称 ?? '')}</td>
-                <td>${esc(o._存货编码 ?? '')}</td>
-                <td>${esc(o.存货名称 ?? '')}</td>
+                <td>${TableUtils.link('stock', o._存货编码 ?? '', o._存货编码 ?? '')}</td>
+                <td><strong>${esc(o.存货名称 ?? '')}</strong></td>
                 <td>${esc(o.规格型号 ?? '')}</td>
                 <td>${o.数量}</td>
                 <td>${parseFloat(o.未入库量) > 0 ? `<span class="tag tag-warning">${o.未入库量}</span>` : '0'}</td>
-                <td>${this.formatMoney(o.原币含税单价)}</td>
-                <td>${this.formatMoney(o.原币价税合计)}</td>
+                <td>${TableUtils.formatMoney(o.原币含税单价)}</td>
+                <td>${TableUtils.formatMoney(o.原币价税合计)}</td>
                 <td>${o.审批状态 ? `<span class="tag ${o.审批状态 === '审批通过' ? 'tag-success' : 'tag-neutral'}">${esc(o.审批状态)}</span>` : ''}</td>
               </tr>
             `).join('')}
@@ -199,47 +238,13 @@ const OrdersModule = {
       </div>
     `;
 
-    this.renderPagination(items.length, totalPages);
+    this.renderPagination(total, totalPages);
     TableUtils.initSmartSelect('orderTableArea');
-    TableUtils.initSortableHeaders('orderTableArea', this.currentData || [], (sorted) => {
-      this.currentData = sorted;
-      this.currentPage = 1;
-      this.renderTable();
-    });
+    TableUtils.initSortableHeaders('orderTableArea');
   },
 
   renderPagination(total, totalPages) {
-    const page = this.currentPage;
-    const html = [];
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>`);
-    html.push(`<span class="page-btns">`);
-    html.push(`<button onclick="OrdersModule.goPage(1)" ${page === 1 ? 'disabled' : ''}>«</button>`);
-    html.push(`<button onclick="OrdersModule.goPage(${page - 1})" ${page === 1 ? 'disabled' : ''}>‹</button>`);
-    const start = Math.max(1, page - 2);
-    const end = Math.min(totalPages, start + 4);
-    for (let i = start; i <= end; i++) {
-      html.push(`<button class="${i === page ? 'active' : ''}" onclick="OrdersModule.goPage(${i})">${i}</button>`);
-    }
-    html.push(`<button onclick="OrdersModule.goPage(${page + 1})" ${page === totalPages ? 'disabled' : ''}>›</button>`);
-    html.push(`<button onclick="OrdersModule.goPage(${totalPages})" ${page === totalPages ? 'disabled' : ''}>»</button>`);
-    html.push(`</span>`);
-
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      每页 <select onchange="OrdersModule.changePageSize(parseInt(this.value))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
-        <option value="20" ${this.pageSize===20?'selected':''}>20</option>
-        <option value="50" ${this.pageSize===50?'selected':''}>50</option>
-        <option value="100" ${this.pageSize===100?'selected':''}>100</option>
-      </select> 条
-    </span>`);
-
-    html.push(`<span style="font-size:12px;color:var(--text-secondary);">
-      跳至 <input type="number" id="orderPageJumper" min="1" max="${totalPages}" value="${page}"
-        onkeydown="if(event.key==='Enter')OrdersModule.goPage(parseInt(this.value))"
-        style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
-      / ${totalPages} 页
-    </span>`);
-
-    document.getElementById('orderPagination').innerHTML = html.join('');
+    TableUtils.renderPagination('orderPagination', { module: 'OrdersModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
   },
 
   renderTrendChart(allOrders) {
@@ -278,7 +283,7 @@ const OrdersModule = {
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     const gridColor = isDark ? 'rgba(148,163,184,0.12)' : 'rgba(148,163,184,0.18)';
-    const textColor = isDark ? '#94A3B8' : '#64748B';
+    const textColor = TableUtils.chartTextColor(isDark);
 
     this._trendChart = new Chart(ctx, {
       type: 'line',
@@ -357,8 +362,17 @@ const OrdersModule = {
     });
   },
 
+  onDateChange() {
+    const startInput = document.getElementById('orderStartDate');
+    const endInput = document.getElementById('orderEndDate');
+    if (startInput) this.currentFilter.startDate = startInput.value;
+    if (endInput) this.currentFilter.endDate = endInput.value;
+    this.currentPage = 1;
+    this.loadData();
+  },
+
   changePageSize(size) {
-    this.pageSize = size;
+    this.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     this.currentPage = 1;
     this.renderTable();
   },
@@ -376,8 +390,10 @@ const OrdersModule = {
     this.loadData();
   },
 
-  resetFilter() {
-    this.currentFilter = {};
+  async resetFilter() {
+    const allOrders = await DataStore.getRows('orders');
+    const dr = this.getDefaultDateRange(allOrders);
+    this.currentFilter = { keyword: '', 供应商: '', 项目名称: '', 审批状态: '', startDate: dr.start, endDate: dr.end };
     this.currentPage = 1;
     this.pageSize = 20;
     this.render();
@@ -392,10 +408,5 @@ const OrdersModule = {
     const result = await DataStore.getOrders(this.currentFilter, 1, 100000);
     // 🟢 O1：统一导出（行为与原逻辑一致）
     TableUtils.exportToExcel(result.items, `订单列表_${new Date().toISOString().split('T')[0]}.xlsx`, '订单列表');
-  },
-
-  formatMoney(num) {
-    if (num == null || num === '') return '';
-    return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(num);
   }
 };
