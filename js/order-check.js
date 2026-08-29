@@ -132,7 +132,7 @@ const OrderCheckModule = {
   _rowHtml(idx, r) {
     return `
       <tr data-row="${idx}">
-        <td style="text-align:center;font-size:12px;color:var(--text-muted);">${idx + 1}</td>
+        <td style="text-align:center;color:var(--text-muted);">${idx + 1}</td>
         <td style="text-align:center;position:relative;">
           <input type="text" class="oc-code-input oc-input" placeholder="输入编码联想..."
             value="${r.存货编码 || ''}"
@@ -1029,7 +1029,7 @@ const OrderCheckModule = {
 
       const cnt = (await DataStore.getRows('orderChecks')).filter(r => r.核对单号 === orderNo).length;
       if (cnt === 0) { this.showMsg(`❌ 核对单号 "${orderNo}" 不存在`, true); return; }
-      if (!confirm(`确定要删除核对单 "${orderNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`)) return;
+      if (!await WBModal.confirm(`确定要删除核对单 "${orderNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
 
       const ids = (await DataStore.getRows('orderChecks')).filter(r => r.核对单号 === orderNo).map(r => r.id);
       await db.orderChecks.bulkDelete(ids);

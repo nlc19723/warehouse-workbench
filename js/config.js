@@ -46,7 +46,9 @@ window.AppConfig = {
     //   从 index.html 中 style.css 的 ?v= 参数自动读取（如 ?v=188 → 'v188'），
     //   覆盖本处写死的兜底值。发版只需 bump CSS 版本查询参数，徽章+控制台水印全链路自动同步。
     //   本值仅作为脚本加载失败/无 ?v= 时的兜底。
-    version: 'v188',
+    // 🟢 v201：二维码白框上下边与基础信息白框严格对齐
+    // （h3 标题脱离文档流浮在白框上方，让 align-items:stretch 自然等高）
+    version: 'v201',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）

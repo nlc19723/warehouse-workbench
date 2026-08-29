@@ -45,42 +45,61 @@ window.StockDetailModule = {
         { label: '仓库名称', field: '仓库名称' },
         { label: '现存数量', field: '现存数量' }
       ];
-      const baseSection = `<div class="detail-section"><h3>基础信息</h3>
-        <div class="detail-grid">${base.map(c => `<div class="detail-kv"><span class="k">${c.label}</span><span class="v">${esc(DetailCommon.fmt(main[c.field]))}</span></div>`).join('')}</div></div>`;
+      // 🟢 v197：基础信息 + 二维码并排容器（PC 端 flex 横排，移动端回退为上下堆叠）
+      const baseGridHtml = `<div class="detail-grid">${base.map(c => `<div class="detail-kv"><span class="k">${c.label}</span><span class="v">${esc(DetailCommon.fmt(main[c.field]))}</span></div>`).join('')}</div>`;
+
+      // 🟢 A1：档案页存货二维码（编码纯文本 = 存货编码；离线生成，零存储；新增存货自动有码）
+      //    与 A2 列表共用同一 QR 组件 + 同一份内存缓存
+      const qrSvg = window.QR ? QR.svg(code) : '';
+      const qrCardHtml = qrSvg ? `<div class="detail-section qr-card">
+        <div class="qr-body">
+          <div class="qr-img">${qrSvg}</div>
+          <div class="qr-meta">
+            <div class="qr-name">${esc(main.存货名称 || '')}</div>
+            ${main.规格型号 ? `<div class="qr-spec">规格：${esc(main.规格型号)}</div>` : ''}
+            <div class="qr-actions">
+              <button class="btn-secondary" type="button" data-qr-download="${esc(code)}">⬇ 下载 PNG</button>
+              <button class="btn-secondary" type="button" data-qr-print="${esc(code)}">🖨 打印</button>
+            </div>
+          </div>
+        </div></div>` : '';
+
+      // 基础信息包成 section 块（带标题）；二维码并排或独立由 CSS 控制
+      const baseSection = `<div class="detail-section detail-section-base"><h3>基础信息</h3>${baseGridHtml}</div>`;
+      // v197：并排用 detail-base-qr-row 容器；移动端 CSS 回退为列堆叠
+      const combinedRow = qrCardHtml
+        ? `<div class="detail-base-qr-row">${baseSection}${qrCardHtml}</div>`
+        : baseSection;
+      // 兼容：qrCardHtml 为空时 combinedRow 就是 baseSection 本身，避免空容器
+      const baseAndQrBlock = qrCardHtml ? combinedRow : baseSection;
 
       // 🟢 v120：列名与主模块（入库列表）统一
+      // 🟢 v197：删除「存货编码 / 存货名称 / 规格型号」三列（档案页头部已展示，避免重复）
+      // 🟢 v200：把「供应商」挪到「入库量」之后（= 你要的「右边那列的右边」），让单号/日期先聚在一起
       const inboundCols = [
         { label: '入库单号', field: '入库单号' },
         { label: '入库日期', field: '入库日期' },
-        { label: '供应商', field: '供应商', render: r => TableUtils.link('supplier', r.供应商, r.供应商) },
-        // 🟢 v117：明细表新增存货编码列（存货名称绑定存货编码）
-        { label: '存货编码', render: r => TableUtils.link('stock', r.存货编码 || '', r.存货编码 || '') },
-        { label: '存货名称', render: r => `<strong>${esc(r.存货名称 || '')}</strong>` },
-        { label: '规格型号', field: '规格型号' },
         { label: '入库量', field: '数量' },
+        { label: '供应商', field: '供应商', render: r => TableUtils.link('supplier', r.供应商, r.供应商) },
         { label: '含税单价', field: '原币含税单价' },
         { label: '含税金额', field: '原币价税合计' }
       ];
       // 🟢 v120：列名与主模块（订单列表）统一
+      // 🟢 v197：删除「存货编码 / 存货名称 / 规格型号」三列（档案页头部已展示，避免重复）
+      // 🟢 v200：把「供应商」挪到「订单量」之后，与入库表统一为「量 + 供应商」结构
       const orderCols = [
         { label: '订单编号', field: '订单编号', render: r => TableUtils.link('order', r.订单编号, r.订单编号) },
         { label: '日期', field: '日期' },
-        { label: '供应商', field: '供应商', render: r => TableUtils.link('supplier', r.供应商, r.供应商) },
-        // 🟢 v118：订单表"存货"键为 存货编号（不是 存货编码）
-        { label: '存货编码', render: r => TableUtils.link('stock', r.存货编号 || '', r.存货编号 || '') },
-        { label: '存货名称', render: r => `<strong>${esc(r.存货名称 || '')}</strong>` },
-        { label: '规格型号', field: '规格型号' },
         { label: '订单量', field: '数量' },
+        { label: '供应商', field: '供应商', render: r => TableUtils.link('supplier', r.供应商, r.供应商) },
         { label: '未入库订单量', field: '未入库量' },
         { label: '含税单价', field: '原币含税单价' },
         { label: '含税金额', field: '原币价税合计' },
         { label: '状态', field: '审批状态' }
       ];
       // 🟢 v120：列名与主模块（库存预警）统一
+      // 🟢 v198：删除「存货编码 / 存货名称 / 规格型号」三列（档案页头部已展示，表内重复无意义）
       const alertCols = [
-        { label: '存货编码', field: '存货编码' },
-        { label: '存货名称', field: '存货名称' },
-        { label: '规格型号', field: '规格型号' },
         { label: '分类', field: '分类' },
         { label: '月均入库', field: '近一年月均入库量' },
         { label: '现存量', field: '现存量' },
@@ -90,21 +109,18 @@ window.StockDetailModule = {
         { label: '项目', field: '工程项目' }
       ];
       // 🟢 v120：列名与主模块（合同价格）统一
+      // 🟢 v198：删除「存货编码 / 规格型号」两列（档案页头部已展示）
       const priceCols = [
         { label: '供应商', field: '供应商', render: r => TableUtils.link('supplier', r.供应商, r.供应商) },
-        { label: '存货编码', field: '存货编码' },
-        { label: '规格型号', field: '规格型号' },
         { label: '含税单价', field: '含税单价' },
         { label: '生效日期', field: '生效日期' },
         { label: '失效日期', field: '失效日期' },
         { label: '类型', field: '类型' }
       ];
       // 🟢 v120：列名与主模块（低周转材料）统一
+      // 🟢 v198：删除「存货编码 / 存货名称 / 规格型号」三列（档案页头部已展示）
       const lowCols = [
         { label: '仓库', field: '仓库名称' },
-        { label: '存货编码', field: '存货编码' },
-        { label: '存货名称', field: '存货名称' },
-        { label: '规格型号', field: '规格型号' },
         { label: '现存数量', field: '现存数量' },
         { label: '暂无法使用量', field: '暂无法使用量' }
       ];
@@ -126,8 +142,14 @@ window.StockDetailModule = {
 
       content.innerHTML = DetailCommon.backBar() +
         `<h2 style="margin:6px 0 18px;font-size:20px;">📦 存货档案 · ${esc(main.存货名称 || code)}${main.规格型号 ? ' (' + esc(main.规格型号) + ')' : ''}</h2>` +
-        baseSection +
+        baseAndQrBlock +
         sectionHosts;
+
+      // 🟢 A1：二维码下载 / 打印按钮绑定
+      const dlBtn = content.querySelector('[data-qr-download]');
+      if (dlBtn) dlBtn.addEventListener('click', () => this._downloadQrPng(dlBtn.getAttribute('data-qr-download')));
+      const prBtn = content.querySelector('[data-qr-print]');
+      if (prBtn) prBtn.addEventListener('click', () => this._printQr(prBtn.getAttribute('data-qr-print'), main.存货名称, main.规格型号));
 
       // 填入每个 section 的表格 + 分页器
       Object.keys(this._sections).forEach(id => this._renderSection(id));
@@ -244,5 +266,15 @@ window.StockDetailModule = {
     s.pageSize = size === 'all' ? 'all' : parseInt(size, 10);
     s.currentPage = 1;
     this._renderSection(section);
+  },
+
+  // 🟢 A1：将二维码导出为白底 PNG（复用共享 QR 组件）
+  _downloadQrPng(code) {
+    if (window.QR) QR.downloadPng(code);
+  },
+
+  // 🟢 A1：单张二维码打印（复用共享 QR 组件）
+  _printQr(code, name, spec) {
+    if (window.QR) QR.printWindow(code, name, spec);
   }
 };

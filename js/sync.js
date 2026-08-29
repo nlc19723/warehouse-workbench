@@ -179,24 +179,24 @@ const SyncManager = {
     const url = document.getElementById('sbUrl').value.trim();
     const key = document.getElementById('sbKey').value.trim();
     if (!url || !key) {
-      alert('请填写完整的配置信息');
+      WBModal.alert('请填写完整的配置信息');
       return;
     }
     const ok = await this.connect(url, key);
     if (ok) {
       this.hideConfigDialog();
-      alert('连接成功！数据将自动同步到云端。');
+      WBModal.alert('连接成功！数据将自动同步到云端。');
     } else {
-      alert('连接失败：云端不可达或凭证无效。请检查 Project URL、Anon Key 与存储桶权限后重试。');
+      WBModal.alert('连接失败：云端不可达或凭证无效。请检查 Project URL、Anon Key 与存储桶权限后重试。');
     }
   },
 
   // ===== 云端数据存储（Supabase Storage 当文件柜）=====
   // 手动把当前本地数据上传到云端（已连接时可用）
   async manualPush() {
-    if (!this.isOnline) { alert('请先连接云端'); return; }
+    if (!this.isOnline) { WBModal.alert('请先连接云端'); return; }
     if (typeof DataLoader === 'undefined' || !DataLoader.pushAllToCloud) {
-      alert('数据模块未就绪，请刷新页面后重试');
+      WBModal.alert('数据模块未就绪，请刷新页面后重试');
       return;
     }
     showLoading('正在上传数据到云端...');
@@ -207,9 +207,9 @@ const SyncManager = {
       hideLoading();
     }
     if (ok) {
-      alert('当前数据已上传到云端，部署/分享链接打开即自动更新。');
+      WBModal.alert('当前数据已上传到云端，部署/分享链接打开即自动更新。');
     } else {
-      alert('上传失败，请检查网络连接或存储桶权限（需开启 anon 可写）。');
+      WBModal.alert('上传失败，请检查网络连接或存储桶权限（需开启 anon 可写）。');
     }
   },
 

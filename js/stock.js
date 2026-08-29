@@ -7,6 +7,10 @@ const StockModule = {
   currentFilter: { keyword: '' },
   currentPage: 1,
   pageSize: 20,
+  // 🟢 v197：A3 批量打印二维码（多选状态：选中编码 Set）
+  selectedCodes: new Set(),
+  // 🟢 v198：多选模式开关 —— 默认 false（不渲染勾选列），点击「批量打印二维码」才进入
+  bulkMode: false,
 
   async render(token) {
     if (token !== undefined) this._rt = token;
@@ -17,6 +21,11 @@ const StockModule = {
         <input type="text" id="stockKw" placeholder="搜索物料编码、名称、规格..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')StockModule.applyFilter()">
         <button class="search-glass" onclick="StockModule.applyFilter()">🔍 搜索</button>
         <button class="secondary" onclick="StockModule.resetFilter()">重置</button>
+        <!-- 🟢 v198：A3 批量打印二维码（重置/导出之间）
+             默认不渲染勾选列；首次点击进入多选模式（显示勾选框 + 退出按钮），
+             再次点击才真正打印所选。 -->
+        <button class="secondary" id="stockBulkBtn" onclick="StockModule.toggleBulk()">🖨 批量打印二维码</button>
+        <button class="secondary" id="stockBulkExitBtn" style="display:none;" onclick="StockModule.exitBulk()">✖ 退出多选</button>
         <button class="secondary" onclick="StockModule.exportData()">📥 导出</button>
       </div>
 
@@ -81,11 +90,20 @@ const StockModule = {
       return;
     }
 
+    // 🟢 v198：勾选列仅在多选模式下渲染（不渲染 = 真正少一列，避免列折叠/排序按索引错位）
+    const bulk = !!this.bulkMode;
+    // col-checkbox：告诉移动端列折叠「首列是复选框」，折叠时多留一列，避免只剩勾选框
+    const checkTh = bulk
+      ? '<th class="stock-check-th col-checkbox"><input type="checkbox" id="stockSelAll" aria-label="全选当前页"></th>'
+      : '';
+
     area.innerHTML = `
       <div class="table-wrapper">
         <table class="data-table">
           <thead>
             <tr>
+              ${checkTh}
+              <th>二维码</th>
               <th>仓库</th>
               <th>存货编码</th>
               <th>存货名称</th>
@@ -94,15 +112,20 @@ const StockModule = {
             </tr>
           </thead>
           <tbody>
-            ${items.map(s => `
+            ${items.map(s => {
+              const code = String(s.存货编码 ?? '').trim();
+              const checked = code && this.selectedCodes.has(code) ? 'checked' : '';
+              return `
               <tr>
+                ${bulk ? `<td class="col-checkbox"><input type="checkbox" class="stock-row-check" data-stock-code="${esc(code)}" ${checked} aria-label="选择 ${esc(code)}"></td>` : ''}
+                <td>${window.QR ? QR.thumb(code, s.存货名称, s.规格型号) : ''}</td>
                 <td>${esc(s.仓库名称 ?? '')}</td>
                 <td>${TableUtils.link('stock', s.存货编码 ?? '', s.存货编码 ?? '')}</td>
                 <td><strong>${esc(s.存货名称 ?? '')}</strong></td>
                 <td>${esc(s.规格型号 ?? '')}</td>
                 <td><strong style="color:${parseFloat(s.现存数量) < 10 ? 'var(--status-danger)' : 'var(--text-main)'};">${TableUtils.formatNum(s.现存数量)}</strong></td>
-              </tr>
-            `).join('')}
+              </tr>`;
+            }).join('')}
           </tbody>
         </table>
       </div>
@@ -113,6 +136,124 @@ const StockModule = {
 
     TableUtils.initSmartSelect('stockTableArea');
     TableUtils.initSortableHeaders('stockTableArea');
+
+    // 🟢 v197：A3 多选 + 全选 + 计数
+    this._bindBulkSelect();
+  },
+
+  // 🟢 v197：A3 批量打印辅助（多选/全选/计数/打印）
+  // 🟢 v198：非多选模式下表格里没有勾选框，直接跳过绑定
+  _bindBulkSelect() {
+    if (!this.bulkMode) return;
+    const area = document.getElementById('stockTableArea');
+    if (!area) return;
+    const selAll = document.getElementById('stockSelAll');
+    if (selAll) {
+      const pageCodes = [...area.querySelectorAll('.stock-row-check')].map(c => c.getAttribute('data-stock-code'));
+      const allChecked = pageCodes.length > 0 && pageCodes.every(c => c && this.selectedCodes.has(c));
+      selAll.checked = allChecked;
+      selAll.indeterminate = !allChecked && pageCodes.some(c => c && this.selectedCodes.has(c));
+      selAll.onchange = () => {
+        pageCodes.forEach(c => {
+          if (!c) return;
+          if (selAll.checked) this.selectedCodes.add(c);
+          else this.selectedCodes.delete(c);
+        });
+        area.querySelectorAll('.stock-row-check').forEach(b => { b.checked = selAll.checked; });
+        this._updateSelCount();
+      };
+    }
+    area.querySelectorAll('.stock-row-check').forEach(b => {
+      b.onchange = () => {
+        const code = b.getAttribute('data-stock-code');
+        if (!code) return;
+        if (b.checked) this.selectedCodes.add(code);
+        else this.selectedCodes.delete(code);
+        // 同步全选态
+        const all = [...area.querySelectorAll('.stock-row-check')];
+        const checked = all.filter(x => x.checked).length;
+        if (selAll) {
+          selAll.checked = checked === all.length && all.length > 0;
+          selAll.indeterminate = checked > 0 && checked < all.length;
+        }
+        this._updateSelCount();
+      };
+    });
+    this._updateSelCount();
+  },
+
+  _updateSelCount() {
+    const el = document.getElementById('stockSelCount');
+    if (el) el.textContent = '(' + this.selectedCodes.size + ')';
+  },
+
+  // 🟢 v198：切换多选模式 —— 首次点击进入（渲染勾选列 + 显示退出按钮），再次点击执行打印
+  toggleBulk() {
+    if (!this.bulkMode) {
+      this.bulkMode = true;
+      this._setBulkUI();
+      this.renderTable();
+      return;
+    }
+    this.printSelected();
+  },
+
+  // 🟢 v198：退出多选模式（收起勾选列并清空已选）
+  exitBulk() {
+    if (!this.bulkMode) return;
+    this.bulkMode = false;
+    this.selectedCodes = new Set();
+    this._setBulkUI();
+    this.renderTable();
+  },
+
+  // 🟢 v198：刷新批量按钮文案 / 退出按钮显隐 / 计数
+  _setBulkUI() {
+    const btn = document.getElementById('stockBulkBtn');
+    const exitBtn = document.getElementById('stockBulkExitBtn');
+    if (btn) {
+      btn.innerHTML = this.bulkMode
+        ? '🖨 打印所选 <span id="stockSelCount"></span>'
+        : '🖨 批量打印二维码';
+    }
+    if (exitBtn) exitBtn.style.display = this.bulkMode ? '' : 'none';
+    this._updateSelCount();
+  },
+
+  // 清除跨页选择（重置时调用，避免脏数据）
+  clearSelection() {
+    this.selectedCodes = new Set();
+    this._updateSelCount();
+  },
+
+  async printSelected() {
+    const codes = [...this.selectedCodes];
+    if (codes.length === 0) { WBModal.alert('请勾选要打印二维码的存货（点击每行最左侧的复选框）'); return; }
+    if (!window.QR) { WBModal.alert('二维码组件未就绪，请稍后再试'); return; }
+    // 名称/规格优先从当前筛选结果里取（零额外查询）
+    const map = new Map();
+    (this.currentData || []).forEach(s => {
+      const c = String(s.存货编码 ?? '').trim();
+      if (c) map.set(c, { name: s.存货名称 || '', spec: s.规格型号 || '' });
+    });
+    // 🟢 v198：先勾选再筛选 → 当前结果里查不到的编码，回落到全量库存补查
+    const missing = codes.filter(c => !map.has(c));
+    if (missing.length) {
+      try {
+        const all = await DataStore.getStock();
+        const need = new Set(missing);
+        (all || []).forEach(s => {
+          const c = String(s.存货编码 ?? '').trim();
+          if (c && need.has(c) && !map.has(c)) map.set(c, { name: s.存货名称 || '', spec: s.规格型号 || '' });
+        });
+      } catch (_) { /* 补查失败不阻断打印，缺信息时只显示二维码 */ }
+    }
+    // 仍缺信息的编码用空名（打印时只显示二维码）
+    const items = codes.map(code => ({ code, name: (map.get(code) || {}).name || '', spec: (map.get(code) || {}).spec || '' }));
+    window.QR.printBulk(items);
+    // 打印完清空本批选择，保留多选模式，方便接着勾下一批
+    this.selectedCodes = new Set();
+    this.renderTable();
   },
 
   changePageSize(size) {
@@ -130,15 +271,27 @@ const StockModule = {
   resetFilter() {
     this.currentFilter = { keyword: '' };
     this.currentPage = 1;
+    // 🟢 v198：重置时一并退出多选模式并清空已选（只渲染一次，由 loadData 触发）
+    this.bulkMode = false;
+    this.selectedCodes = new Set();
     const input = document.getElementById('stockKw');
     if (input) input.value = '';
+    this._setBulkUI();
     this.loadData();
   },
 
   goPage(p) { this.currentPage = p; this.renderTable(); },
 
   exportData() {
-    // 🟢 O1：统一导出（行为与原逻辑一致）
-    TableUtils.exportToExcel(this.currentData, `现存量_${new Date().toISOString().split('T')[0]}.xlsx`, '现存量');
+    // 🟢 v201：导出仅包含下方数据表格的当前可见列（与 UI 展示一致）
+    //   二维码列在表格里只是缩略图，不导出；列顺序与表头一致：仓库/编码/名称/规格/数量
+    const exportRows = this.currentData.map(s => ({
+      '仓库':     s.仓库名称 ?? '',
+      '存货编码': s.存货编码 ?? '',
+      '存货名称': s.存货名称 ?? '',
+      '规格型号': s.规格型号 ?? '',
+      '现存数量': s.现存数量 ?? ''
+    }));
+    TableUtils.exportToExcel(exportRows, `现存量_${new Date().toISOString().split('T')[0]}.xlsx`, '现存量');
   }
 };

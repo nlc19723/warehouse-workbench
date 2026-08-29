@@ -95,7 +95,7 @@ const App = {
       console.error('应用初始化失败:', err);
       hideLoading();
       try { this.go('dashboard'); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
-      alert('初始化出现异常，已尝试继续加载；如仍空白请刷新重试。\n' + (err && err.message ? err.message : err));
+      WBModal.alert('初始化出现异常，已尝试继续加载；如仍空白请刷新重试。\n' + (err && err.message ? err.message : err));
     }
   },
 
@@ -185,6 +185,10 @@ const App = {
         localStorage.setItem('theme', 'dark');
       }
     });
+
+    // 🟢 v197：顶部扫一扫图标按钮（WebRTC + jsQR → 识别存货编码 → 直达档案页）
+    const qrBtn = document.getElementById('topbarQrScanBtn');
+    if (qrBtn) qrBtn.addEventListener('click', () => { if (window.QRScan) QRScan.open(); });
   },
 
   // ===== 边栏收起/展开 =====

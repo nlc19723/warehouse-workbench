@@ -10,10 +10,12 @@
   <link rel="manifest" href="manifest.json?v=2">
   <meta name="theme-color" content="#357ABD">
   <title>库管系统工作台</title>
-  <link rel="stylesheet" href="css/style.css?v=195">
+  <link rel="stylesheet" href="css/style.css?v=201">
   <script defer src="lib/dexie.min.js?v=55"></script>
   <script defer src="lib/chart.min.js?v=55"></script>
   <script defer src="lib/xlsx.full.min.js?v=55"></script>
+  <script defer src="lib/qrcode.min.js?v=1"></script>
+  <script defer src="lib/jsqr.min.js?v=1"></script>
   <script defer src="lib/supabase.min.js?v=55"></script>
 <!-- M4: 改为 defer，避免外部 CDN 慢/不可达时阻塞整页渲染（白屏）。初始化改在 DOMContentLoaded 后执行，确保 defer 的 beacon 脚本已就绪 -->
 <script defer src="https://beacon.cdn.qq.com/sdk/4.5.9/beacon_web.min.js"></script>
@@ -156,6 +158,16 @@ document.addEventListener('DOMContentLoaded', function(){
           <span class="search-icon">🔍</span>
         </div>
         <div class="top-bar-right">
+          <!-- 🟢 v197：扫一扫图标（WebRTC + jsQR）→ 识别存货编码 → 直达档案页 -->
+          <button class="topbar-qr-scan" id="topbarQrScanBtn" title="扫一扫" aria-label="扫一扫">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 7V5a2 2 0 0 1 2-2h2"></path>
+              <path d="M17 3h2a2 2 0 0 1 2 2v2"></path>
+              <path d="M21 17v2a2 2 0 0 1-2 2h-2"></path>
+              <path d="M7 21H5a2 2 0 0 1-2-2v-2"></path>
+              <line x1="3" y1="12" x2="21" y2="12"></line>
+            </svg>
+          </button>
           <button class="theme-toggle" id="themeToggle" title="切换主题">🌙</button>
           <span class="current-time" id="currentTime">--:--</span>
           <div class="sync-status" id="syncStatus" title="点击配置云端同步">
@@ -267,33 +279,37 @@ document.addEventListener('DOMContentLoaded', function(){
   </div>
 
   <script defer src="lib/jszip.min.js?v=1"></script>
-  <script defer src="js/table-utils.js?v=182"></script>
+  <script defer src="js/table-utils.js?v=199"></script>
+  <script defer src="js/qr-util.js?v=1"></script>
+  <script defer src="js/qr-scan.js?v=198"></script>
   <script defer src="js/search-select.js?v=182"></script>
   <script defer src="js/entity-links.js?v=182"></script>
-  <script defer src="js/db.js?v=182"></script>
-  <script defer src="js/config.js?v=194"></script>
+  <script defer src="js/db.js?v=201"></script>
+  <script defer src="js/config.js?v=198"></script>
+  <!-- 🟢 v200：工作台主题弹窗（替换浏览器原生 alert/confirm/prompt） -->
+  <script defer src="js/modal.js?v=200"></script>
   <script defer src="js/sync.js?v=182"></script>
   <script defer src="js/data-loader.js?v=186"></script>
   <script defer src="js/dashboard.js?v=182"></script>
   <script defer src="js/supplier.js?v=182"></script>
   <script defer src="js/query.js?v=182"></script>
   <script defer src="js/reconciliation.js?v=182"></script>
-  <script defer src="js/order-track.js?v=182"></script>
+  <script defer src="js/order-track.js?v=199"></script>
   <script defer src="js/inventory-alert.js?v=182"></script>
-  <script defer src="js/order-check.js?v=182"></script>
+  <script defer src="js/order-check.js?v=199"></script>
   <script defer src="js/components/datepicker.js?v=182"></script>
   <script defer src="js/orders.js?v=182"></script>
   <script defer src="js/inbound.js?v=182"></script>
-  <script defer src="js/stock.js?v=182"></script>
+  <script defer src="js/stock.js?v=198"></script>
   <script defer src="js/pricing.js?v=182"></script>
   <script defer src="js/low-turnover.js?v=182"></script>
   <script defer src="js/breach.js?v=182"></script>
-  <script defer src="js/outbound.js?v=182"></script>
-  <script defer src="js/stock-detail.js?v=182"></script>
+  <script defer src="js/outbound.js?v=199"></script>
+  <script defer src="js/stock-detail.js?v=198"></script>
   <script defer src="js/supplier-detail.js?v=182"></script>
   <script defer src="js/order-detail.js?v=182"></script>
   <script defer src="js/color-theme.js?v=182"></script>
-  <script defer src="js/app.js?v=182"></script>
+  <script defer src="js/app.js?v=198"></script>
   <!-- PWA: 注册 Service Worker（支持离线 + 安装为桌面应用） -->
   <script>
     if ('serviceWorker' in navigator) {

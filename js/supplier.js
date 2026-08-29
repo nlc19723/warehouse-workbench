@@ -421,7 +421,7 @@ const SupplierModule = {
 
   async exportData() {
     const suppliers = await DataStore.getSuppliers();
-    if (suppliers.length === 0) { alert('没有数据可导出'); return; }
+    if (suppliers.length === 0) { WBModal.alert('没有数据可导出'); return; }
     this.exportToExcel(suppliers, '供应商管理');
   },
 

@@ -596,14 +596,19 @@ const DataStore = {
         }
         return false;
       }).toArray();
-      // 🟢 O8：编码/规格双路均未命中时，按「存货名称」精确兜底（编码或规格缺失场景仍能关联）
+      // 🟢 v201 + O8：编码/规格双路均未命中时，按「存货名称」精确兜底（编码或规格缺失场景仍能关联）
+      //   🐛 修复：兜底**必须要求订单的「存货编号」为空**——否则会把"有编号 + 名称相同但规格不同"
+      //         的不同物料（如同名不同规格的"三通 100" / "三通 80"）误关到本档案。
+      //   修复后兜底仅在"订单完全缺编号"场景生效，主路已经覆盖了"有编号+有名称有规格"的关联。
       let matched = rows;
       if (matched.length === 0 && name) {
         const n = name.replace(/\s+/g, '');
         if (n) {
           matched = await db.orders.filter(o => {
             const oname = String(o.存货名称 || '').replace(/\s+/g, '');
-            return oname && oname === n;
+            const onum  = o.存货编号 == null ? '' : String(o.存货编号).trim();
+            // v201 修复：必须有"名称完全相等" + "存货编号为空" 才兜底
+            return oname && oname === n && !onum;
           }).toArray();
         }
       }

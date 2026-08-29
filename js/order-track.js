@@ -177,7 +177,8 @@ const OrderTrackModule = {
                       <div class="progress-bar" style="width:70px;">
                         <div class="progress-fill ${progressClass}" style="width:${percent}%;"></div>
                       </div>
-                      <span style="font-size:11px;color:var(--text-secondary);min-width:36px;">${percent}%</span>
+                      <!-- 🟢 v199：去掉内联 font-size:11px，跟随单元格统一字号 -->
+                      <span style="color:var(--text-secondary);min-width:36px;">${percent}%</span>
                     </div>
                   </td>
                 <td>${TableUtils.formatMoney(o.未入总金额)}</td>

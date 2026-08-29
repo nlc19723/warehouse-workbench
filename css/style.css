@@ -1001,6 +1001,34 @@ body::after {
 .data-table tbody tr:nth-child(odd) { background: rgba(255,255,255,0.45); }
 .data-table tbody tr:hover { background: rgba(122,156,165,0.08) !important; }
 
+/* =========================================================================
+   🟢 v199：表格字号全局统一（PC 与移动端共用同一套约束）
+   背景：v198 只在移动端媒体查询里做了统一，PC 端仍是「各写各的」——
+     · .th-sort-label 硬编码 13.5px，压过表头自身的 12.5px；
+     · table-utils.js 渲染的部分表头内联 font-size:13px；
+     · 订单跟踪进度百分比 <span style="font-size:11px">、出库明细 11.5px、
+       序号列 12px …… 同一行内多字号并存，看着就「大小不一」。
+   方案：把 v198 的移动端规则上提为「全局基线」，移动端再在其上做数值覆盖：
+     · 全局（PC）：表头 12.5px / 数据行 12px —— 就是改动前的既有值，零视觉变化；
+     · 移动端：由文件末尾 @media (max-width:768px) 块覆盖为 表头 12px / 数据行 12.5px；
+     · 两者都强制「单元格内所有非表单后代 font-size:inherit」，
+       从根上消灭内联字号造成的不一致。
+   表单控件（input/select/textarea/button）排除在外：
+     需保持 ≥16px 以防 iOS 聚焦时页面缩放，且 🗑 等操作图标不该被压小。
+   ========================================================================= */
+/* 表头行：统一 13px（永远比数据行大 1 号） */
+.data-table thead th { font-size: 13px !important; }
+/* 数据行：统一 12px */
+.data-table tbody td { font-size: 12px !important; }
+/* 排序标签：干掉 13.5px 硬编码，改跟随所在表头（含 ↑ ↓ 箭头伪元素） */
+.data-table thead th .th-sort-label,
+.data-table thead th .th-sort-label::before,
+.data-table thead th .th-sort-label::after { font-size: inherit !important; }
+/* 单元格内所有非表单后代：一律跟随所在单元格字号 */
+.data-table thead th *:not(input):not(select):not(textarea):not(button),
+.data-table tbody td *:not(input):not(select):not(textarea):not(button) {
+  font-size: inherit !important;
+}
 
 /* ========== 筛选栏 ========== */
 .filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; align-items: center; }
@@ -1877,7 +1905,9 @@ body::after {
 /* ========== Excel式表头排序/筛选（Premium 升级版）========== */
 /* 🟢 v185：背景/阴影/文字同步 D' 冰川蓝渐变，避免覆盖主规则效果 */
 .data-table thead th {
-  font-size: 13px !important;
+  /* 🟢 v199：删除此处的 font-size:13px —— 它带 !important 且位于全局统一规则之后，
+     会把所有表头钉死在 13px，导致与「表格字号全局统一」规则打架。
+     表头字号现统一由 v199 全局块（表头 12.5px）/ 移动端块（12px）控制。 */
   font-weight: 700 !important;
   color: #ffffff !important;
   text-align: center;  /* 🟢 v113：默认居中（无 !important，允许用户对齐偏好 inline 覆盖） */
@@ -1895,6 +1925,9 @@ body::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* ⚠️ 保留说明：在 .data-table 内，此字号会被 v199 全局块的
+     「.data-table thead th .th-sort-label { font-size: inherit !important; }」覆盖，
+     跟随所在表头（PC 12.5px / 移动端 12px）。此处的值只对非表格场景生效，勿再调大。 */
   font-size: 13.5px;
   font-weight: 600;
   color: #1a202c;
@@ -1944,8 +1977,9 @@ body::after {
 .detail-recent .crumb.current { background: var(--primary, #4a7ce8); color: #fff; cursor: default; }
 .detail-section { margin-bottom: 18px; }
 .detail-section h3 {
-  font-size: 14px; margin: 0 0 8px; color: var(--text-main, #1a202c);
+  font-size: 14px; margin: 0 0 14px; color: var(--text-main, #1a202c);
   display: flex; align-items: center; gap: 8px;
+  padding-top: 4px;
 }
 .detail-section h3 .count { font-size: 12px; color: var(--text-secondary, #718); font-weight: 400; }
 
@@ -1990,6 +2024,128 @@ body::after {
 }
 [data-theme="dark"] .detail-section .detail-kv .k { color: #94A3B8; }
 [data-theme="dark"] .detail-section .detail-kv .v { color: #E2E8F0; }
+
+/* 🟢 A1：档案页存货二维码卡片（编码纯文本 = 存货编码；离线生成，零存储） */
+.qr-card { margin-bottom: 18px; }
+.qr-card h3 { font-size: 14px; margin: 0 0 8px; color: var(--text-main, #1a202c);
+  display: flex; align-items: center; gap: 8px; }
+
+/* 🟢 v197：PC 端基础信息 + 二维码卡片并排（移动端回退为上下堆叠） */
+.detail-base-qr-row { display: flex; flex-direction: column; gap: 12px; }
+@media (min-width: 769px) {
+  /* 🟢 v201：白框（.detail-grid / .qr-body）上下红线严格对齐。
+     你的需求：「二维码外部白框的上下边与基础信息白框的上下边齐平高度」。
+     核心做法 —— h3 标题脱离文档流浮在白框外（不占高度），
+     让两个 section 在 align-items:stretch 下自然等高，两个白框的
+     top/bottom 即像素级一致。 */
+  .detail-base-qr-row { flex-direction: row; align-items: stretch; }
+  /* 基础信息：占左侧剩余空间；用 position:relative 让 h3 浮在上方 */
+  .detail-base-qr-row > .detail-section { flex: 1 1 auto; min-width: 0;
+    position: relative; }
+  /* QR 卡片：宽度按内容走；同样 relative 让 h3 浮在上方 */
+  .detail-base-qr-row > .qr-card {
+    flex: 0 0 auto; min-width: 0; width: fit-content; max-width: 420px;
+    position: relative;
+  }
+  /* 两个白框：高度填满各自 section（由 stretch 自动同步） */
+  .detail-base-qr-row .detail-section-base .detail-grid { height: 100%; }
+  .detail-base-qr-row .qr-card .qr-body { height: 100%; }
+  /* h3 标题：脱离文档流，浮在白框上沿外 2px（不顶白框） */
+  .detail-base-qr-row .detail-section-base > h3,
+  .detail-base-qr-row .qr-card > h3 {
+    position: absolute; left: 18px; top: -22px; margin: 0;
+    background: transparent; z-index: 1;
+  }
+}
+.qr-body { display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+  padding: 14px 18px; background: var(--card-bg, rgba(255,255,255,0.7));
+  border: 1px solid var(--card-border, rgba(226,232,240,0.6));
+  border-radius: var(--radius-md, 16px);
+  box-shadow: var(--card-shadow, 0 4px 24px rgba(31,38,135,0.06)); }
+/* 二维码必须白底黑块，深色主题下也不变色，否则扫描失效 */
+.qr-img { width: 132px; height: 132px; flex: 0 0 auto; background: #fff;
+  border-radius: 10px; padding: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+.qr-img svg { display: block; width: 100%; height: 100%; }
+.qr-meta { display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
+.qr-meta .qr-name { font-size: 15px; font-weight: 700; color: var(--text-main, #1E293B); }
+.qr-meta .qr-code { font-size: 13px; color: var(--text-muted, #94A3B8); }
+.qr-meta .qr-spec { font-size: 13px; color: var(--text-secondary, #64748B); }
+.qr-actions { display: flex; gap: 8px; margin-top: 8px; }
+.qr-actions .btn-secondary { font-size: 12px; padding: 6px 12px; }
+[data-theme="dark"] .qr-img { background: #fff; }
+[data-theme="dark"] .qr-body { background: rgba(30,41,59,0.5); border-color: rgba(51,65,85,0.4); }
+[data-theme="dark"] .qr-meta .qr-name { color: #E2E8F0; }
+
+/* 🟢 A2：现存量列表缩略二维码（仅展示索引，点击弹大图；D2 不提供跳转） */
+.qr-thumb { display: inline-block; width: 34px; height: 34px; padding: 3px;
+  background: #fff; border-radius: 5px; cursor: pointer; vertical-align: middle;
+  box-shadow: 0 1px 4px rgba(0,0,0,.12); transition: transform .15s; }
+.qr-thumb:hover { transform: scale(1.12); }
+.qr-thumb svg { display: block; width: 100%; height: 100%; }
+.qr-thumb-empty { background: transparent; box-shadow: none; cursor: default;
+  color: var(--text-muted, #94A3B8); text-align: center; line-height: 34px; }
+/* 弹窗大图：≥200px 保证可扫（D1） */
+.qr-modal { position: fixed; inset: 0; background: rgba(15,23,42,.62);
+  display: flex; align-items: center; justify-content: center; z-index: 9999; }
+.qr-modal-box { background: var(--card-bg, #fff); border-radius: 14px; padding: 20px 24px;
+  text-align: center; box-shadow: 0 12px 40px rgba(0,0,0,.28); max-width: 92vw; }
+.qr-modal-head { font-size: 16px; font-weight: 700; color: var(--text-main, #1E293B); margin-bottom: 4px; }
+.qr-modal-img { width: 220px; height: 220px; margin: 10px auto; background: #fff;
+  border-radius: 10px; padding: 12px; }
+.qr-modal-img svg { display: block; width: 100%; height: 100%; }
+.qr-modal-meta { font-size: 13px; color: var(--text-secondary, #64748B); }
+.qr-modal-actions { display: flex; gap: 8px; justify-content: center; margin-top: 14px; }
+.qr-modal-actions .btn-secondary { font-size: 12px; padding: 6px 14px; cursor: pointer; }
+[data-theme="dark"] .qr-modal-box { background: rgba(30,41,59,.96); }
+[data-theme="dark"] .qr-modal-head { color: #E2E8F0; }
+
+/* 🟢 C：扫一扫覆盖层（WebRTC 取流 + 取景框） */
+.qr-scan-overlay { position: fixed; inset: 0; z-index: 10000;
+  background: #000; display: flex; align-items: center; justify-content: center; }
+.qr-scan-video { position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; background: #000; }
+.qr-scan-mask { position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; pointer-events: none; }
+.qr-scan-frame { position: relative; width: 62vw; max-width: 300px; height: 62vw;
+  max-height: 300px; border-radius: 12px; overflow: hidden;
+  box-shadow: 0 0 0 2000px rgba(0,0,0,.45); }
+.qr-corner { position: absolute; width: 26px; height: 26px; border: 3px solid #2fd4c4; }
+.qr-corner.tl { top: 0; left: 0; border-right: none; border-bottom: none; border-radius: 10px 0 0 0; }
+.qr-corner.tr { top: 0; right: 0; border-left: none; border-bottom: none; border-radius: 0 10px 0 0; }
+.qr-corner.bl { bottom: 0; left: 0; border-right: none; border-top: none; border-radius: 0 0 0 10px; }
+.qr-corner.br { bottom: 0; right: 0; border-left: none; border-top: none; border-radius: 0 0 10px 0; }
+.qr-scan-line { position: absolute; left: 6%; right: 6%; top: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, #2fd4c4, transparent);
+  animation: qrScanSweep 2.2s ease-in-out infinite; }
+@keyframes qrScanSweep {
+  0%   { top: 4%; opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { top: 96%; opacity: 0; }
+}
+.qr-scan-tip { position: absolute; top: calc(50% - 62vw/2 - 52px); left: 0; right: 0;
+  text-align: center; color: #fff; font-size: 14px; padding: 0 20px;
+  text-shadow: 0 1px 4px rgba(0,0,0,.8); z-index: 2; }
+@media (min-width: 484px) { .qr-scan-tip { top: calc(50% - 150px - 52px); } }
+.qr-scan-bottom { position: absolute; left: 0; right: 0; bottom: 42px;
+  display: flex; justify-content: center; z-index: 2; }
+.qr-scan-cancel { background: rgba(255,255,255,.16); color: #fff; border: 1px solid rgba(255,255,255,.35);
+  border-radius: 999px; padding: 10px 30px; font-size: 15px; cursor: pointer; backdrop-filter: blur(6px); }
+.qr-scan-cancel:active { transform: scale(.96); }
+
+/* 🟢 v197：顶部扫一扫图标按钮（徽章右、主题切换左） */
+.topbar-qr-scan { display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; border: 1px solid var(--card-border, rgba(226,232,240,0.6));
+  background: var(--card-bg, rgba(255,255,255,0.7)); color: var(--text-main, #1E293B);
+  border-radius: 10px; cursor: pointer; padding: 0; margin: 0 4px;
+  transition: transform .15s, background .15s, border-color .15s; }
+.topbar-qr-scan:hover { background: rgba(47,212,196,.12); border-color: rgba(47,212,196,.45);
+  color: #1c9e96; transform: translateY(-1px); }
+.topbar-qr-scan:active { transform: translateY(0) scale(.95); }
+[data-theme="dark"] .topbar-qr-scan { background: rgba(30,41,59,0.5); border-color: rgba(51,65,85,0.5);
+  color: #E2E8F0; }
+[data-theme="dark"] .topbar-qr-scan:hover { background: rgba(47,212,196,.15); border-color: rgba(47,212,196,.5);
+  color: #39e0d0; }
 
 /* 详情页头部（编码/名称/导航按钮）*/
 .detail-header { margin-bottom: 16px; }
@@ -2714,6 +2870,9 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .detail-section > summary:active { opacity: .7; }
 
 @media (max-width: 768px) {
+  /* 🟢 v198：移动端隐藏顶部版本号徽章（灵动岛/窄屏空间紧张），PC 端照常显示 */
+  #appVersionBadge { display: none !important; }
+
   /* ① 输入聚焦不再触发 iOS 整页缩放：表单/筛选/表格内控件字号≥16px、触控≥44px */
   .filter-bar input,
   .filter-bar select,
@@ -2811,35 +2970,57 @@ body.col-resizing { cursor: col-resize; user-select: none; }
     -webkit-touch-callout: none !important;
   }
 
-  /* 🟢 v195：移动端表头/数据行字号统一 — 折叠态与展开态一致
-     桌面端保留 v185 冰川蓝渐变表头(13px/700)；窄屏下表头与数据行字号统一到 12.5px / 500，
-     去掉 letter-spacing 与 text-shadow，收窄 padding 至 8×10，视觉上与数据行密度对齐。 */
+  /* 🟢 v198：移动端表格字号统一（表头行 / 数据行"分别"统一，跨列、折叠态与展开态一致）
+     为什么 v195 没修干净：v195 只强制了 th/td 本身，单元格里的内联字号不受约束——
+     订单跟踪/供应商的进度百分比 <span style="font-size:11px">、各模块的 <strong>、
+     进度条文案等各写各的，于是同一行里 A 列 12.5px、B 列 11px，看起来"字号不一样"。
+     方案：
+       ① 表头行统一 12px / 600；数据行统一 12.5px / 400（表头略小更清爽，且不再"大号"）；
+       ② 单元格内所有非表单后代 font-size:inherit —— 不管 JS 写了什么内联字号，
+          一律跟随所在单元格，从根本上保证同一行内完全一致；
+       ③ 表单控件（input/select/textarea/button）排除在外：保持 ≥16px 防止 iOS 聚焦缩放，
+          且 🗑 等操作按钮图标不该被压小。 */
+  /* 表格根字号（.th-sort-label 不在此列 —— 它是 th 内的 span，交给下方继承规则统一为 12px）
+     🟢 v199：末尾补上通用 .data-table 项，覆盖不在上述 4 个 wrapper 内的表格
+     （如订单跟踪、档案页子表等），保证移动端「所有」表格字号一致 */
   .table-wrapper .data-table,
-  .table-wrapper .data-table thead th,
-  .table-wrapper .data-table tbody td,
-  .table-wrapper .data-table .th-sort-label,
   .ob-list-table-wrapper .data-table,
-  .ob-list-table-wrapper .data-table thead th,
-  .ob-list-table-wrapper .data-table tbody td,
-  .ob-list-table-wrapper .data-table .th-sort-label,
   .oc-entry-table-wrapper .data-table,
-  .oc-entry-table-wrapper .data-table thead th,
-  .oc-entry-table-wrapper .data-table tbody td,
-  .oc-entry-table-wrapper .data-table .th-sort-label,
   .ob-entry-table-wrapper .data-table,
-  .ob-entry-table-wrapper .data-table thead th,
-  .ob-entry-table-wrapper .data-table tbody td,
-  .ob-entry-table-wrapper .data-table .th-sort-label {
+  .data-table {
     font-size: 12.5px !important;
-    font-weight: 500 !important;
   }
   .table-wrapper .data-table thead th,
   .ob-list-table-wrapper .data-table thead th,
   .oc-entry-table-wrapper .data-table thead th,
-  .ob-entry-table-wrapper .data-table thead th {
+  .ob-entry-table-wrapper .data-table thead th,
+  .data-table thead th {
+    font-size: 12.5px !important;
+    font-weight: 600 !important;
     padding: 8px 10px !important;
     letter-spacing: 0 !important;
     text-shadow: none !important;
+  }
+  .table-wrapper .data-table tbody td,
+  .ob-list-table-wrapper .data-table tbody td,
+  .oc-entry-table-wrapper .data-table tbody td,
+  .ob-entry-table-wrapper .data-table tbody td,
+  .data-table tbody td {
+    font-size: 12px !important;
+    font-weight: 400 !important;
+  }
+  /* 单元格内所有后代（span / strong / div / a / b / small / i …）跟随单元格字号 */
+  .table-wrapper .data-table thead th *:not(input):not(select):not(textarea):not(button),
+  .table-wrapper .data-table tbody td *:not(input):not(select):not(textarea):not(button),
+  .ob-list-table-wrapper .data-table thead th *:not(input):not(select):not(textarea):not(button),
+  .ob-list-table-wrapper .data-table tbody td *:not(input):not(select):not(textarea):not(button),
+  .oc-entry-table-wrapper .data-table thead th *:not(input):not(select):not(textarea):not(button),
+  .oc-entry-table-wrapper .data-table tbody td *:not(input):not(select):not(textarea):not(button),
+  .ob-entry-table-wrapper .data-table thead th *:not(input):not(select):not(textarea):not(button),
+  .ob-entry-table-wrapper .data-table tbody td *:not(input):not(select):not(textarea):not(button),
+  .data-table thead th *:not(input):not(select):not(textarea):not(button),
+  .data-table tbody td *:not(input):not(select):not(textarea):not(button) {
+    font-size: inherit !important;
   }
 
   /* 🟢 v139：列折叠——被折叠的列隐藏 */

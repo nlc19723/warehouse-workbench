@@ -229,7 +229,7 @@ const OutboundModule = {
     rows.forEach((r, idx) => {
       html += `
         <tr data-row="${idx}">
-          <td style="text-align:center;font-size:12px;color:var(--text-muted);">${idx + 1}</td>
+          <td style="text-align:center;color:var(--text-muted);">${idx + 1}</td>
           <td style="position:relative;">
             <input type="text" class="ob-code-input ob-input" placeholder="输入编码联想..."
               value="${r.存货编码 || ''}"
@@ -521,7 +521,7 @@ const OutboundModule = {
     const tr = document.createElement('tr');
     tr.dataset.row = newRowIdx;
     tr.innerHTML = `
-      <td style="text-align:center;font-size:12px;color:var(--text-muted);">${newRowIdx + 1}</td>
+      <td style="text-align:center;color:var(--text-muted);">${newRowIdx + 1}</td>
       <td style="position:relative;">
         <input type="text" class="ob-code-input ob-input" placeholder="输入编码联想..."
           data-row="${newRowIdx}" autocomplete="off"
@@ -849,7 +849,7 @@ const OutboundModule = {
         if (!headerNo) { this.showMsg('❌ 请先指定要删除的出库单号', true); return; }
         const cnt = await db.outbound.where('出库单号').equals(headerNo).count();
         if (cnt === 0) { this.showMsg(`❌ 出库单号 "${headerNo}" 不存在`, true); return; }
-        if (!confirm(`确定要删除出库单 "${headerNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`)) return;
+        if (!await WBModal.confirm(`确定要删除出库单 "${headerNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
         await db.outbound.where('出库单号').equals(headerNo).delete();
         this.showMsg(`✅ 已删除出库单 "${headerNo}"（${cnt} 条明细）`);
         this._syncOutboundToCloud();   // ← 增量同步 outbound 表
@@ -859,7 +859,7 @@ const OutboundModule = {
 
       const cnt = await db.outbound.where('出库单号').equals(orderNo).count();
       if (cnt === 0) { this.showMsg(`❌ 出库单号 "${orderNo}" 不存在`, true); return; }
-      if (!confirm(`确定要删除出库单 "${orderNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`)) return;
+      if (!await WBModal.confirm(`确定要删除出库单 "${orderNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
 
       await db.outbound.where('出库单号').equals(orderNo).delete();
       this.showMsg(`✅ 已删除出库单 "${orderNo}"（${cnt} 条明细）`);
@@ -1129,9 +1129,10 @@ const OutboundListModule = {
                 <td style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escAttr(item.项目名称 || '')}">${esc(item.项目名称 ?? '')}</td>
                 <td class="ob-td-center">${esc(item.领用人员 ?? '')}</td>
                 <td class="ob-td-center">${esc(item.出库时间 ?? '')}</td>
-                <td class="ob-td-center" style="font-family:monospace;font-size:11.5px;">${TableUtils.link('stock', item.存货编码 ?? '', item.存货编码 ?? '')}</td>
-                <td class="ob-td-center" style="font-size:11.5px;" title="${escAttr(item.存货名称 || '')}"><strong>${esc(item.存货名称 ?? '')}</strong></td>
-                <td class="ob-td-center" style="font-size:11.5px;">${esc(item.规格型号 ?? '')}</td>
+                <!-- 🟢 v199：去掉内联 font-size:11.5px，三列字号跟随单元格统一（monospace 保留） -->
+                <td class="ob-td-center" style="font-family:monospace;">${TableUtils.link('stock', item.存货编码 ?? '', item.存货编码 ?? '')}</td>
+                <td class="ob-td-center" title="${escAttr(item.存货名称 || '')}"><strong>${esc(item.存货名称 ?? '')}</strong></td>
+                <td class="ob-td-center">${esc(item.规格型号 ?? '')}</td>
                 <td class="ob-td-center" style="font-weight:600;">${item.出库数量 != null ? parseFloat(item.出库数量).toLocaleString('zh-CN',{maximumFractionDigits:2}) : ''}</td>
               </tr>
             `).join('')}

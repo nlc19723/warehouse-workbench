@@ -162,7 +162,9 @@ const TableStickyOverlay = {
     cloneTable.innerHTML = '<thead><tr>' + ths.map((th, i) => {
       const w = th.offsetWidth;
       const text = th.textContent.trim();
-      return `<th data-col="${i}" style="width:${w}px;min-width:${w}px;padding:8px 12px;font-size:13px;font-weight:600;text-align:left;">${esc(text)}</th>`;
+      // 🟢 v199：去掉内联 font-size:13px —— 浮动表头字号改由 style.css 的
+      // 「表格字号全局统一」规则统一控制，避免与正文表格字号不一致
+      return `<th data-col="${i}" style="width:${w}px;min-width:${w}px;padding:8px 12px;font-weight:600;text-align:left;">${esc(text)}</th>`;
     }).join('') + '</tr></thead>';
     wrap.appendChild(cloneTable);
     wrap.style.cssText = `position:fixed;top:0;left:0;z-index:9999;display:none;background:var(--thead-bg,#f1f5f9);border-bottom:2px solid rgba(0,0,0,0.3);box-shadow:0 4px 10px rgba(0,0,0,0.22);pointer-events:none;user-select:none;-webkit-user-select:none;height:${theadH}px;overflow:hidden;`;
@@ -205,7 +207,11 @@ const TableStickyOverlay = {
     const ths = table.querySelectorAll('thead th');
     const colCount = ths.length;
     const btn = wrap._colCollapseBtn;
-    const keepMin = Math.min(2, colCount - 1); // 🟢 v144：移动端一律保留前 2 列（序号 + 主数据列）
+    // 🟢 v144：移动端一律保留前 2 列（序号 + 主数据列）
+    // 🟢 v198：首列若是复选框列（现存量「批量打印二维码」多选模式），保留列数 +1，
+    //   否则折叠后只剩「勾选框 + 二维码」，用户看不出自己勾的是哪个存货。
+    const hasCheckCol = !!table.querySelector('thead th.col-checkbox');
+    const keepMin = Math.min(2 + (hasCheckCol ? 1 : 0), Math.max(1, colCount - 1));
 
     // 重置：所有列显示；表格恢复原始 table-layout（多数模块在 inline style 写 fixed，宽列拖拽需要它）
     table.querySelectorAll('thead th, tbody td, tfoot td').forEach(c => c.classList.remove('col-collapsed'));
@@ -1723,7 +1729,7 @@ const TableUtils = {
 
   // 统一 Excel 导出（O1 去重）：rows 为空时提示并返回，行为与原各模块一致
   exportToExcel(rows, filename, sheetName) {
-    if (!rows || !rows.length) { alert('没有数据'); return; }
+    if (!rows || !rows.length) { WBModal.alert('没有数据'); return; }
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, sheetName || '数据');

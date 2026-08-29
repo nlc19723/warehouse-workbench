@@ -298,12 +298,12 @@ const DataLoader = {
   // 返回 true 表示成功恢复；false 表示无上一份数据
   async restorePrevWork() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
-      alert('请先连接云端后再恢复上一份数据');
+      WBModal.alert('请先连接云端后再恢复上一份数据');
       return false;
     }
     const bundle = await SyncManager.pullDataPrivate();
     if (!bundle || !bundle.prevWork || !bundle.prevWork.tables) {
-      alert('云端没有可恢复的上一份数据。\n\n原因：上一份数据只在「两次及以上导入/上传」后才存在。\n如果你只导入过一次，或上一份已被恢复过，就没有可恢复的版本。\n\n如需回到更早的数据，请改用「🔄 重新导入基准」（需先「标记为基准」）。');
+      WBModal.alert('云端没有可恢复的上一份数据。\n\n原因：上一份数据只在「两次及以上导入/上传」后才存在。\n如果你只导入过一次，或上一份已被恢复过，就没有可恢复的版本。\n\n如需回到更早的数据，请改用「🔄 重新导入基准」（需先「标记为基准」）。');
       return false;
     }
     try {
@@ -316,17 +316,17 @@ const DataLoader = {
         prevWork: null
       };
       const ok = await SyncManager.pushData(restored);
-      if (!ok) { alert('恢复失败：云端写入异常'); return false; }
+      if (!ok) { WBModal.alert('恢复失败：云端写入异常'); return false; }
       // 拉取回本地，覆盖当前工作数据
       await this._applyBundleToLocal(restored);
       hideLoading();
-      alert('✅ 已恢复上一份工作数据（' + (bundle.prevWork.savedAt ? new Date(bundle.prevWork.savedAt).toLocaleString('zh-CN') : '未知时间') + '）');
+      WBModal.alert('✅ 已恢复上一份工作数据（' + (bundle.prevWork.savedAt ? new Date(bundle.prevWork.savedAt).toLocaleString('zh-CN') : '未知时间') + '）');
       if (typeof App !== 'undefined' && App.currentModule) App.go(App.currentModule);
       return true;
     } catch (e) {
       hideLoading();
       console.error('恢复上一份失败:', e);
-      alert('恢复失败：' + (e.message || e));
+      WBModal.alert('恢复失败：' + (e.message || e));
       return false;
     }
   },
@@ -347,11 +347,11 @@ const DataLoader = {
   // 与 data.json（工作数据）分离，作为系统固定底账
   async markCurrentAsBase() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
-      alert('请先连接云端后再标记基准数据');
+      WBModal.alert('请先连接云端后再标记基准数据');
       return false;
     }
     if (!(await this._allCoreTablesPopulated())) {
-      alert('当前存在空表，无法标记为基准（基准必须完整）');
+      WBModal.alert('当前存在空表，无法标记为基准（基准必须完整）');
       return false;
     }
     let ok = false;
@@ -371,16 +371,16 @@ const DataLoader = {
       ok = await SyncManager.pushBase(bundle);
     } catch (e) {
       console.error('标记基准失败:', e);
-      alert('标记基准失败：' + (e.message || e));
+      WBModal.alert('标记基准失败：' + (e.message || e));
       return false;
     } finally {
       hideLoading();
     }
     if (ok) {
       const savedAt = new Date().toLocaleString('zh-CN');
-      alert('✅ 基准数据已备份到云端（base.json）\n\n时间：' + savedAt + '\n\n说明：此操作仅把当前工作台数据「复制一份」到云端作为系统底账，\n本地现有数据完全不受影响、不会被移动或清空。\n后续空库/新设备打开时，才会自动以这份基准打底。');
+      WBModal.alert('✅ 基准数据已备份到云端（base.json）\n\n时间：' + savedAt + '\n\n说明：此操作仅把当前工作台数据「复制一份」到云端作为系统底账，\n本地现有数据完全不受影响、不会被移动或清空。\n后续空库/新设备打开时，才会自动以这份基准打底。');
     } else {
-      alert('❌ 基准数据上传失败\n\n请检查网络连接或 Supabase 存储桶权限（需开启 anon 可写）。');
+      WBModal.alert('❌ 基准数据上传失败\n\n请检查网络连接或 Supabase 存储桶权限（需开启 anon 可写）。');
     }
     return ok;
   },
@@ -444,7 +444,7 @@ const DataLoader = {
       console.error('数据导入失败:', err);
       hideLoading();
       // 🟡 M6：首次启动无数据兜底 —— 给出明确引导而非静默 alert
-      alert('数据导入失败：' + err.message + '\n\n请先通过「导入 Excel」上传数据文件，或在设置中配置云端同步（Supabase）后再试。');
+      WBModal.alert('数据导入失败：' + err.message + '\n\n请先通过「导入 Excel」上传数据文件，或在设置中配置云端同步（Supabase）后再试。');
       return false;
     }
   },
@@ -455,7 +455,7 @@ const DataLoader = {
     try {
       if (typeof SyncManager !== 'undefined') SyncManager.init();
       if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
-        alert('云端未连接：请先在「设置」中配置 Supabase 同步，或改用「上传 Excel 导入」。');
+        WBModal.alert('云端未连接：请先在「设置」中配置 Supabase 同步，或改用「上传 Excel 导入」。');
         return false;
       }
       showLoading('正在从云端同步数据...', { variant:'capsule' });
@@ -477,12 +477,12 @@ const DataLoader = {
         return true;
       }
       hideLoading();
-      alert('云端暂无可用的完整数据（data.json / base.json 均缺失或不完整）。\n请改用「上传 Excel 导入」，或先在别的设备把数据「同步到云端」。');
+      WBModal.alert('云端暂无可用的完整数据（data.json / base.json 均缺失或不完整）。\n请改用「上传 Excel 导入」，或先在别的设备把数据「同步到云端」。');
       return false;
     } catch (e) {
       hideLoading();
       console.error('[data-loader] forceSyncFromCloud 失败:', e);
-      alert('从云端同步失败：' + (e && e.message ? e.message : e));
+      WBModal.alert('从云端同步失败：' + (e && e.message ? e.message : e));
       return false;
     }
   },
@@ -621,7 +621,7 @@ const DataLoader = {
   // 与"重新导入基准"不同：这里拉的是最新工作数据（含 prevWork 滚动链），不是基准底账
   async restoreFromCloudWork() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
-      alert('请先连接云端后再恢复工作数据');
+      WBModal.alert('请先连接云端后再恢复工作数据');
       return false;
     }
     try {
@@ -629,11 +629,11 @@ const DataLoader = {
       const bundle = await SyncManager.pullData();
       if (!bundle || !bundle.tables || !this._isBundleComplete(bundle)) {
         hideLoading();
-        alert('云端工作数据缺失或不完整，无法恢复。\n请改用「📤 上传 Excel 导入」或「🔄 重新导入基准」。');
+        WBModal.alert('云端工作数据缺失或不完整，无法恢复。\n请改用「📤 上传 Excel 导入」或「🔄 重新导入基准」。');
         return false;
       }
       const supplierCnt = (bundle.tables.suppliers || []).length;
-      if (!window.confirm('⚠ 此操作将「清空本地全部工作数据」，并用云端最新工作数据（' + supplierCnt + ' 家供应商）完全替换。\n\n确定要继续吗？')) {
+      if (!await WBModal.confirm('⚠ 此操作将「清空本地全部工作数据」，并用云端最新工作数据（' + supplierCnt + ' 家供应商）完全替换。\n\n确定要继续吗？', { title: '⚠ 危险操作' })) {
         hideLoading();
         return false;
       }
@@ -641,13 +641,13 @@ const DataLoader = {
       await new Promise(r => setTimeout(r, 300));
       await this.loadBundleFromCloud(bundle);
       hideLoading();
-      alert('✅ 已用云端工作数据替换本地（共 ' + supplierCnt + ' 家供应商）。');
+      WBModal.alert('✅ 已用云端工作数据替换本地（共 ' + supplierCnt + ' 家供应商）。');
       if (typeof App !== 'undefined' && App.currentModule) App.go(App.currentModule);
       return true;
     } catch (err) {
       hideLoading();
       console.error('从云端恢复工作数据失败:', err);
-      alert('恢复失败: ' + (err.message || err));
+      WBModal.alert('恢复失败: ' + (err.message || err));
       return false;
     }
   },
@@ -656,13 +656,13 @@ const DataLoader = {
   async reimportFromFile() {
     const fileInput = document.getElementById('reimportFile');
     if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-      alert('请先选择一个 .xlsx、.xls 或 .xlsm 文件');
+      WBModal.alert('请先选择一个 .xlsx、.xls 或 .xlsm 文件');
       return;
     }
     const file = fileInput.files[0];
     const name = (file.name || '').toLowerCase();
     if (!name.endsWith('.xlsx') && !name.endsWith('.xls') && !name.endsWith('.xlsm')) {
-      alert('仅支持 .xlsx、.xls 或 .xlsm 格式的文件');
+      WBModal.alert('仅支持 .xlsx、.xls 或 .xlsm 格式的文件');
       return;
     }
     // 云端连接状态——按钮行为完全以此为准：未连接→仅本地导入；已连接→导入+上传
@@ -674,9 +674,9 @@ const DataLoader = {
         document.getElementById('modalOverlay').classList.remove('show');
         // 反馈：与按钮文案保持一致，让用户清楚本次到底做了什么
         if (cloudOnline) {
-          alert('数据导入成功，并已同步到云端。');
+          WBModal.alert('数据导入成功，并已同步到云端。');
         } else {
-          alert('数据已导入到本地。\n\n⚠ 当前云端未连接，本次未上传云端。如需把本次数据分享给同事，请在「⚙ 云配置」连接云端后，点击云端工作条上的「↥ 上传」按钮。');
+          WBModal.alert('数据已导入到本地。\n\n⚠ 当前云端未连接，本次未上传云端。如需把本次数据分享给同事，请在「⚙ 云配置」连接云端后，点击云端工作条上的「↥ 上传」按钮。');
         }
         // 刷新当前视图
         if (typeof App !== 'undefined' && App.currentModule) {
@@ -686,14 +686,14 @@ const DataLoader = {
     } catch (err) {
       console.error('文件导入失败:', err);
       hideLoading();
-      alert('导入失败: ' + err.message);
+      WBModal.alert('导入失败: ' + err.message);
     }
   },
 
   // 重新导入基准：从云端拉取 base.json 覆盖本地（作为系统底账）
   async reimportFromBase() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
-      alert('请先连接云端后再重新导入基准');
+      WBModal.alert('请先连接云端后再重新导入基准');
       return false;
     }
     try {
@@ -701,13 +701,13 @@ const DataLoader = {
       const bundle = await SyncManager.pullBase();
       if (!bundle || !bundle.tables) {
         hideLoading();
-        alert('云端暂无基准数据，请先「标记为基准」生成基准。');
+        WBModal.alert('云端暂无基准数据，请先「标记为基准」生成基准。');
         return false;
       }
       // 破坏性操作确认：导入基准会清空本地全部工作数据，并替换为云端基准
       const supplierCnt = (bundle.tables.suppliers || []).length;
       const confirmMsg = '⚠ 此操作将「清空本地全部工作数据」，并用云端基准（' + supplierCnt + ' 家供应商）完全替换。\n\n确定要继续吗？';
-      if (!window.confirm(confirmMsg)) {
+      if (!await WBModal.confirm(confirmMsg, { title: '⚠ 危险操作' })) {
         hideLoading();
         return false;
       }
@@ -715,7 +715,7 @@ const DataLoader = {
       await new Promise(r => setTimeout(r, 300));
       await this.seedFromBase(bundle);
       hideLoading();
-      alert('✅ 已用云端基准数据替换本地工作数据（共 ' + supplierCnt + ' 家供应商）。\n\n本地原有数据已被覆盖，如需恢复可重新导入 Excel 或上传工作数据。');
+      WBModal.alert('✅ 已用云端基准数据替换本地工作数据（共 ' + supplierCnt + ' 家供应商）。\n\n本地原有数据已被覆盖，如需恢复可重新导入 Excel 或上传工作数据。');
       if (typeof App !== 'undefined' && App.currentModule) {
         App.go(App.currentModule);
       }
@@ -723,7 +723,7 @@ const DataLoader = {
     } catch (err) {
       console.error('从云端导入基准失败:', err);
       hideLoading();
-      alert('导入基准失败: ' + (err.message || err));
+      WBModal.alert('导入基准失败: ' + (err.message || err));
       return false;
     }
   },
