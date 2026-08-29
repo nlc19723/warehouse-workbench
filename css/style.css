@@ -2033,29 +2033,18 @@ body::after {
 /* 🟢 v197：PC 端基础信息 + 二维码卡片并排（移动端回退为上下堆叠） */
 .detail-base-qr-row { display: flex; flex-direction: column; gap: 12px; }
 @media (min-width: 769px) {
-  /* 🟢 v201：白框（.detail-grid / .qr-body）上下红线严格对齐。
-     你的需求：「二维码外部白框的上下边与基础信息白框的上下边齐平高度」。
-     核心做法 —— h3 标题脱离文档流浮在白框外（不占高度），
-     让两个 section 在 align-items:stretch 下自然等高，两个白框的
-     top/bottom 即像素级一致。 */
-  .detail-base-qr-row { flex-direction: row; align-items: stretch; }
-  /* 基础信息：占左侧剩余空间；用 position:relative 让 h3 浮在上方 */
-  .detail-base-qr-row > .detail-section { flex: 1 1 auto; min-width: 0;
-    position: relative; }
-  /* QR 卡片：宽度按内容走；同样 relative 让 h3 浮在上方 */
-  .detail-base-qr-row > .qr-card {
-    flex: 0 0 auto; min-width: 0; width: fit-content; max-width: 420px;
-    position: relative;
-  }
-  /* 两个白框：高度填满各自 section（由 stretch 自动同步） */
-  .detail-base-qr-row .detail-section-base .detail-grid { height: 100%; }
-  .detail-base-qr-row .qr-card .qr-body { height: 100%; }
-  /* h3 标题：脱离文档流，浮在白框上沿外 2px（不顶白框） */
+  /* 🟢 v202 调整：放弃"拉伸等高 + h3 浮出"——改回自然的"顶对齐 + 内容宽"并排。
+     原因：stretch 把短内容的基础信息白框强行拉高、内部出现大块空白；
+     且浮动 h3 在 h2/版式变动时易和上方标题重叠。改为：
+       · align-items: flex-start —— 两边顶对齐、不再等高
+       · 基础信息不再 flex:1 占满整行 —— 改为内容宽，消除右侧/下方大块空白
+       · h3 回归文档流（基线样式），用统一 h3 间距让两白框上沿对齐 */
+  .detail-base-qr-row { flex-direction: row; align-items: flex-start; margin-top: 20px; }
+  .detail-base-qr-row > .detail-section { flex: 0 0 auto; min-width: 0; }
+  .detail-base-qr-row > .qr-card { flex: 0 0 auto; min-width: 0; width: fit-content; max-width: 420px; }
+  /* 统一两边 h3 间距，保证两个白框的上沿在同一水平线上 */
   .detail-base-qr-row .detail-section-base > h3,
-  .detail-base-qr-row .qr-card > h3 {
-    position: absolute; left: 18px; top: -22px; margin: 0;
-    background: transparent; z-index: 1;
-  }
+  .detail-base-qr-row .qr-card > h3 { margin: 0 0 12px; padding-top: 0; }
 }
 .qr-body { display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
   padding: 14px 18px; background: var(--card-bg, rgba(255,255,255,0.7));
