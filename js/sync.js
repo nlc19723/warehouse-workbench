@@ -28,11 +28,8 @@ const SyncManager = {
     this.updateUI();
   },
 
-  // 供「云配置」对话框预填：返回内置默认配置（如有），否则空
+  // 供「云配置」对话框预填：默认**空**（v214 起不再预填内置凭证，需同步密码解锁）
   getDefaultConfig() {
-    if (typeof AppConfig !== 'undefined' && AppConfig.supabase && AppConfig.supabase.url) {
-      return { url: AppConfig.supabase.url, key: AppConfig.supabase.anonKey };
-    }
     return { url: '', key: '' };
   },
 
@@ -155,6 +152,11 @@ const SyncManager = {
           <input type="password" id="sbKey" placeholder="eyJ..." value="${escAttr(prefill?.key || '')}"
             style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;">
         </div>
+        <div style="margin-bottom:12px;padding:8px 10px;background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.18);border-radius:10px;display:flex;align-items:center;gap:8px;">
+          <span style="font-size:11.5px;color:#6366f1;white-space:nowrap;">🔑 同步密码</span>
+          <input type="password" id="sbSyncPwd" placeholder="输入同步密码填充凭证" style="flex:1;height:30px;border:1px solid var(--border-color);border-radius:8px;padding:0 8px;font-size:12px;">
+          <button onclick="SyncManager.unlockWithSyncPassword()" style="flex:0 0 auto;padding:0 12px;height:30px;border:none;border-radius:8px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-size:12px;font-weight:600;cursor:pointer;">填充</button>
+        </div>
         <div style="background:linear-gradient(135deg,rgba(2,132,199,0.07),rgba(14,165,233,0.03));border:1px solid rgba(2,132,199,0.15);border-radius:10px;padding:9px 14px;margin-bottom:12px;">
           <p style="font-size:11.5px;color:#0369a1;line-height:1.5;margin:0;">
             <b>📌 数据分离存储</b>：当前数据分为「<b>工作数据</b>」(data.json，日常累积) 与「<b>基准数据</b>」(base.json，系统底账) 两份，云端独立存放、互不覆盖。
@@ -175,6 +177,26 @@ const SyncManager = {
 
   hideConfigDialog() {
     document.getElementById('modalOverlay').classList.remove('show');
+  },
+
+  // 🔐 v214：同步密码解锁——校验通过后把内置/已覆盖的 Supabase 凭证填入输入框（不自动连接）
+  unlockWithSyncPassword() {
+    const pwdEl = document.getElementById('sbSyncPwd');
+    const pwd = pwdEl ? pwdEl.value.trim() : '';
+    if (!pwd) { WBModal.alert('请输入同步密码'); return; }
+    const hash = (typeof sha256Hex === 'function') ? sha256Hex(pwd) : pwd;
+    if (hash !== AppConfig.getSyncPwdHash()) {
+      WBModal.alert('同步密码错误');
+      return;
+    }
+    const eff = AppConfig.getEffectiveSupabase();
+    const urlEl = document.getElementById('sbUrl');
+    const keyEl = document.getElementById('sbKey');
+    if (urlEl) urlEl.value = eff.url || '';
+    if (keyEl) keyEl.value = eff.key || '';
+    if (pwdEl) pwdEl.value = '';
+    const banner = document.getElementById('syncConfigStatusText');
+    if (banner) banner.textContent = '凭证已填充 · 点击下方「保存并连接」启用云端同步';
   },
 
   async saveConfig() {

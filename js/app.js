@@ -457,6 +457,13 @@ const App = {
         </div>
 
         <div style="margin-bottom:20px;">
+          <h4 style="font-size:14px;color:var(--text-main);margin-bottom:10px;">权限</h4>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <button onclick="App.openAdminAuth()" class="btn-secondary" style="justify-content:flex-start;">🔐 管理员权限</button>
+          </div>
+        </div>
+
+        <div style="margin-bottom:20px;">
           <h4 style="font-size:14px;color:var(--text-main);margin-bottom:10px;">自定义</h4>
           <button onclick="App.resetCustomizations()" class="btn-secondary" style="justify-content:flex-start;">🗑️ 重置头像/名称/心情</button>
         </div>
@@ -465,6 +472,102 @@ const App = {
 
     document.getElementById('panelOverlay').classList.add('show');
     document.getElementById('panelDialog').classList.add('show');
+  },
+
+  // 🔐 v214：管理员权限入口——弹出管理员密码校验
+  openAdminAuth() {
+    const overlay = document.getElementById('modalOverlay');
+    const title = document.getElementById('modalTitle');
+    const body = document.getElementById('modalBody');
+    if (!overlay || !title || !body) return;
+    title.textContent = '管理员验证';
+    body.innerHTML = `
+      <div style="max-width:320px;">
+        <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:12px;line-height:1.5;">请输入管理员密码以进入权限设置。</p>
+        <input type="password" id="adminPwdInput" placeholder="管理员密码" style="width:100%;height:36px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;margin-bottom:14px;">
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+          <button onclick="document.getElementById('modalOverlay').classList.remove('show');" class="btn-secondary" style="padding:8px 16px;">取消</button>
+          <button onclick="App._verifyAdminAndOpen()" class="btn-primary" style="padding:8px 16px;">进入</button>
+        </div>
+      </div>`;
+    document.getElementById('modal').classList.add('modal-compact');
+    overlay.classList.add('show');
+    const inp = document.getElementById('adminPwdInput');
+    if (inp) {
+      inp.focus();
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') App._verifyAdminAndOpen(); });
+    }
+  },
+
+  // 校验管理员密码，通过则进入权限设置面板
+  _verifyAdminAndOpen() {
+    const el = document.getElementById('adminPwdInput');
+    const pwd = el ? el.value.trim() : '';
+    if (!pwd) { WBModal.alert('请输入管理员密码'); return; }
+    const hash = (typeof sha256Hex === 'function') ? sha256Hex(pwd) : pwd;
+    if (hash !== AppConfig.getAdminPwdHash()) {
+      WBModal.alert('管理员密码错误');
+      return;
+    }
+    const overlay = document.getElementById('modalOverlay');
+    if (overlay) overlay.classList.remove('show');
+    this.openAdminPanel();
+  },
+
+  // 权限设置面板：①改同步密码 ②改云端凭证（Administrator 可覆盖内置 URL/Key）
+  openAdminPanel() {
+    const body = document.getElementById('panelBody');
+    const title = document.getElementById('panelTitle');
+    if (title) title.textContent = '权限设置';
+    if (!body) return;
+    const eff = (typeof AppConfig !== 'undefined' && AppConfig.getEffectiveSupabase)
+      ? AppConfig.getEffectiveSupabase() : { url: '', key: '' };
+    body.innerHTML = `
+      <div style="max-width:420px;">
+        <button onclick="App.openSettingsDrawer()" class="btn-secondary" style="margin-bottom:16px;justify-content:flex-start;">← 返回设置</button>
+
+        <div style="margin-bottom:22px;">
+          <h4 style="font-size:14px;color:var(--text-main);margin-bottom:10px;">🔑 修改同步密码</h4>
+          <input type="password" id="newSyncPwd" placeholder="新同步密码" style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;margin-bottom:8px;">
+          <input type="password" id="newSyncPwd2" placeholder="再次确认新密码" style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;margin-bottom:8px;">
+          <button onclick="App._saveSyncPwd()" class="btn-primary" style="width:100%;">保存新同步密码</button>
+        </div>
+
+        <div style="margin-bottom:10px;">
+          <h4 style="font-size:14px;color:var(--text-main);margin-bottom:10px;">☁️ 云端凭证（Supabase）</h4>
+          <label style="display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:3px;">Project URL</label>
+          <input type="text" id="admSbUrl" value="${typeof escAttr === 'function' ? escAttr(eff.url || '') : (eff.url || '')}" style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;margin-bottom:8px;">
+          <label style="display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:3px;">Anon Key</label>
+          <input type="password" id="admSbKey" value="${typeof escAttr === 'function' ? escAttr(eff.key || '') : (eff.key || '')}" style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;margin-bottom:8px;">
+          <button onclick="App._saveSupabaseOverride()" class="btn-primary" style="width:100%;">保存云端凭证</button>
+        </div>
+      </div>`;
+    const overlay = document.getElementById('panelOverlay');
+    const dialog = document.getElementById('panelDialog');
+    if (overlay) overlay.classList.add('show');
+    if (dialog) dialog.classList.add('show');
+  },
+
+  // 保存新同步密码（哈希写入 localStorage 覆盖默认值）
+  _saveSyncPwd() {
+    const p1 = document.getElementById('newSyncPwd');
+    const p2 = document.getElementById('newSyncPwd2');
+    if (!p1 || !p2) return;
+    if (!p1.value) { WBModal.alert('请输入新同步密码'); return; }
+    if (p1.value !== p2.value) { WBModal.alert('两次输入的密码不一致'); return; }
+    if (typeof sha256Hex !== 'function') { WBModal.alert('密码模块未就绪'); return; }
+    AppConfig.setSyncPwdHash(sha256Hex(p1.value));
+    WBModal.alert('同步密码已更新，下次使用新密码解锁');
+  },
+
+  // 保存云端凭证覆盖（换 Supabase 项目）
+  _saveSupabaseOverride() {
+    const u = document.getElementById('admSbUrl');
+    const k = document.getElementById('admSbKey');
+    if (!u || !k) return;
+    if (!u.value.trim() || !k.value.trim()) { WBModal.alert('URL 与 Key 均需填写'); return; }
+    AppConfig.setSupabaseOverride(u.value.trim(), k.value.trim());
+    WBModal.alert('云端凭证已更新');
   },
 
 
