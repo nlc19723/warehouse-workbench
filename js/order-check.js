@@ -135,31 +135,31 @@ const OrderCheckModule = {
         <td style="text-align:center;color:var(--text-muted);">${idx + 1}</td>
         <td style="text-align:center;position:relative;">
           <input type="text" class="oc-code-input oc-input" placeholder="输入编码联想..."
-            value="${r.存货编码 || ''}"
+            value="${escAttr(r.存货编码 || '')}"
             data-row="${idx}" autocomplete="off">
         </td>
         <td style="text-align:center;"><input type="text" class="oc-name-input oc-detail-input" readonly placeholder=""
-          value="${r.存货名称 || ''}" data-row="${idx}"></td>
+          value="${escAttr(r.存货名称 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-spec-input oc-detail-input" readonly placeholder=""
-          value="${r.规格型号 || ''}" data-row="${idx}"></td>
+          value="${escAttr(r.规格型号 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="number" class="oc-qty-input" placeholder=""
-          value="${r.数量 !== undefined && r.数量 !== null && r.数量 !== '' ? r.数量 : ''}" data-row="${idx}" min="0" step="any"></td>
+          value="${escAttr(r.数量 !== undefined && r.数量 !== null && r.数量 !== '' ? r.数量 : '')}" data-row="${idx}" min="0" step="any"></td>
         <td style="text-align:center;"><input type="text" class="oc-category-input oc-detail-input" data-grp="meta" readonly placeholder=""
-          value="${r.分类 || ''}" data-row="${idx}"></td>
+          value="${escAttr(r.分类 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-stock-input oc-detail-input" data-grp="stock" readonly placeholder=""
-          value="${r.现存量 !== undefined ? r.现存量 : ''}" data-row="${idx}"></td>
+          value="${escAttr(r.现存量 !== undefined ? r.现存量 : '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-ontheway-input oc-detail-input" data-grp="stock" readonly placeholder=""
-          value="${r.在途订单 !== undefined ? r.在途订单 : ''}" data-row="${idx}"></td>
+          value="${escAttr(r.在途订单 !== undefined ? r.在途订单 : '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-warehouse-input oc-detail-input" data-grp="meta" readonly placeholder=""
-          value="${r.仓库 || ''}" data-row="${idx}"></td>
+          value="${escAttr(r.仓库 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-project-input oc-detail-input" data-grp="meta" readonly placeholder=""
-          value="${r.项目 || ''}" data-row="${idx}"></td>
+          value="${escAttr(r.项目 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-low-input oc-detail-input" data-grp="stock" readonly placeholder=""
-          value="${r.是否低周转 || ''}" data-row="${idx}"></td>
+          value="${escAttr(r.是否低周转 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-unavailable-input oc-detail-input" data-grp="stock" readonly placeholder=""
-          value="${r.暂无法使用量 !== undefined ? r.暂无法使用量 : ''}" data-row="${idx}"></td>
+          value="${escAttr(r.暂无法使用量 !== undefined ? r.暂无法使用量 : '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="number" class="oc-suggest-input oc-detail-input" data-grp="result" readonly placeholder=""
-          value="${r.建议订货量 !== undefined && r.建议订货量 !== null && r.建议订货量 !== '' ? r.建议订货量 : ''}" data-row="${idx}" min="0" step="any" style="font-weight:600;color:var(--primary);"></td>
+          value="${escAttr(r.建议订货量 !== undefined && r.建议订货量 !== null && r.建议订货量 !== '' ? r.建议订货量 : '')}" data-row="${idx}" min="0" step="any" style="font-weight:600;color:var(--primary);"></td>
         <td style="text-align:center;"><span class="oc-decision-cell" data-row="${idx}">${r.决策 || ''}</span></td>
         <td style="text-align:center;"><button onclick="OrderCheckModule.removeRow(${idx})" style="border:none;background:none;color:var(--status-danger);cursor:pointer;font-size:15px;padding:2px 4px;" title="删除此行">🗑️</button></td>
       </tr>`;
@@ -440,6 +440,34 @@ const OrderCheckModule = {
   // 中库存 = (最高库存 + 最低库存) / 2；净需求 = 需求计划量 − 现存量
   // 最高库存为空或 0 → 视为「不想存库存」→ 缺口即补
   async _computeDecision(rowIdx) {
+    const inputs = this._readOrderCheckInputs(rowIdx);
+    const alert = await this._queryInventoryAlert(inputs.编码);
+    const cls = this._classifyOrderCheck(inputs);
+
+    const 直送 = cls.含工程类 ? '直送·' : '';
+    const 净需求 = inputs.需求计划量 - inputs.现存数量;
+    const 不想存库存 = isNaN(alert.最高库存) || alert.最高库存 <= 0;
+    const 中库存 = isNaN(alert.最高库存) ? NaN
+      : (isNaN(alert.最低库存) ? alert.最高库存 * 0.5 : (alert.最高库存 + alert.最低库存) / 2);
+
+    const { 建议量, 决策, 颜色 } = this._decideOrderCheck({
+      直送, 净需求, 不想存库存, 中库存,
+      最高库存: alert.最高库存, 最低库存: alert.最低库存,
+      需求计划量: inputs.需求计划量, 现存数量: inputs.现存数量,
+      编码: inputs.编码, ...cls,
+    });
+
+    this._setVal(rowIdx, '.oc-suggest-input', 建议量 > 0 ? Math.round(建议量) : '');
+    const 决策节点 = document.querySelector(`.oc-decision-cell[data-row="${rowIdx}"]`);
+    if (决策节点) {
+      决策节点.textContent = 决策;
+      决策节点.className = 'oc-decision-cell ' + 颜色;
+    }
+    this._refreshKpi();
+    this._paintCells(rowIdx);
+  },
+
+  _readOrderCheckInputs(rowIdx) {
     const num = (选择器) => {
       const el = document.querySelector(选择器 + `[data-row="${rowIdx}"]`);
       const v = el ? parseFloat(el.value) : NaN;
@@ -449,15 +477,17 @@ const OrderCheckModule = {
       const el = document.querySelector(选择器 + `[data-row="${rowIdx}"]`);
       return el ? (el.value || '').trim() : '';
     };
-
-    const 需求计划量 = num('.oc-qty-input');          // 用户粘贴的外部需求计划量
-    const 现存量 = num('.oc-stock-input');             // 工作台库存预警现存量
-    const 分类 = 取文本('.oc-category-input');         // 工作台分类
-    const 是否低周转 = 取文本('.oc-low-input') === '低周转';
-
-    // 工作台库存预警：最高库存 / 最低库存（决策核心锚点）
     const 编码节点 = document.querySelector(`.oc-code-input[data-row="${rowIdx}"]`);
-    const 编码 = 编码节点 ? 编码节点.value.trim() : '';
+    return {
+      需求计划量: num('.oc-qty-input'),
+      现存数量: num('.oc-stock-input'),
+      分类: 取文本('.oc-category-input'),
+      是否低周转: 取文本('.oc-low-input') === '低周转',
+      编码: 编码节点 ? 编码节点.value.trim() : '',
+    };
+  },
+
+  async _queryInventoryAlert(编码) {
     let 最高库存 = NaN, 最低库存 = NaN;
     if (编码) {
       try {
@@ -466,45 +496,38 @@ const OrderCheckModule = {
           if (typeof 预警.最高库存 === 'number') 最高库存 = 预警.最高库存;
           if (typeof 预警.最低库存预警 === 'number') 最低库存 = 预警.最低库存预警;
         }
-      } catch (e) { /* 忽略 */ }
+      } catch (e) {
+        /* 忽略 */ console.warn('[order-check.js:469] 异常(已忽略):', e);
+      }
     }
-    const 不想存库存 = isNaN(最高库存) || 最高库存 <= 0;   // 最高库存空或 0 = 不想存库存
-    const 中库存 = isNaN(最高库存) ? NaN
-      : (isNaN(最低库存) ? 最高库存 * 0.5 : (最高库存 + 最低库存) / 2);
+    return { 最高库存, 最低库存 };
+  },
 
-    // ── 分组（按工作台分类字符串匹配）──
+  _classifyOrderCheck(inputs) {
+    const { 分类, 是否低周转 } = inputs;
     const 含工程类 = 分类.includes('工程类');
-    const 重点组 = 分类.includes('A') || 分类.includes('B');   // A / B / A工程类 / B工程类
-    const 长尾组 = 分类.includes('C');                          // C / C工程类
-    // 消耗优先组：低周转 / 不使用类 / 空分类（工作台已全部分类，空分类仅作防御兜底）
+    const 重点组 = 分类.includes('A') || 分类.includes('B');
+    const 长尾组 = 分类.includes('C');
     const 消耗优先组 = 是否低周转 || 分类.includes('不使用') || 分类 === '';
-    const 直送 = 含工程类 ? '直送·' : '';
+    return { 含工程类, 重点组, 长尾组, 消耗优先组 };
+  },
 
-    const 净需求 = 需求计划量 - 现存量;            // 净需求 = 需求 − 现存量
-    let 建议量 = 0;
-    let 决策 = '';
-    let 颜色 = '';
-
+  _decideOrderCheck(p) {
+    const { 直送, 净需求, 不想存库存, 中库存, 最高库存, 最低库存, 需求计划量, 现存数量, 编码, 含工程类, 重点组, 长尾组, 消耗优先组 } = p;
+    let 建议量 = 0, 决策 = '', 颜色 = '';
     if (编码 === '' || 需求计划量 <= 0) {
-      // 0. 未填编码或需求为 0 → 待定
       决策 = '待定·无数据';
       颜色 = 'oc-dec-gray';
     }
-    // 🟢 v160：优先规则（命中即返回，绕过后续水位/系数逻辑）—— 用户明确"需求大就全部订"
-    //   仅作用于非消耗优先组；建议量一律 = 计划量 D（保证 ≤ 计划量硬约束）
-    else if (!消耗优先组 && 需求计划量 > 现存量) {
-      // 2a-优先：需求 > 现存量 → 全部订货（需求缺口，直接全量）
+    else if (!消耗优先组 && 需求计划量 > 现存数量) {
       建议量 = 需求计划量;
       决策 = 直送 + '全部订·需求大量';
       颜色 = 'oc-dec-blue';
-    } else if (!消耗优先组 && 现存量 >= 0.5 * 需求计划量 && 需求计划量 >= 0.5 * 现存量) {
-      // 2b-优先：两边都过对方 1/2（含 D=S）→ 全部订货
-      //   （高库存档 S≥80%H 且 D≥½S 的场景也必然满足本条件，已被本分支统一覆盖，无需单独分支）
+    } else if (!消耗优先组 && 现存数量 >= 0.5 * 需求计划量 && 需求计划量 >= 0.5 * 现存数量) {
       建议量 = 需求计划量;
       决策 = 直送 + '全部订·需求大量';
       颜色 = 'oc-dec-blue';
     } else if (消耗优先组) {
-      // 1. 消耗优先组：优先消耗库存；净需求>0 补缺口，否则已有库存够
       if (净需求 > 0) {
         建议量 = 净需求;
         决策 = '低周转·补缺口';
@@ -513,23 +536,20 @@ const OrderCheckModule = {
         决策 = '不订·库存够';
         颜色 = 'oc-dec-green';
       }
-    } else if (需求计划量 > 现存量) {
-      // 2. 非消耗组 且 需求>现存量（缺货）→ 库存水位 + 分类因子
+    } else if (需求计划量 > 现存数量) {
       if (重点组) {
         if (不想存库存 || 最高库存 <= 20) {
-          // 不想存库存（空/0）或小最高库存（>0）→ 缺口即补（全订）
           建议量 = 净需求;
           决策 = 直送 + '建议订·全量补';
           颜色 = 'oc-dec-blue';
         } else {
-          // 最高库存>20：按水位浮动系数（最低库存15% / 中库存20% / 最高库存30%）消耗一部分
           let 水位定位 = 0.5;
           if (!isNaN(最低库存) && 最高库存 > 最低库存) {
-            水位定位 = (现存量 - 最低库存) / (最高库存 - 最低库存);
+            水位定位 = (现存数量 - 最低库存) / (最高库存 - 最低库存);
             水位定位 = Math.max(0, Math.min(1, 水位定位));
           }
           const 浮动系数 = Math.max(0.15, Math.min(0.30, 0.20 + 0.20 * (水位定位 - 0.5)));
-          const 浮动建议 = 净需求 - 浮动系数 * 现存量;
+          const 浮动建议 = 净需求 - 浮动系数 * 现存数量;
           if (浮动建议 > 0) {
             建议量 = 浮动建议;
             决策 = 直送 + '建议订·按水位';
@@ -540,19 +560,16 @@ const OrderCheckModule = {
           }
         }
       } else {
-        // 长尾组（C / C工程类）
         if (不想存库存) {
           建议量 = 净需求;
           决策 = 直送 + '部分订·按缺口';
           颜色 = 'oc-dec-orange';
         } else if (最高库存 <= 20) {
-          // 小最高库存（>0）→ 小批量，缺口即补
           建议量 = 净需求;
           决策 = 直送 + '部分订·小批量';
           颜色 = 'oc-dec-orange';
-        } else if (现存量 > 0.8 * 最高库存) {
-          // 高库存（现存量>80%最高）：消耗 40% 现存量
-          const 高库建议 = 净需求 - 0.4 * 现存量;
+        } else if (现存数量 > 0.8 * 最高库存) {
+          const 高库建议 = 净需求 - 0.4 * 现存数量;
           if (高库建议 > 0) {
             建议量 = 高库建议;
             决策 = 直送 + '部分订·高库存消耗';
@@ -561,14 +578,12 @@ const OrderCheckModule = {
             决策 = 直送 + '不订·维持中低库存';
             颜色 = 'oc-dec-green';
           }
-        } else if (!isNaN(中库存) && 现存量 < 中库存) {
-          // 库存偏低（低于中库存）：直接补缺口
+        } else if (!isNaN(中库存) && 现存数量 < 中库存) {
           建议量 = 净需求;
           决策 = 直送 + '低水位·直接订';
           颜色 = 'oc-dec-orange';
         } else {
-          // 中等库存（≥中库存 且 <80%最高）：消耗 30% 现存量
-          const 中库建议 = 净需求 - 0.3 * 现存量;
+          const 中库建议 = 净需求 - 0.3 * 现存数量;
           if (中库建议 > 0) {
             建议量 = 中库建议;
             决策 = 直送 + '部分订·中等库存消耗';
@@ -580,14 +595,11 @@ const OrderCheckModule = {
         }
       }
     } else {
-      // 3. 非消耗组 且 需求≤现存量（库存够）
       if (不想存库存) {
         决策 = 直送 + '不订·库存够';
         颜色 = 'oc-dec-green';
-      } else if (!isNaN(中库存) && 现存量 < 中库存 && 需求计划量 > 0.5 * 现存量) {
-        // 库存偏低 且 需求占现存量过半 → 维持中库存水平（补到中库存）
-        // 🟢 v160：夹紧到 [0, 计划量]，确保建议量不超过计划需求（硬约束）
-        建议量 = Math.max(0, Math.min(需求计划量, 中库存 - 现存量));
+      } else if (!isNaN(中库存) && 现存数量 < 中库存 && 需求计划量 > 0.5 * 现存数量) {
+        建议量 = Math.max(0, Math.min(需求计划量, 中库存 - 现存数量));
         决策 = 直送 + '低水位·补到中库存';
         颜色 = 'oc-dec-orange';
       } else {
@@ -595,19 +607,9 @@ const OrderCheckModule = {
         颜色 = 'oc-dec-green';
       }
     }
-
-    // 写回建议量列 + 决策标签（建议量取整，0 显示空）
-    this._setVal(rowIdx, '.oc-suggest-input', 建议量 > 0 ? Math.round(建议量) : '');
-    const 决策节点 = document.querySelector(`.oc-decision-cell[data-row="${rowIdx}"]`);
-    if (决策节点) {
-      决策节点.textContent = 决策;
-      决策节点.className = 'oc-decision-cell ' + 颜色;
-    }
-
-    this._refreshKpi();
-    // 🟢 v157：决策计算后按内容上色（建议量列）
-    this._paintCells(rowIdx);
+    return { 建议量, 决策, 颜色 };
   },
+
 
 
   // 🟢 v153：汇总 KPI 横幅
@@ -965,15 +967,13 @@ const OrderCheckModule = {
         return;
       }
 
-      // 如果是编辑模式且单号变化，先删旧数据
-      if (this.editingMode && this.currentOrderNo && this.currentOrderNo !== finalOrderNo) {
-        const oldKeys = (await DataStore.getRows('orderChecks')).filter(r => r.核对单号 === this.currentOrderNo).map(r => r.id);
-        await db.orderChecks.bulkDelete(oldKeys);
-      }
+      // 如果是编辑模式且单号变化，需要连同旧单号一起删除
+      const oldKeys = (this.editingMode && this.currentOrderNo && this.currentOrderNo !== finalOrderNo)
+        ? all.filter(r => r.核对单号 === this.currentOrderNo).map(r => r.id)
+        : [];
 
       // 删除同单号的旧明细（upsert）
       const oldIds = all.filter(r => r.核对单号 === finalOrderNo).map(r => r.id);
-      if (oldIds.length) await db.orderChecks.bulkDelete(oldIds);
 
       const newRecords = details.map((d, idx) => ({
         核对单号: finalOrderNo,
@@ -993,7 +993,14 @@ const OrderCheckModule = {
         暂无法使用量: d.unavailable
       }));
 
-      await db.orderChecks.bulkAdd(newRecords);
+      // 🟢 v207 AUDIT-302 + AUDIT-101：删除+插入整体包进事务 —— 中途失败/刷新时
+      //   整体回滚，不会「删完没插」导致明细全丢；提交后由 DataStore.write 统一
+      //   失效表缓存，杜绝连续保存两张单时单号重复（旧缓存里查不到刚存的单 → 重新发 001）。
+      await DataStore.write('orderChecks', () => db.transaction('rw', db.orderChecks, async () => {
+        if (oldKeys.length) await db.orderChecks.bulkDelete(oldKeys);
+        if (oldIds.length) await db.orderChecks.bulkDelete(oldIds);
+        await db.orderChecks.bulkAdd(newRecords);
+      }));
 
       this.currentOrderNo = finalOrderNo;
       this.editingMode = false;
@@ -1032,7 +1039,9 @@ const OrderCheckModule = {
       if (!await WBModal.confirm(`确定要删除核对单 "${orderNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
 
       const ids = (await DataStore.getRows('orderChecks')).filter(r => r.核对单号 === orderNo).map(r => r.id);
-      await db.orderChecks.bulkDelete(ids);
+      // 🟢 v207 AUDIT-101：写后失效缓存（旧代码删除后仍能在搜索里"查到"已删单，
+      // 且下次保存会撞上同一个单号）
+      await DataStore.write('orderChecks', () => db.orderChecks.bulkDelete(ids));
       this.showMsg(`✅ 已删除核对单 "${orderNo}"（${cnt} 条明细）`);
       await this.resetForm();
     } catch (err) {
@@ -1152,6 +1161,8 @@ const OrderCheckModule = {
   _setupDraftObserver() {
     // 旧 MutationObserver 方案已废弃：render() 重建 DOM 会先清空旧节点触发误捕获，
     // 改成在 App.go 切换模块时主动调 _captureFormDraft() 更可靠。
-    if (this._draftObs) { try { this._draftObs.disconnect(); } catch (e) {} this._draftObs = null; }
+    if (this._draftObs) { try { this._draftObs.disconnect(); } catch (e) {
+    console.warn('[order-check.js:1162] 异常(已忽略):', e);
+  } this._draftObs = null; }
   }
 };

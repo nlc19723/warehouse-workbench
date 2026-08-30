@@ -135,19 +135,23 @@
     openResolve = opts.resolve || null;
     openPrevActive = document.activeElement;
 
-    // 键盘事件：ESC = 默认按钮
+    // 🟢 v208 AUDIT-103：键盘语义按「按钮角色」取，而不是按下标取。
+    //   confirm/prompt 的按钮序固定为 [取消, 确定]：
+    //     · 旧逻辑 Enter 取 buttons[0] → 回车 = 取消（高频误触）
+    //     · 旧逻辑 Esc   取最后一个    → Esc  = 确定（危险操作按 Esc 直接执行！）
+    //   现统一：Enter = primary 按钮（确定）；Esc = 非 primary 按钮（取消）。
+    //   alert 只有一个 primary 按钮，两种按键都返回 true，行为保持不变。
     openKeyHandler = (e) => {
+      const btns = (opts.buttons && opts.buttons.length) ? opts.buttons : [{ value: true, primary: true }];
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
-        // ESC = 取最后一个按钮的 value（通常是「取消」语义）；alert 只有一个「确定」，效果等同
-        const lastBtn = opts.buttons ? opts.buttons[opts.buttons.length - 1] : { value: true };
-        closeDialog(lastBtn.value);
+        const cancelBtn = btns.find(b => !b.primary) || btns[0];
+        closeDialog(cancelBtn.value);
       } else if (e.key === 'Enter') {
-        // prompt/confirm 的 input 内回车 = 第一个按钮（提交/确认）
-        const firstBtn = opts.buttons ? opts.buttons[0] : { value: true };
         e.preventDefault();
-        closeDialog(firstBtn.value);
+        const okBtn = btns.find(b => b.primary) || btns[btns.length - 1];
+        closeDialog(okBtn.value);
       }
     };
     document.addEventListener('keydown', openKeyHandler, true);

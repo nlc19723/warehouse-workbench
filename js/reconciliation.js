@@ -6,7 +6,7 @@ const ReconciliationModule = {
   suppliers: [],
   currentFilter: {},
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
   currentData: [],
   trendChart: null,
 
@@ -45,11 +45,11 @@ const ReconciliationModule = {
       <div class="filter-bar">
         <select id="recSupplier">
           <option value="">选择供应商</option>
-          ${this.suppliers.map(s => `<option value="${s}" ${supplier === s ? 'selected' : ''}>${s}</option>`).join('')}
+          ${this.suppliers.map(s => `<option value="${escAttr(s)}" ${supplier === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
         </select>
-        <input type="text" id="recStartDate" value="${startDate}" class="dp-input" placeholder="起始日期" readonly>
+        <input type="text" id="recStartDate" value="${escAttr(startDate)}" class="dp-input" placeholder="起始日期" readonly>
         <span style="color:var(--text-secondary);">至</span>
-        <input type="text" id="recEndDate" value="${endDate}" class="dp-input" placeholder="结束日期" readonly>
+        <input type="text" id="recEndDate" value="${escAttr(endDate)}" class="dp-input" placeholder="结束日期" readonly>
         <button class="glass-btn-3d" onclick="ReconciliationModule.shiftPrevMonth()" title="把两个日期的月份都 -1 并自动查询">📅 上个月</button>
         <button class="glass-btn-3d" onclick="ReconciliationModule.shiftNextMonth()" title="把两个日期的月份都 +1 并自动查询">📅 下个月</button>
         <button class="search-glass" onclick="ReconciliationModule.applyFilter()">查询</button>
@@ -127,7 +127,9 @@ const ReconciliationModule = {
     try {
       const suppliersAll = await db.suppliers.toArray();
       suppliersAll.forEach(s => { supplierContracts[s.供应商] = parseFloat(s.年度合同金额) || 0; });
-    } catch (e) {}
+    } catch (e) {
+    console.warn('[reconciliation.js:130] 异常(已忽略):', e);
+  }
 
     if (supplier) {
       inbound = inbound.filter(i => i.供应商 === supplier);
@@ -146,7 +148,10 @@ const ReconciliationModule = {
       const key = i.供应商 || '未知';
       if (!summary[key]) summary[key] = { qty: 0, amount: 0, uniqueNos: new Set() };
       summary[key].qty += parseFloat(i.数量) || 0;
-      summary[key].amount = Math.round((summary[key].amount + (parseFloat(i.原币价税合计) || 0)) * 100) / 100;
+      // 🟢 v209 AUDIT-307：原始浮点累加，显示/占比时再舍入。
+      // 原先逐行 Math.round 累加会累积误差（实测 5 行差 0.02，1000 行差 0.48），
+      // 与趋势图「先求和再舍入」口径不一致，现在统一为「先汇总后舍入」。
+      summary[key].amount += (parseFloat(i.原币价税合计) || 0);
       if (i.入库单号) summary[key].uniqueNos.add(i.入库单号);
     });
 

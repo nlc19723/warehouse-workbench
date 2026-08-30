@@ -111,10 +111,10 @@ window.SupplierDetailModule = {
       // 🟢 v192：初始化 4 个 section 各自的分页/排序状态。重置 currentPage=1，
       //   保证从别的实体返回此供应商时不会保留上一次的页码。
       this._sections = {
-        'sd-pricing': { title: '合同价格', rows: rel.pricing || [], columns: priceCols, currentPage: 1, pageSize: 20, sort: null },
-        'sd-orders':  { title: `采购订单（近3个月 · ${recentOrders.length}/${(rel.orders || []).length}）`, rows: recentOrders, columns: orderCols, currentPage: 1, pageSize: 20, sort: null },
-        'sd-inbound': { title: `入库记录（近3个月 · ${recentInbound.length}/${(rel.inbound || []).length}）`, rows: recentInbound, columns: inboundCols, currentPage: 1, pageSize: 20, sort: null },
-        'sd-breach':  { title: '违约台账', rows: rel.breach || [], columns: breachCols, currentPage: 1, pageSize: 20, sort: null }
+        'sd-pricing': { title: '合同价格', rows: rel.pricing || [], columns: priceCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
+        'sd-orders':  { title: `采购订单（近3个月 · ${recentOrders.length}/${(rel.orders || []).length}）`, rows: recentOrders, columns: orderCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
+        'sd-inbound': { title: `入库记录（近3个月 · ${recentInbound.length}/${(rel.inbound || []).length}）`, rows: recentInbound, columns: inboundCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
+        'sd-breach':  { title: '违约台账', rows: rel.breach || [], columns: breachCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null }
       };
 
       // 渲染：基础信息 + 4 个 section 占位（表格与分页器在 _renderSection 中填入）

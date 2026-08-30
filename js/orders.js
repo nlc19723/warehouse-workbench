@@ -5,7 +5,7 @@
 const OrdersModule = {
   currentFilter: {},
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
 
   // 计算默认订单日期区间：最小订单日期 至 今日
   getDefaultDateRange(orders) {
@@ -43,10 +43,10 @@ const OrdersModule = {
     content.innerHTML = `
       <div class="filter-bar" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;padding:0;align-items:flex-start;">
         <div class="filter-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
-          <input type="text" id="orderKw" class="filter-search-short" placeholder="搜索订单编号、供应商、存货名称..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')OrdersModule.applyFilter()">
-          <input type="text" id="orderStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="OrdersModule.onDateChange()" readonly>
+          <input type="text" id="orderKw" class="filter-search-short" placeholder="搜索订单编号、供应商、存货名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')OrdersModule.applyFilter()">
+          <input type="text" id="orderStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="OrdersModule.onDateChange()" readonly>
           <span class="filter-sep">至</span>
-          <input type="text" id="orderEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="OrdersModule.onDateChange()" readonly>
+          <input type="text" id="orderEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="OrdersModule.onDateChange()" readonly>
           <div class="filter-row-buttons" style="display:flex;gap:6px;">
             <button class="search-glass" onclick="OrdersModule.applyFilter()">筛选</button>
             <button class="secondary" onclick="OrdersModule.resetFilter()">重置</button>
@@ -56,15 +56,15 @@ const OrdersModule = {
         <div class="filter-row" style="display:flex;gap:10px;margin:0;padding:0;">
           <select id="orderSupplier" title="按供应商筛选" style="max-width:200px;">
             <option value="">全部供应商</option>
-            ${suppliers.map(s => `<option value="${s}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${s}</option>`).join('')}
+            ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
           </select>
           <select id="orderProject" title="按项目筛选" style="max-width:300px;">
             <option value="">全部项目</option>
-            ${projects.map(p => `<option value="${p}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${p}</option>`).join('')}
+            ${projects.map(p => `<option value="${escAttr(p)}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
           </select>
           <select id="orderStatus" title="按审批状态筛选">
             <option value="">全部状态</option>
-            ${statuses.map(s => `<option value="${s}" ${this.currentFilter.审批状态 === s ? 'selected' : ''}>${s}</option>`).join('')}
+            ${statuses.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.审批状态 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
           </select>
         </div>
       </div>
@@ -395,7 +395,7 @@ const OrdersModule = {
     const dr = this.getDefaultDateRange(allOrders);
     this.currentFilter = { keyword: '', 供应商: '', 项目名称: '', 审批状态: '', startDate: dr.start, endDate: dr.end };
     this.currentPage = 1;
-    this.pageSize = 20;
+    this.pageSize = AppConfig.app.defaultPageSize;
     this.render();
   },
 

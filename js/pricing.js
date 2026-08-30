@@ -5,7 +5,7 @@
 const PricingModule = {
   currentData: [],
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
   currentFilter: {}, // 跨模块带参跳转（M1）：App.go 注入的 { keyword } 自动填入搜索框
 
   // 计算默认生效日期区间：最小生效日期 至 今日
@@ -44,18 +44,18 @@ const PricingModule = {
 
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="pricingKw" placeholder="搜索供应商、物料..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')PricingModule.applyFilter()">
+        <input type="text" id="pricingKw" placeholder="搜索供应商、物料..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')PricingModule.applyFilter()">
         <select id="pricingSupplier">
           <option value="">全部供应商</option>
-          ${suppliers.map(s => `<option value="${s}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${s}</option>`).join('')}
+          ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
         </select>
         <select id="pricingType">
           <option value="">全部类型</option>
-          ${types.map(t => `<option value="${t}" ${this.currentFilter.类型 === t ? 'selected' : ''}>${t}</option>`).join('')}
+          ${types.map(t => `<option value="${escAttr(t)}" ${this.currentFilter.类型 === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
         </select>
-        <input type="text" id="pricingStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date dp-input" placeholder="生效起始日期" title="生效起始日期" onchange="PricingModule.onDateChange()" readonly>
+        <input type="text" id="pricingStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="生效起始日期" title="生效起始日期" onchange="PricingModule.onDateChange()" readonly>
         <span class="filter-sep">至</span>
-        <input type="text" id="pricingEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date dp-input" placeholder="生效结束日期" title="生效结束日期" onchange="PricingModule.onDateChange()" readonly>
+        <input type="text" id="pricingEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="生效结束日期" title="生效结束日期" onchange="PricingModule.onDateChange()" readonly>
         <button class="search-glass" onclick="PricingModule.applyFilter()">筛选</button>
         <button class="secondary" onclick="PricingModule.resetFilter()">重置</button>
         <button class="secondary" onclick="PricingModule.exportData()">📥 导出</button>
@@ -244,7 +244,7 @@ const PricingModule = {
     const dr = this.getDefaultDateRange(allPricing);
     this.currentFilter = { keyword: '', 供应商: '', 类型: '', startDate: dr.start, endDate: dr.end };
     this.currentPage = 1;
-    this.pageSize = 20;
+    this.pageSize = AppConfig.app.defaultPageSize;
     const kwInput = document.getElementById('pricingKw');
     const supSelect = document.getElementById('pricingSupplier');
     const typeSelect = document.getElementById('pricingType');

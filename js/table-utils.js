@@ -146,36 +146,6 @@ const TableStickyOverlay = {
    * 关键点：浮层 append 到 document.body（而不是 wrap 内），用 position:fixed 真正贴在屏幕视口；
    *   left / top / width 从 wrap.getBoundingClientRect() 实时取，滚动时更新。
    */
-  buildTheadFloat(table) {
-    const thead = table.querySelector('thead');
-    if (!thead) return null;
-    const ths = Array.from(thead.querySelectorAll('th'));
-    if (!ths.length) return null;
-
-    const theadH = thead.offsetHeight;
-    const wrap = document.createElement('div');
-    wrap.className = 'mobile-float-thead';
-    const cloneTable = document.createElement('table');
-    cloneTable.className = 'data-table';
-    // 🟢 v140：克隆表用 width:auto（自然宽），与正文表一致，避免隐藏列后剩余列被拉伸撑变形
-    cloneTable.style.cssText = 'width:auto;border-collapse:collapse;margin:0;table-layout:auto;';
-    cloneTable.innerHTML = '<thead><tr>' + ths.map((th, i) => {
-      const w = th.offsetWidth;
-      const text = th.textContent.trim();
-      // 🟢 v199：去掉内联 font-size:13px —— 浮动表头字号改由 style.css 的
-      // 「表格字号全局统一」规则统一控制，避免与正文表格字号不一致
-      return `<th data-col="${i}" style="width:${w}px;min-width:${w}px;padding:8px 12px;font-weight:600;text-align:left;">${esc(text)}</th>`;
-    }).join('') + '</tr></thead>';
-    wrap.appendChild(cloneTable);
-    wrap.style.cssText = `position:fixed;top:0;left:0;z-index:9999;display:none;background:var(--thead-bg,#f1f5f9);border-bottom:2px solid rgba(0,0,0,0.3);box-shadow:0 4px 10px rgba(0,0,0,0.22);pointer-events:none;user-select:none;-webkit-user-select:none;height:${theadH}px;overflow:hidden;`;
-    cloneTable.style.background = 'var(--thead-bg,#f1f5f9)';
-    cloneTable.querySelectorAll('th').forEach(th => {
-      th.style.background = 'var(--thead-bg,#f1f5f9)';
-      th.style.color = 'var(--text-main,#1e293b)';
-      th.style.borderBottom = '2px solid rgba(0,0,0,0.25)';
-    });
-    return { wrap, height: theadH };
-  },
 
   // 🟢 v139：移动端列折叠——表宽超出视口时从右往左隐藏列，留「展开剩余 N 列」按钮，点击还原。
   //   替代旧的移动端固定首列浮层（mobile-float-firstcol）：用户不需要固定首列，正常显示即可。
@@ -543,138 +513,43 @@ const TableUtils = {
     const thead = table.querySelector('thead');
     if (!thead) return;
 
-    const tableKey = opts.tableKey || TableUtils._deriveTableKey(table) || containerId; // 缺省用推导/容器 id 兜底
+    const tableKey = opts.tableKey || TableUtils._deriveTableKey(table) || containerId;
     const getColField = opts.getColField || ((th) => {
-      // 默认：取已渲染的 .th-sort-label 文本（initSortableHeaders 已经把它放进 th），
-      // 没有就走 th.textContent.trim()，避免记忆键受 ▼ 图标 SVG 文本干扰
       const lbl = th.querySelector('.th-sort-label');
       return (lbl ? lbl.textContent : th.textContent).trim();
     });
 
     const ths = thead.querySelectorAll('th');
-    let currentSortCol = -1;   // 当前排序列索引
-    let currentSortDir = 0;     // 0=无, 1=升序, 2=降序
-    const columnFilters = {};   // { colIdx: { kw, excluded } } — excluded 为用户取消勾选的值（默认勾选=显示）
-
-    // 🟢 v113：先记录每列的 colField，用于列宽/对齐记忆
     const colFields = Array.from(ths).map(th => getColField(th));
-
-    // 🟢 v192：把 initialSort 同步到内部变量（点击排序时用同套状态机维护）
+    const columnFilters = {};
+    const sortState = { col: -1, dir: 0 };
     if (opts.initialSort && typeof opts.initialSort.col === 'number'
         && [0, 1, 2].includes(opts.initialSort.dir)) {
-      currentSortCol = opts.initialSort.dir === 0 ? -1 : opts.initialSort.col;
-      currentSortDir = opts.initialSort.dir;
+      sortState.col = opts.initialSort.dir === 0 ? -1 : opts.initialSort.col;
+      sortState.dir = opts.initialSort.dir;
     }
 
-    // 🟢 v121：列头永远居中（不受对齐按钮影响）。对齐只作用于「列头下的单元格」。
-    // 初始化：把对齐偏好应用到所有 td；无记忆时默认居中。
-    if (tableKey) {
-      Array.from(ths).forEach((th, colIdx) => {
-        const field = colFields[colIdx];
-        if (!field) return;
-        const a = TablePrefs.getAlign(tableKey, field) || 'center';
-        table.querySelectorAll('tbody tr').forEach(tr => {
-          const td = tr.children[colIdx];
-          if (td) td.style.textAlign = a;
-        });
-      });
-    }
+    if (tableKey) this._applyAlignPreferences(table, ths, colFields, tableKey);
 
-    // 🟢 v145：恢复记忆的筛选条件（切模块再切回不丢失）。先回填到 columnFilters
-    //   并标记图标 active，最后在数据渲染完成后统一应用一次。
-    // 🟢 v148：记忆语义改为「排除」(excluded)，columnFilters 统一用 { kw, excluded }。
     let hasRestoredFilter = false;
     if (tableKey) {
-      Array.from(ths).forEach((th, colIdx) => {
-        const field = colFields[colIdx];
-        if (!field || th.getAttribute('data-nofilter') === '1') return;
-        const saved = TablePrefs.getFilter(tableKey, field);
-        if (saved && (saved.kw || (saved.excluded && saved.excluded.length))) {
-          columnFilters[colIdx] = saved;
-          hasRestoredFilter = true;
-        }
-      });
+      const restored = this._restoreColumnFilters(ths, colFields, tableKey);
+      Object.assign(columnFilters, restored.columnFilters);
+      hasRestoredFilter = restored.hasRestoredFilter;
     }
 
     ths.forEach((th, colIdx) => {
-      // 🟢 v124：data-nofilter="1" 跳过筛选/排序/对齐——给"操作列"等纯动作列用，保持表头干净
-      if (th.getAttribute('data-nofilter') === '1') {
-        th.style.cursor = '';
-        return;
-      }
-      const originalText = th.textContent.trim();
-      th.innerHTML = `
-        <span class="th-sort-label">${originalText}</span>
-        <span class="th-filter-icon" data-col="${colIdx}" title="筛选 / 排序 / 对齐">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M2 4 L6 8 L10 4 Z"/></svg>
-        </span>
-      `;
-      th.style.cursor = 'pointer';
-
-      const filterIcon = th.querySelector('.th-filter-icon');
-
-      // 点击 ▾ 图标：弹出 Excel 风格筛选面板（首次点击=打开面板）
-        filterIcon.addEventListener('click', (e) => {
-          e.stopPropagation();
-          this._showFilterPopup(th, colIdx, columnFilters, (filterState) => {
-            columnFilters[colIdx] = filterState;
-            const hasActive = !!filterState && (
-              !!filterState.kw || (filterState.excluded && filterState.excluded.length > 0)
-            );
-            filterIcon.classList.toggle('active', hasActive);
-            // 🟢 v145：写回筛选记忆（切模块再切回不丢失）；v148 统一为 excluded 语义
-            if (tableKey && colFields[colIdx]) TablePrefs.setFilter(tableKey, colFields[colIdx], filterState);
-            this._applyTableSortAndFilter(table, currentSortCol, currentSortDir, columnFilters);
-          }, {
-          tableKey,
-          colField: colFields[colIdx],
-          applyAlign: (align) => {
-            // 🟢 v121：对齐按钮只作用于列头下的单元格，列头本身永远居中
-            table.querySelectorAll('tbody tr').forEach(tr => {
-              const td = tr.children[colIdx];
-              if (td) td.style.textAlign = align;
-            });
-          }
-        });
-      });
-
-      // 点击表头文字：切换排序（升序 → 降序 → 取消），与 ▾ 筛选分离
-      const labelEl = th.querySelector('.th-sort-label');
-      if (labelEl) {
-        labelEl.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (currentSortCol === colIdx) {
-            currentSortDir = currentSortDir === 1 ? 2 : currentSortDir === 2 ? 0 : 1;
-          } else {
-            currentSortDir = 1;
-          }
-          currentSortCol = currentSortDir === 0 ? -1 : colIdx;
-          this._refreshArrowState(ths, currentSortCol, currentSortDir);
-          this._applyTableSortAndFilter(table, currentSortCol, currentSortDir, columnFilters);
-          // 🟢 v192：排序变化 → 触发业务回调（详情页拿到 (field, dir) 后做数据层重排+分页重渲）
-          if (typeof opts.onSortChange === 'function') {
-            const field = colFields[currentSortCol] || '';
-            opts.onSortChange(field, currentSortDir);
-          }
-        });
-      }
-
-      // 🟢 v145：若本列有已恢复的筛选记忆，标记筛选图标为 active
-      if (columnFilters[colIdx]) filterIcon.classList.add('active');
+      this._bindHeaderInteractions(th, colIdx, { ths, table, tableKey, colFields, columnFilters, sortState, opts });
     });
 
-    // 🟢 v192：首次渲染时若传了 initialSort，立刻高亮箭头 + 应用当前页排序（DOM 层）
-    if (currentSortDir !== 0 && currentSortCol >= 0) {
-      this._refreshArrowState(ths, currentSortCol, currentSortDir);
-      this._applyTableSortAndFilter(table, currentSortCol, currentSortDir, columnFilters);
+    if (sortState.dir !== 0 && sortState.col >= 0) {
+      this._refreshArrowState(ths, sortState.col, sortState.dir);
+      this._applyTableSortAndFilter(table, sortState.col, sortState.dir, columnFilters);
     }
-
-    // 🟢 v145：统一应用已恢复的筛选记忆（切模块再切回后保留筛选结果）
     if (hasRestoredFilter) {
-      this._applyTableSortAndFilter(table, currentSortCol, currentSortDir, columnFilters);
+      this._applyTableSortAndFilter(table, sortState.col, sortState.dir, columnFilters);
     }
 
-    // 全局点击关闭筛选弹窗（仅绑定一次，避免重复监听）
     if (!TableUtils._outsideBound) {
       document.addEventListener('mousedown', (e) => {
         if (TableUtils._filterPopup && !TableUtils._filterPopup.contains(e.target)) {
@@ -684,9 +559,96 @@ const TableUtils = {
       TableUtils._outsideBound = true;
     }
 
-    // 🟢 v133：自动安装移动端浮动表头/首列（绕过 iOS Safari thead sticky bug）
     if (window.TableStickyOverlay) TableStickyOverlay.install(container);
   },
+
+  _applyAlignPreferences(table, ths, colFields, tableKey) {
+    Array.from(ths).forEach((th, colIdx) => {
+      const field = colFields[colIdx];
+      if (!field) return;
+      const a = TablePrefs.getAlign(tableKey, field) || 'center';
+      table.querySelectorAll('tbody tr').forEach(tr => {
+        const td = tr.children[colIdx];
+        if (td) td.style.textAlign = a;
+      });
+    });
+  },
+
+  _restoreColumnFilters(ths, colFields, tableKey) {
+    const columnFilters = {};
+    let hasRestoredFilter = false;
+    Array.from(ths).forEach((th, colIdx) => {
+      const field = colFields[colIdx];
+      if (!field || th.getAttribute('data-nofilter') === '1') return;
+      const saved = TablePrefs.getFilter(tableKey, field);
+      if (saved && (saved.kw || (saved.excluded && saved.excluded.length))) {
+        columnFilters[colIdx] = saved;
+        hasRestoredFilter = true;
+      }
+    });
+    return { columnFilters, hasRestoredFilter };
+  },
+
+  _bindHeaderInteractions(th, colIdx, ctx) {
+    const { ths, table, tableKey, colFields, columnFilters, sortState, opts } = ctx;
+    if (th.getAttribute('data-nofilter') === '1') {
+      th.style.cursor = '';
+      return;
+    }
+    const originalText = th.textContent.trim();
+    th.innerHTML = `
+      <span class="th-sort-label">${originalText}</span>
+      <span class="th-filter-icon" data-col="${colIdx}" title="筛选 / 排序 / 对齐">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M2 4 L6 8 L10 4 Z"/></svg>
+      </span>
+    `;
+    th.style.cursor = 'pointer';
+
+    const filterIcon = th.querySelector('.th-filter-icon');
+    filterIcon.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._showFilterPopup(th, colIdx, columnFilters, (filterState) => {
+        columnFilters[colIdx] = filterState;
+        const hasActive = !!filterState && (
+          !!filterState.kw || (filterState.excluded && filterState.excluded.length > 0)
+        );
+        filterIcon.classList.toggle('active', hasActive);
+        if (tableKey && colFields[colIdx]) TablePrefs.setFilter(tableKey, colFields[colIdx], filterState);
+        this._applyTableSortAndFilter(table, sortState.col, sortState.dir, columnFilters);
+      }, {
+        tableKey,
+        colField: colFields[colIdx],
+        applyAlign: (align) => {
+          table.querySelectorAll('tbody tr').forEach(tr => {
+            const td = tr.children[colIdx];
+            if (td) td.style.textAlign = align;
+          });
+        }
+      });
+    });
+
+    const labelEl = th.querySelector('.th-sort-label');
+    if (labelEl) {
+      labelEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (sortState.col === colIdx) {
+          sortState.dir = sortState.dir === 1 ? 2 : sortState.dir === 2 ? 0 : 1;
+        } else {
+          sortState.dir = 1;
+        }
+        sortState.col = sortState.dir === 0 ? -1 : colIdx;
+        this._refreshArrowState(ths, sortState.col, sortState.dir);
+        this._applyTableSortAndFilter(table, sortState.col, sortState.dir, columnFilters);
+        if (typeof opts.onSortChange === 'function') {
+          const field = colFields[sortState.col] || '';
+          opts.onSortChange(field, sortState.dir);
+        }
+      });
+    }
+
+    if (columnFilters[colIdx]) filterIcon.classList.add('active');
+  },
+
 
   _refreshArrowState(ths, col, dir) {
     ths.forEach((th, i) => {
@@ -777,17 +739,38 @@ const TableUtils = {
     const tbody = table ? table.querySelector('tbody') : null;
     const rows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
 
-    // 收集该列所有唯一值（包含被其他列筛选隐藏的行，确保选项不丢失）
+    const { sortedValues } = this._collectColumnValues(rows, colIdx);
+    const { currentKw, excludedSet } = this._parseFilterState(currentFilters, colIdx);
+    const tableKey = alignOpts.tableKey;
+    const colField = alignOpts.colField;
+    const applyAlign = alignOpts.applyAlign || (() => {});
+    const curAlign = this._resolveCurrentAlign(alignOpts, tbody, colIdx);
+
+    const popupId = 'th-filter-popup-' + Date.now();
+    const popup = document.createElement('div');
+    popup.className = 'excel-filter-popup';
+    popup.id = popupId;
+    popup.innerHTML = this._buildFilterPopupHtml({ currentKw, sortedValues, excludedSet, tableKey, colField, curAlign });
+    popup.style.position = 'fixed';
+    popup.style.zIndex = '9999';
+    popup.addEventListener('mousedown', (e) => e.stopPropagation());
+
+    this._attachFilterPopupPositioning(popup, th);
+    this._bindFilterPopupEvents(popup, {
+      tableKey, colField, applyAlign, curAlign, excludedSet, onConfirm,
+    });
+    popup.querySelector('.efp-search').focus();
+    TableUtils._filterPopup = popup;
+  },
+
+  _collectColumnValues(rows, colIdx) {
     const valueMap = new Map();
     rows.forEach(tr => {
       const td = tr.children[colIdx];
       const rawVal = td ? (td.textContent || '').trim() : '';
-      // 清理数值格式用于分组（如 330.29 和 330 显示为不同值）
       const displayVal = rawVal === '' ? '(空)' : rawVal;
       valueMap.set(displayVal, (valueMap.get(displayVal) || 0) + 1);
     });
-
-    // 按值排序（数值在前，文本在后）
     const sortedValues = Array.from(valueMap.entries()).sort((a, b) => {
       const na = parseFloat(a[0]), nb = parseFloat(b[0]);
       if (!isNaN(na) && !isNaN(nb)) return na - nb;
@@ -795,39 +778,36 @@ const TableUtils = {
       if (!isNaN(nb)) return 1;
       return a[0].localeCompare(b[0], 'zh');
     });
+    return { valueMap, sortedValues };
+  },
 
-    const popupId = 'th-filter-popup-' + Date.now();
+  _parseFilterState(currentFilters, colIdx) {
     const currentFs = currentFilters[colIdx] || null;
-    // 🟢 v148：统一为「排除」语义（默认勾选=显示，仅 excluded 列表里的项反勾）。
-    //   兼容旧格式 { checked, unchecked }：旧 unchecked 即 excluded；若只有 checked 没有 unchecked，
-    //   则把「不在 checked 里的值」推成 excluded（但本弹窗在 v148 之后只会写 excluded）。
     const currentKw = (currentFs && typeof currentFs === 'object') ? (currentFs.kw || '') : (typeof currentFs === 'string' ? currentFs : '');
     let excludedSet = new Set();
     if (currentFs && typeof currentFs === 'object') {
       if (Array.isArray(currentFs.excluded)) {
         excludedSet = new Set(currentFs.excluded);
       } else if (Array.isArray(currentFs.unchecked)) {
-        // 旧格式兼容
         excludedSet = new Set(currentFs.unchecked);
       }
     }
+    return { currentKw, excludedSet };
+  },
 
-    // 🟢 v121：对齐偏好（读取已记忆值；列头永远居中，不再从 th.style.textAlign 读）
+  _resolveCurrentAlign(alignOpts, tbody, colIdx) {
     const tableKey = alignOpts.tableKey;
     const colField = alignOpts.colField;
-    const applyAlign = alignOpts.applyAlign || (() => {});
     const savedAlign = (tableKey && colField) ? TablePrefs.getAlign(tableKey, colField) : null;
-    // 当前实际对齐：已记忆 > 该列首个 td 的实际对齐 > 居中兜底
     const firstTd = tbody ? tbody.querySelector('tr')?.children[colIdx] : null;
     const tdAlign = firstTd ? (firstTd.style.textAlign || '').replace(/['"\s]/g, '') : '';
-    const curAlign = savedAlign || tdAlign || 'center';
+    return savedAlign || tdAlign || 'center';
+  },
 
-    const popup = document.createElement('div');
-    popup.className = 'excel-filter-popup';
-    popup.id = popupId;
-    popup.innerHTML = `
+  _buildFilterPopupHtml({ currentKw, sortedValues, excludedSet, tableKey, colField, curAlign }) {
+    return `
       <div class="efp-search-row">
-        <input type="text" class="efp-search" placeholder="🔍 搜索筛选..." value="${currentKw}" />
+        <input type="text" class="efp-search" placeholder="🔍 搜索筛选..." value="${escAttr(currentKw)}" />
       </div>
       ${tableKey && colField ? `
       <div class="efp-align-row" title="设置该列对齐方式（会按数据表+列名记忆）">
@@ -863,8 +843,6 @@ const TableUtils = {
       ` : ''}
       <div class="efp-values" style="max-height:280px;overflow-y:auto;">
         ${sortedValues.length > 0 ? sortedValues.map(([val, count]) => {
-          // 🟢 v148：「默认勾选」= 显示；仅 excluded 列表里的项取消勾选。
-          //   这样翻页到不同值集（新页的值不在原记忆里）时默认全部勾选，符合直觉。
           const isChecked = !excludedSet.has(val);
           return `
           <label class="efp-item">
@@ -881,45 +859,35 @@ const TableUtils = {
         <button class="efp-action-btn efp-cancel">取消</button>
       </div>
     `;
-    popup.style.position = 'fixed';
-    popup.style.zIndex = '9999';
-    popup.addEventListener('mousedown', (e) => e.stopPropagation());
+  },
 
-    // 🟢 v147：弹窗跟随标题行（而不是钉死在打开瞬间的视口坐标）。
-    //   每次定位都从 th.getBoundingClientRect() 实时读取——
-    //   外层滚动/表格横滚时，th 的视口位置变化，弹窗跟着移动，与标题行保持相对不变。
-    //   这也兼容 position:fixed 在特殊环境下（Safari 特殊模式 / 含 transform 的祖先）失效的场景。
-    //   注意：updatePopupPos 必须无条件设置样式（初始调用时 popup 尚未 appendChild，isConnected=false），
-    //   所以把 isConnected 守卫放到滚动回调里，而不是 updatePopupPos 内部。
+  _attachFilterPopupPositioning(popup, th) {
     const popupWidth = 280;
     const updatePopupPos = () => {
       const r = th.getBoundingClientRect();
       popup.style.left = Math.min(r.right, window.innerWidth - popupWidth - 8) + 'px';
       popup.style.top = (r.bottom + 6) + 'px';
     };
-    // 初始定位（在 append 到 body 之前设置 left/top，避免一帧闪到 0,0）
     updatePopupPos();
     document.body.appendChild(popup);
-
     const contentScroll = document.querySelector('.content-scroll');
     const onScroll = () => {
-      // 弹窗已关闭（popup 被移除）时直接 return，避免对已脱离 DOM 的元素写样式
       if (!popup.isConnected) return;
       updatePopupPos();
     };
     window.addEventListener('scroll', onScroll, { passive: true, capture: true });
     if (contentScroll) contentScroll.addEventListener('scroll', onScroll, { passive: true });
-    // 关闭时统一解绑（保存到 popup 上供 _hideFilterPopup 使用）
     popup._wbLockHandlers = { onScroll, contentScroll };
-    // 表格本身在 .table-wrapper 内有横向/纵向滚动时也要监听（弹窗跟随表头）
     const tableWrapper = th.closest('.table-wrapper');
     if (tableWrapper) tableWrapper.addEventListener('scroll', onScroll, { passive: true });
     popup._wbLockHandlers.tableWrapper = tableWrapper;
+  },
 
+  _bindFilterPopupEvents(popup, ctx) {
+    const { onConfirm, tableKey, colField, applyAlign, curAlign, excludedSet } = ctx;
     const searchInput = popup.querySelector('.efp-search');
     const allCbs = popup.querySelectorAll('.efp-cb');
 
-    // 搜索过滤复选列表
     searchInput.addEventListener('input', () => {
       const kw = searchInput.value.toLowerCase().trim();
       allCbs.forEach(cb => {
@@ -929,12 +897,10 @@ const TableUtils = {
       });
     });
 
-    // 全选
     popup.querySelector('.efp-select-all').addEventListener('click', () => {
       allCbs.forEach(cb => { cb.checked = true; cb.closest('.efp-item').style.display = ''; });
     });
 
-    // 反选
     popup.querySelector('.efp-invert').addEventListener('click', () => {
       allCbs.forEach(cb => {
         if (cb.closest('.efp-item').style.display !== 'none') {
@@ -943,7 +909,6 @@ const TableUtils = {
       });
     });
 
-    // 🟢 v113：对齐按钮组 - 点击即时生效并写入偏好
     let pendingAlign = curAlign;
     popup.querySelectorAll('.efp-align-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -951,31 +916,24 @@ const TableUtils = {
         const a = btn.dataset.align;
         pendingAlign = a;
         popup.querySelectorAll('.efp-align-btn').forEach(b => b.classList.toggle('active', b.dataset.align === a));
-        // 即时更新 DOM（无需等待确定）
         applyAlign(a);
         if (tableKey && colField) TablePrefs.setAlign(tableKey, colField, a);
       });
     });
 
-    // 确定 → 收集「未勾选」值作为 excluded（默认勾选=显示），并带上搜索关键词
-    // 🟢 v148：筛选记忆是「全局、跨页持久」的——以打开瞬间的 excluded 为基准并集当前页新取消的项，
-    //   不能因翻页后当前页值集不同就整体覆盖（否则翻页看一眼弹窗就会丢掉原筛选）。
     popup.querySelector('.efp-ok').addEventListener('click', () => {
       const allVals = Array.from(popup.querySelectorAll('.efp-cb')).map(cb => cb.dataset.val);
       const checkedVals = Array.from(popup.querySelectorAll('.efp-cb:checked')).map(cb => cb.dataset.val);
-      const pageUnchecked = allVals.filter(v => !checkedVals.includes(v)); // 当前页被取消勾选的项
-      // 最终 excluded = 基准（跨页持久）∪ 当前页新取消的项；再把「当前页被重新勾上的原排除项」移除
+      const pageUnchecked = allVals.filter(v => !checkedVals.includes(v));
       const finalExcluded = new Set(excludedSet);
       pageUnchecked.forEach(v => finalExcluded.add(v));
       excludedSet.forEach(v => { if (allVals.includes(v) && checkedVals.includes(v)) finalExcluded.delete(v); });
       const kw = searchInput.value.trim();
-      // 仅当有搜索词、或确有排除项时，才算作有效筛选
       const filterState = (kw || finalExcluded.size > 0) ? { kw, excluded: Array.from(finalExcluded) } : { kw: '', excluded: [] };
       onConfirm(filterState);
       this._hideFilterPopup();
     });
 
-    // 取消 → 还原对齐（如果临时调整过）
     popup.querySelector('.efp-cancel').addEventListener('click', () => {
       if (pendingAlign !== curAlign) {
         applyAlign(curAlign);
@@ -984,16 +942,12 @@ const TableUtils = {
       this._hideFilterPopup();
     });
 
-    // Enter/Escape 快捷键
     searchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { popup.querySelector('.efp-ok').click(); }
       if (e.key === 'Escape') { popup.querySelector('.efp-cancel').click(); }
     });
-
-    searchInput.focus();
-
-    TableUtils._filterPopup = popup;
   },
+
 
   _escapeHtml(str) {
     const d = document.createElement('div');
@@ -1002,7 +956,8 @@ const TableUtils = {
   },
 
   _escapeAttr(str) {
-    return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    return String(str == null ? '' : str).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   },
 
   _hideFilterPopup() {
@@ -1217,22 +1172,28 @@ const TableUtils = {
       return (lbl ? lbl.textContent : th.textContent).trim();
     });
 
-    // 标记表格已处理过列宽布局（但不阻止补手柄）
     const firstTime = table.dataset.colResize !== '1';
     if (firstTime) {
-      // 🟢 v146：在「锁定宽度」循环修改 th.style.width 之前，先判定是否为「模板预设列宽」表格
-      //   （如订货核对：源 HTML 表头带 inline width 且 ≥80% 列有预设、且预设总和 > 容器宽）。
-      //   必须在锁定循环前判定——循环会把所有列都写上 inline width，否则 preset 会误判为全列预设，
-      //   导致普通表格（入库存/订单列表等）也被当成预设表、跳过基线记忆写入（即之前的 prefs:null 问题）。
-      const _scrollP = this._findScrollParent(table) || table.parentElement;
-      const _containerW0 = (_scrollP ? _scrollP.clientWidth
-        : (table.parentElement ? table.parentElement.clientWidth : table.offsetWidth)) - 2;
-      const _presetThs = Array.from(ths).filter(th => parseFloat(th.style.width) > 0);
-      const hasPreset = ths.length >= 3
-        && _presetThs.length >= Math.ceil(ths.length * 0.8)
-        && _presetThs.reduce((a, th) => a + parseFloat(th.style.width), 0) > _containerW0;
+      const hasPreset = this._detectPresetColumns(table, ths);
+      const remembered = this._readRememberedWidths(ths, tableKey, getColField);
+      this._lockWidthsAndBaseline(table, ths, tableKey, getColField, hasPreset, remembered);
+    }
 
-    // 🟢 v113：先尝试从 TablePrefs 还原用户上次拖过的宽度
+    this._applyPcConstraints(table, tableKey);
+    this._bindResizeHandles(table, ths, tableKey, getColField);
+  },
+
+  _detectPresetColumns(table, ths) {
+    const _scrollP = this._findScrollParent(table) || table.parentElement;
+    const _containerW0 = (_scrollP ? _scrollP.clientWidth
+      : (table.parentElement ? table.parentElement.clientWidth : table.offsetWidth)) - 2;
+    const _presetThs = Array.from(ths).filter(th => parseFloat(th.style.width) > 0);
+    return ths.length >= 3
+      && _presetThs.length >= Math.ceil(ths.length * 0.8)
+      && _presetThs.reduce((a, th) => a + parseFloat(th.style.width), 0) > _containerW0;
+  },
+
+  _readRememberedWidths(ths, tableKey, getColField) {
     const remembered = {};
     if (tableKey) {
       ths.forEach((th, idx) => {
@@ -1242,9 +1203,10 @@ const TableUtils = {
         if (w) remembered[idx] = w;
       });
     }
+    return remembered;
+  },
 
-    // 锁定当前各列宽度：已有 style.width 则保留，否则按当前渲染宽度锁定
-    // 同时设置 min-width，避免 table-layout:fixed 下 width 被浏览器压缩失效
+  _lockWidthsAndBaseline(table, ths, tableKey, getColField, hasPreset, remembered) {
     let colSum = 0;
     ths.forEach((th, idx) => {
       const rememberedW = remembered[idx];
@@ -1261,56 +1223,40 @@ const TableUtils = {
       colSum += w;
     });
 
-      // 🟢 v146：同步锁定表格总宽 = 各列宽之和（避免浏览器按 100% 拉伸导致跨页列宽不一致/翻页闪烁）
-      //  1) 若有记忆列宽，sum 由记忆值决定，跨页完全一致；
-      //  2) 若无任何记忆且表格无模板预设列宽（如入库存/订单列表等普通表格）：
-      //     把首屏各列宽度作为"默认基线记忆"写入，保证后续翻页列宽与首屏一致；
-      //     - 若首屏 colSum ≤ 容器宽：直接写基线，table.style.width = colSum（无横滚）；
-      //     - 若首屏 colSum > 容器宽：等比缩到容器宽再写基线（保证基线总和 ≤ 容器，避免无横滚表格被锁入横滚模式）。
-      //  3) 模板预设列宽的表格（如订货核对）：跳过基线写入，让 v145 横滚模式接管（保留设计列宽 + 可横滚）。
-      if (tableKey && !TablePrefs.hasAnyColWidth(tableKey)) {
-        // hasPreset 已在 firstTime 顶部（锁定循环前）判定，避免被锁定循环污染 th.style.width
-        if (!hasPreset) {
-          const scrollParent = this._findScrollParent(table) || table.parentElement;
-          const containerW = (scrollParent ? scrollParent.clientWidth
-            : (table.parentElement ? table.parentElement.clientWidth : table.offsetWidth)) - 2;
-          if (colSum > containerW && containerW > 0 && colSum > 0) {
-            // 等比压缩到容器宽，保证基线总和 ≤ 容器宽（用户期望无横滚 + 跨页一致）
-            const scale = containerW / colSum;
-            ths.forEach((th) => {
-              const w = Math.max(36, Math.round(parseFloat(th.style.width) * scale));
-              th.style.width = w + 'px';
-              th.style.minWidth = w + 'px';
-            });
-            colSum = containerW;
-          }
-          // 写基线记忆（保证后续翻页读这份基线，跨页列宽完全一致）
+    if (tableKey && !TablePrefs.hasAnyColWidth(tableKey)) {
+      if (!hasPreset) {
+        const scrollParent = this._findScrollParent(table) || table.parentElement;
+        const containerW = (scrollParent ? scrollParent.clientWidth
+          : (table.parentElement ? table.parentElement.clientWidth : table.offsetWidth)) - 2;
+        if (colSum > containerW && containerW > 0 && colSum > 0) {
+          const scale = containerW / colSum;
           ths.forEach((th) => {
-            const field = getColField(th);
-            if (!field) return;
-            const w = parseFloat(th.style.width);
-            if (!isNaN(w) && w > 0) TablePrefs.setColWidth(tableKey, field, w);
+            const w = Math.max(36, Math.round(parseFloat(th.style.width) * scale));
+            th.style.width = w + 'px';
+            th.style.minWidth = w + 'px';
           });
+          colSum = containerW;
         }
+        ths.forEach((th) => {
+          const field = getColField(th);
+          if (!field) return;
+          const w = parseFloat(th.style.width);
+          if (!isNaN(w) && w > 0) TablePrefs.setColWidth(tableKey, field, w);
+        });
       }
-      if (colSum > 0) {
-        table.style.width = colSum + 'px';
-        table.style.minWidth = colSum + 'px';
-      }
-
-      // 切换到固定布局以支持精确拖拽
-      if (getComputedStyle(table).tableLayout !== 'fixed') {
-        table.style.tableLayout = 'fixed';
-      }
-
-      table.dataset.colResize = '1';
+    }
+    if (colSum > 0) {
+      table.style.width = colSum + 'px';
+      table.style.minWidth = colSum + 'px';
     }
 
-    // 🟢 v145：PC 端列宽约束（桌面端）。
-    //   - 若表格「有用户记忆列宽」或「模板预设列宽且总和 > 容器」（如订货核对明细表），
-    //     则尊重已有列宽、不压缩：表格宽 = 列宽之和，由可横滚祖先提供横向滚动（标题正常展开、不挤）。
-    //   - 否则维持 v142 行为：等比压缩到容器宽、最后一列贴右、无横滚。
-    //   移动端由列折叠逻辑（_applyCollapse）管理 table 宽度，这里跳过。
+    if (getComputedStyle(table).tableLayout !== 'fixed') {
+      table.style.tableLayout = 'fixed';
+    }
+    table.dataset.colResize = '1';
+  },
+
+  _applyPcConstraints(table, tableKey) {
     if (window.innerWidth > 768) {
       const useScrollMode = this._shouldUseScrollMode(table, tableKey);
       if (useScrollMode) {
@@ -1319,10 +1265,12 @@ const TableUtils = {
         this._fitColumnsToContainer(table);
       }
     }
+  },
 
+  _bindResizeHandles(table, ths, tableKey, getColField) {
     ths.forEach(th => {
       if (th.dataset.noresize === '1') return;
-      if (th.querySelector(':scope > .col-resize-handle')) return; // 已有手柄则跳过
+      if (th.querySelector(':scope > .col-resize-handle')) return;
 
       const handle = document.createElement('span');
       handle.className = 'col-resize-handle';
@@ -1340,9 +1288,6 @@ const TableUtils = {
         const onMove = (ev) => {
           let newWidth = Math.max(30, startWidth + (ev.clientX - startX));
           if (isDesktop) {
-            // 🟢 v142：约束总宽 ≤ 容器宽。先算出"除本列外其他列宽之和"，
-            //   本列最大可到 (容器宽 - 2 - 其他列和)，阻止继续拉宽到溢出；其他列不受影响。
-            //   缩小本列不受此上限约束（只会腾出空间，不会溢出）。
             const otherSum = Array.from(table.querySelectorAll('thead th')).reduce((sum, t) => {
               if (t === th) return sum;
               const w = parseFloat(t.style.minWidth || t.style.width);
@@ -1352,12 +1297,10 @@ const TableUtils = {
             newWidth = Math.min(newWidth, maxForThis);
             th.style.width = newWidth + 'px';
             th.style.minWidth = newWidth + 'px';
-            // 同步表格总宽（= 各列之和，已 ≤ 容器宽），避免最后一列被挤出 / 出现横滚
             const total = otherSum + newWidth;
             table.style.width = total + 'px';
             table.style.minWidth = total + 'px';
           } else {
-            // 移动端：仅改本列宽度，table 宽度交由列折叠逻辑管理
             th.style.width = newWidth + 'px';
             th.style.minWidth = newWidth + 'px';
           }
@@ -1366,9 +1309,7 @@ const TableUtils = {
           document.body.classList.remove('col-resizing');
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
-          // 🟢 v142：桌面端拖完再同步一次表格总宽，确保不溢出
           if (isDesktop) this._fitColumnsToContainer(table);
-          // 🟢 v113：拖拽结束 → 写回 TablePrefs
           if (tableKey) {
             const field = getColField(th);
             const finalW = parseFloat(th.style.width || th.style.minWidth || th.offsetWidth);
@@ -1381,6 +1322,7 @@ const TableUtils = {
       });
     });
   },
+
 
   /**
    * 查找 table 的横向可滚动祖先（overflow-x: auto/scroll）

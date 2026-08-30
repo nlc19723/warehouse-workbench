@@ -5,7 +5,7 @@
 const InboundModule = {
   currentFilter: {},
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
 
   // 默认固定日期区间：3 个月前的 1 号 → 今日（按本地时区格式化）
   getDefaultDateRange() {
@@ -43,11 +43,11 @@ const InboundModule = {
     content.innerHTML = `
       <div class="filter-bar filter-bar-two-row" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;padding:0;">
         <div class="filter-row filter-row-main" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
-          <input type="text" id="inboundKw" class="filter-search-short" placeholder="搜索订单编号、入库单号、供应商、物料..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')InboundModule.applyFilter()">
+          <input type="text" id="inboundKw" class="filter-search-short" placeholder="搜索订单编号、入库单号、供应商、物料..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')InboundModule.applyFilter()">
           <div class="filter-row-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:4px;">
-            <input type="text" id="inboundStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="InboundModule.onDateChange()" readonly>
+            <input type="text" id="inboundStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="InboundModule.onDateChange()" readonly>
             <span class="filter-sep">至</span>
-            <input type="text" id="inboundEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="InboundModule.onDateChange()" readonly>
+            <input type="text" id="inboundEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="InboundModule.onDateChange()" readonly>
           </div>
           <div class="filter-row-buttons" style="display:flex;gap:6px;">
             <button class="search-glass" onclick="InboundModule.applyFilter()">筛选</button>
@@ -58,11 +58,11 @@ const InboundModule = {
         <div class="filter-row filter-row-selects" style="display:flex;gap:10px;margin:0;padding:0;">
           <select id="inboundSupplier" title="按供应商筛选">
             <option value="">全部供应商</option>
-            ${suppliers.map(s => `<option value="${s}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${s}</option>`).join('')}
+            ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
           </select>
           <select id="inboundProject" title="按项目筛选">
             <option value="">全部项目</option>
-            ${projects.map(p => `<option value="${p}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${p}</option>`).join('')}
+            ${projects.map(p => `<option value="${escAttr(p)}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
           </select>
         </div>
       </div>
@@ -384,7 +384,7 @@ const InboundModule = {
     const dr = this.getDefaultDateRange();
     this.currentFilter = { startDate: dr.start, endDate: dr.end };
     this.currentPage = 1;
-    this.pageSize = 20;
+    this.pageSize = AppConfig.app.defaultPageSize;
     this.render();
   },
 

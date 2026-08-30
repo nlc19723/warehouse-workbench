@@ -5,7 +5,7 @@
 const SupplierModule = {
   currentFilter: {},
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
 
   async render(token) {
     if (token !== undefined) this._rt = token;
@@ -17,14 +17,14 @@ const SupplierModule = {
 
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="supplierKw" placeholder="搜索供应商名称..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')SupplierModule.applyFilter()">
+        <input type="text" id="supplierKw" placeholder="搜索供应商名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')SupplierModule.applyFilter()">
         <select id="supplierType">
           <option value="">全部类型</option>
-          ${types.map(t => `<option value="${t}" ${this.currentFilter.类型 === t ? 'selected' : ''}>${t}</option>`).join('')}
+          ${types.map(t => `<option value="${escAttr(t)}" ${this.currentFilter.类型 === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
         </select>
         <select id="supplierDept">
           <option value="">全部招采部门</option>
-          ${departments.map(d => `<option value="${d}" ${this.currentFilter.招采部门 === d ? 'selected' : ''}>${d}</option>`).join('')}
+          ${departments.map(d => `<option value="${escAttr(d)}" ${this.currentFilter.招采部门 === d ? 'selected' : ''}>${esc(d)}</option>`).join('')}
         </select>
         <select id="contractWarn">
           <option value="">合同状态</option>
@@ -57,10 +57,32 @@ const SupplierModule = {
     if (allZero) {
       try {
         const inbound = await DataStore.getRows('inbound');
+        // 🟢 v209 AUDIT-305：每个供应商的「所属年度」= 年度合同到期时间的年份；
+        //   只汇总该年度内的入库，避免跨年入库被计入导致占比远超 100%。
+        const yearBySup = new Map();
+        suppliers.forEach(s => {
+          if (!s.供应商) return;
+          const y = s.年度合同到期时间 ? new Date(s.年度合同到期时间 + 'T00:00:00').getFullYear() : NaN;
+          if (!isNaN(y)) yearBySup.set(s.供应商, y);
+        });
         const map = new Map();
-        inbound.forEach(row => { const sup=row.供应商; if(sup) map.set(sup, (map.get(sup)||0)+(parseFloat(row.原币价税合计)||0)); });
-        suppliers.forEach(s => { if(map.has(s.供应商)) { s.年度已供入库金额=map.get(s.供应商); if(s.年度合同金额>0) s.年度已供入库金额占比=s.年度已供入库金额/s.年度合同金额; }});
-      } catch(e){/*ignore*/}
+        inbound.forEach(row => {
+          const sup = row.供应商;
+          if (!sup) return;
+          const yr = row.入库日期 ? new Date(row.入库日期 + 'T00:00:00').getFullYear() : NaN;
+          const targetYr = yearBySup.get(sup);
+          if (targetYr && !isNaN(yr) && yr !== targetYr) return; // 非合同所属年度 → 跳过（无年度信息则全计，降级兼容）
+          map.set(sup, (map.get(sup) || 0) + (parseFloat(row.原币价税合计) || 0));
+        });
+        suppliers.forEach(s => {
+          if (map.has(s.供应商)) {
+            s.年度已供入库金额 = map.get(s.供应商);
+            if (s.年度合同金额 > 0) s.年度已供入库金额占比 = s.年度已供入库金额 / s.年度合同金额;
+          }
+        });
+      } catch(e){
+    /*ignore*/ console.warn('[supplier.js:83] 异常(已忽略):', e);
+  }
     }
 
     const contractWarn = document.getElementById('contractWarn')?.value;
@@ -243,7 +265,7 @@ const SupplierModule = {
   resetFilter() {
     this.currentFilter = {};
     this.currentPage = 1;
-    this.pageSize = 20;
+    this.pageSize = AppConfig.app.defaultPageSize;
     document.getElementById('supplierKw').value = '';
     document.getElementById('supplierType').value = '';
     document.getElementById('supplierDept').value = '';
@@ -409,11 +431,15 @@ const SupplierModule = {
 
     // 🟡 先销毁旧实例（M4）：反复打开详情弹窗会累积 Chart 实例（Chart.js 全局注册表），
     // 旧实例不销毁会导致内存泄漏、动画帧持续运行。
-    if (this._supOrderChart) { try { this._supOrderChart.destroy(); } catch (e) {} this._supOrderChart = null; }
+    if (this._supOrderChart) { try { this._supOrderChart.destroy(); } catch (e) {
+    console.warn('[supplier.js:432] 异常(已忽略):', e);
+  } this._supOrderChart = null; }
     if (orderCanvas && typeof Chart !== 'undefined') {
       this._supOrderChart = new Chart(orderCanvas, chartOpts('订单金额', '#357ABD', data.orderAmounts));
     }
-    if (this._supInboundChart) { try { this._supInboundChart.destroy(); } catch (e) {} this._supInboundChart = null; }
+    if (this._supInboundChart) { try { this._supInboundChart.destroy(); } catch (e) {
+    console.warn('[supplier.js:436] 异常(已忽略):', e);
+  } this._supInboundChart = null; }
     if (inboundCanvas && typeof Chart !== 'undefined') {
       this._supInboundChart = new Chart(inboundCanvas, chartOpts('入库金额', '#28a745', data.inboundAmounts));
     }

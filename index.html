@@ -10,7 +10,7 @@
   <link rel="manifest" href="manifest.json?v=2">
   <meta name="theme-color" content="#357ABD">
   <title>库管系统工作台</title>
-  <link rel="stylesheet" href="css/style.css?v=203">
+  <link rel="stylesheet" href="css/style.css?v=213">
   <script defer src="lib/dexie.min.js?v=55"></script>
   <script defer src="lib/chart.min.js?v=55"></script>
   <script defer src="lib/xlsx.full.min.js?v=55"></script>
@@ -279,42 +279,43 @@ document.addEventListener('DOMContentLoaded', function(){
   </div>
 
   <script defer src="lib/jszip.min.js?v=1"></script>
-  <script defer src="js/table-utils.js?v=199"></script>
-  <script defer src="js/qr-util.js?v=1"></script>
-  <script defer src="js/qr-scan.js?v=198"></script>
-  <script defer src="js/search-select.js?v=182"></script>
-  <script defer src="js/entity-links.js?v=182"></script>
-  <script defer src="js/db.js?v=201"></script>
-  <script defer src="js/config.js?v=198"></script>
+  <script defer src="js/table-utils.js?v=213"></script>
+  <script defer src="js/qr-util.js?v=213"></script>
+  <script defer src="js/qr-scan.js?v=213"></script>
+  <script defer src="js/search-select.js?v=213"></script>
+  <script defer src="js/entity-links.js?v=213"></script>
+  <script defer src="js/db.js?v=213"></script>
+  <script defer src="js/config.js?v=213"></script>
   <!-- 🟢 v200：工作台主题弹窗（替换浏览器原生 alert/confirm/prompt） -->
-  <script defer src="js/modal.js?v=200"></script>
-  <script defer src="js/sync.js?v=182"></script>
-  <script defer src="js/data-loader.js?v=186"></script>
-  <script defer src="js/dashboard.js?v=182"></script>
-  <script defer src="js/supplier.js?v=182"></script>
-  <script defer src="js/query.js?v=182"></script>
-  <script defer src="js/reconciliation.js?v=182"></script>
-  <script defer src="js/order-track.js?v=199"></script>
-  <script defer src="js/inventory-alert.js?v=182"></script>
-  <script defer src="js/order-check.js?v=199"></script>
-  <script defer src="js/components/datepicker.js?v=182"></script>
-  <script defer src="js/orders.js?v=182"></script>
-  <script defer src="js/inbound.js?v=182"></script>
-  <script defer src="js/stock.js?v=198"></script>
-  <script defer src="js/pricing.js?v=182"></script>
-  <script defer src="js/low-turnover.js?v=182"></script>
-  <script defer src="js/breach.js?v=182"></script>
-  <script defer src="js/outbound.js?v=199"></script>
-  <script defer src="js/stock-detail.js?v=198"></script>
-  <script defer src="js/supplier-detail.js?v=182"></script>
-  <script defer src="js/order-detail.js?v=182"></script>
-  <script defer src="js/color-theme.js?v=182"></script>
-  <script defer src="js/app.js?v=198"></script>
+  <script defer src="js/modal.js?v=213"></script>
+  <script defer src="js/sync.js?v=213"></script>
+  <script defer src="js/data-loader.js?v=213"></script>
+  <script defer src="js/dashboard.js?v=213"></script>
+  <script defer src="js/supplier.js?v=213"></script>
+  <script defer src="js/query.js?v=213"></script>
+  <script defer src="js/reconciliation.js?v=213"></script>
+  <script defer src="js/order-track.js?v=213"></script>
+  <script defer src="js/inventory-alert.js?v=213"></script>
+  <script defer src="js/order-check.js?v=213"></script>
+  <script defer src="js/components/datepicker.js?v=213"></script>
+  <script defer src="js/orders.js?v=213"></script>
+  <script defer src="js/inbound.js?v=213"></script>
+  <script defer src="js/stock.js?v=213"></script>
+  <script defer src="js/pricing.js?v=213"></script>
+  <script defer src="js/low-turnover.js?v=213"></script>
+  <script defer src="js/breach.js?v=213"></script>
+  <script defer src="js/outbound.js?v=213"></script>
+  <script defer src="js/stock-detail.js?v=213"></script>
+  <script defer src="js/supplier-detail.js?v=213"></script>
+  <script defer src="js/order-detail.js?v=213"></script>
+  <script defer src="js/color-theme.js?v=213"></script>
+  <script defer src="js/app.js?v=213"></script>
+  <script defer src="js/globals.js?v=213"></script>
   <!-- PWA: 注册 Service Worker（支持离线 + 安装为桌面应用） -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('service-worker.js?v=55').then(function(reg) {
+        navigator.serviceWorker.register('service-worker.js?v=213').then(function(reg) {
           console.log('[PWA] Service Worker 注册成功:', reg.scope);
         }).catch(function(err) {
           console.warn('[PWA] Service Worker 注册失败:', err);
@@ -396,8 +397,79 @@ document.addEventListener('DOMContentLoaded', function(){
         '.nojekyll'
       ];
 
-      // 权威文件清单：优先从 SOURCE_FILES.json 读取（由 tools/gen-source-list.mjs 扫描生成，
-      // 自动包含所有新增/改动的业务文件，避免硬编码清单漏文件）；若清单缺失则回退内置 FILES_TO_PACKAGE。
+      // ===== 动态清单：优先用「目录列表扫描」实时获取当前部署的所有源码文件 =====
+      // 这样以后新增任何文件，无需手动更新 SOURCE_FILES.json，下载的源码包都会自动包含。
+      // 仅当服务器不支持目录列表（如 GitHub Pages）时，才回退到 SOURCE_FILES.json / 内置清单。
+      var SCAN_ROOTS = ['js', 'lib', 'css', 'icons'];
+      var SKIP_DIRS  = new Set(['node_modules', '.git', 'tools', 'scripts', 'releases']);
+      var ROOT_FILES = ['index.html', 'manifest.json', 'service-worker.js',
+                        '.gitignore', '.gitlab-ci.yml', '.nojekyll', 'SOURCE_FILES.json',
+                        '.github/workflows/deploy.yml', 'releases/app-manifest.json'];
+      function _isDevJunk(name) {
+        return /^(dp-|settings-verify)/.test(name) || name.endsWith('_preview.html') || name.endsWith('.md');
+      }
+      // 仅在「目录扫描」路径下排除无用图片：保留 manifest 引用的 PWA 图标
+      // (icons/icon-<size>.png|svg)，排除设计稿/预览/截图/草稿类图片（如 icon-design.svg）。
+      function _isUselessImage(name) {
+        var lower = name.toLowerCase();
+        if (!/\.(png|jpe?g|gif|webp|svg)$/.test(lower)) return false;
+        return /\bdesign\b|preview|screenshot|_bak|mock|draft|tmp/i.test(lower);
+      }
+      async function _listDirEntries(relDir) {
+        try {
+          var resp = await fetch(relDir + (relDir.endsWith('/') ? '' : '/') + '?_=' + Date.now());
+          if (!resp.ok) return null;
+          var html = await resp.text();
+          var out = [], re = /<a\s+href="([^"]+)"/gi, m;
+          while ((m = re.exec(html))) {
+            var h = decodeURIComponent(m[1]);
+            if (h === '../' || h.charAt(0) === '/' || /^https?:/i.test(h)) continue;
+            out.push(h);
+          }
+          return out;
+        } catch (e) { return null; }
+      }
+      async function _scanRecursive(relDir) {
+        var entries = await _listDirEntries(relDir);
+        if (!entries) return [];
+        var files = [], base = relDir === '' ? '' : relDir + '/';
+        for (var i = 0; i < entries.length; i++) {
+          var e = entries[i];
+          if (e.charAt(e.length - 1) === '/') {
+            var dirName = e.slice(0, -1);
+            if (SKIP_DIRS.has(dirName) || dirName.charAt(0) === '.') continue;
+            files = files.concat(await _scanRecursive(base + dirName));
+          } else {
+            if (e.charAt(0) === '.' || _isDevJunk(e) || _isUselessImage(e)) continue;
+            files.push(base + e);
+          }
+        }
+        return files;
+      }
+      async function scanSourceDirs() {
+        var files = [];
+        for (var i = 0; i < SCAN_ROOTS.length; i++) {
+          files = files.concat(await _scanRecursive(SCAN_ROOTS[i]));
+        }
+        files = files.concat(ROOT_FILES);
+        return files;
+      }
+      async function buildPackageList() {
+        // 1) 优先：目录列表动态扫描（沙箱 http.server 支持 → 实时最新，新增即包含）
+        try {
+          var dyn = await scanSourceDirs();
+          if (dyn && dyn.length) {
+            console.log('[download] 动态目录扫描，共 ' + dyn.length + ' 个文件（新增文件自动包含）');
+            return dyn;
+          }
+        } catch (e) { console.warn('[download] 目录扫描失败，回退清单', e.message); }
+        // 2) 回退：SOURCE_FILES.json 权威清单（GitHub Pages 等不支持目录列表时）
+        var sl = await loadFileList();
+        if (sl) return sl;
+        // 3) 最后回退：内置硬编码清单
+        return FILES_TO_PACKAGE;
+      }
+      // 权威清单：由 tools/gen-source-list.mjs 扫描生成，作为目录列表不可用时的回退。
       async function loadFileList() {
         try {
           const resp = await fetch('SOURCE_FILES.json?' + new Date().getTime()); // 加时间戳防止缓存
@@ -427,7 +499,7 @@ document.addEventListener('DOMContentLoaded', function(){
           error.textContent = 'JSZip 库未加载，请刷新页面后重试';
           return;
         }
-        const baseList = await loadFileList() || FILES_TO_PACKAGE;
+        const baseList = await buildPackageList();
         // dotfile（.github/.gitignore/.gitlab-ci.yml/.nojekyll）在部分 CDN 会被屏蔽(403)，
         // 用内嵌兜底内容写入，确保无论用哪种清单都能齐全，不被遗漏。
         const dotKeys = Object.keys(DOTFILE_FALLBACKS);

@@ -5,7 +5,7 @@
 const OrderTrackModule = {
   currentFilter: { keyword: '', supplier: '' },
   currentPage: 1,
-  pageSize: 50,
+  pageSize: AppConfig.app.orderTrackPageSize,
 
   async render(token) {
     if (token !== undefined) this._rt = token;
@@ -16,10 +16,10 @@ const OrderTrackModule = {
 
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="trackKw" placeholder="搜索订单编号、供应商、存货名称..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')OrderTrackModule.applyFilter()">
+        <input type="text" id="trackKw" placeholder="搜索订单编号、供应商、存货名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')OrderTrackModule.applyFilter()">
         <select id="trackSupplier">
           <option value="">全部供应商</option>
-          ${suppliers.map(s => `<option value="${s}" ${this.currentFilter.supplier === s ? 'selected' : ''}>${s}</option>`).join('')}
+          ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.supplier === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
         </select>
         <button class="search-glass" onclick="OrderTrackModule.applyFilter()">筛选</button>
         <button class="secondary" onclick="OrderTrackModule.resetFilter()">重置</button>

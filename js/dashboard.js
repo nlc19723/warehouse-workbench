@@ -31,8 +31,26 @@ const DashboardModule = {
     const completeness = await DataStore.getCompletenessStats();
     this._completeness = completeness;
 
-    // 生成 CoverFlow HTML
-    const cfCards = this.coverflowItems.map((item, idx) => {
+    const cfCards = this._buildCoverflowHtml();
+
+    if (token !== undefined && token !== App._goToken) return; // 渲染令牌：过期渲染不再提交 DOM，避免快速切换互相覆盖
+    content.innerHTML = this._buildDashboardHtml(stats, completeness, cfCards);
+
+    // 🟡 修复：一次性预拉取并缓存各表，各图表方法共用，避免重复全表扫描
+    this._cacheData = {};
+    await Promise.all([
+      this._getCached('inbound'), this._getCached('orders'), this._getCached('suppliers'),
+      this._getCached('stock'), this._getCached('inventoryAlerts'), this._getCached('lowTurnover')
+    ]);
+    if (token !== undefined && token !== App._goToken) return;
+
+    // 渲染子组件
+    await this._renderDashboardWidgets(stats);
+  },
+
+  // 生成 CoverFlow 卡片 HTML
+  _buildCoverflowHtml() {
+    return this.coverflowItems.map((item, idx) => {
       const pos = this.getCoverflowPos(idx);
       return `<div class="coverflow-card ${pos.cls}" data-cf-idx="${idx}" data-module="${item.id}"
             onclick="DashboardModule.handleCoverflowClick(${idx}, '${item.id}')"
@@ -42,9 +60,11 @@ const DashboardModule = {
         <div class="cf-desc">${item.desc}</div>
       </div>`;
     }).join('');
+  },
 
-    if (token !== undefined && token !== App._goToken) return; // 渲染令牌：过期渲染不再提交 DOM，避免快速切换互相覆盖
-    content.innerHTML = `
+  // 组装仪表盘整体 HTML（CoverFlow / Widget / KPI / 图表容器 / 完整性看板）
+  _buildDashboardHtml(stats, completeness, cfCards) {
+    return `
       <!-- 3D CoverFlow 快捷入口 -->
       <div class="coverflow-wrapper" style="position:relative;padding:0 12px;margin-bottom:18px;">
         <button class="coverflow-nav prev-btn" onclick="DashboardModule.coverflowPrev()">‹</button>
@@ -157,18 +177,12 @@ const DashboardModule = {
         </div>
         <div class="chart-container"><canvas id="compareChart"></canvas></div>
       </div>
-    `;
+`;
+  },
 
-      // 🟡 修复：一次性预拉取并缓存各表，各图表方法共用，避免重复全表扫描
-      this._cacheData = {};
-      await Promise.all([
-        this._getCached('inbound'), this._getCached('orders'), this._getCached('suppliers'),
-        this._getCached('stock'), this._getCached('inventoryAlerts'), this._getCached('lowTurnover')
-      ]);
-      if (token !== undefined && token !== App._goToken) return;
-
-      // 渲染子组件
-      await this.renderDonut(stats);
+  // 渲染各子组件（饼图 / 待办 / 趋势图 / 角标 / CoverFlow）
+  async _renderDashboardWidgets(stats) {
+    await this.renderDonut(stats);
     await this.renderTodos(stats);
     await this.renderSupplierContractChart();
     await this.renderOrderStatusChart(stats);
@@ -332,7 +346,9 @@ const DashboardModule = {
     }
     // 🟡 修复：离开时销毁所有 Chart 实例，避免内存泄漏
     ['donutChart', 'chart', 'top10Chart', 'compareChart', 'supplierContractChart', 'restockChart'].forEach(k => {
-      if (this[k]) { try { this[k].destroy(); } catch (e) {} this[k] = null; }
+      if (this[k]) { try { this[k].destroy(); } catch (e) {
+    console.warn('[dashboard.js:335] 异常(已忽略):', e);
+  } this[k] = null; }
     });
   },
 
@@ -481,7 +497,9 @@ const DashboardModule = {
 
     // 预构建存货编码映射（供下方多个分支复用）
     let codeMap = null;
-    try { if (typeof DataLoader !== 'undefined') codeMap = await DataLoader.getStockNameSpecCodeMap(); } catch(e){/*ignore*/}
+    try { if (typeof DataLoader !== 'undefined') codeMap = await DataLoader.getStockNameSpecCodeMap(); } catch(e){
+    /*ignore*/ console.warn('[dashboard.js:484] 异常(已忽略):', e);
+  }
 
     if (type === 'restock') {
       title = '需补货物料明细';
@@ -509,7 +527,9 @@ const DashboardModule = {
           }
           // 注意：不再重算补货值，保留源数据原始值
         });
-      }catch(e){/*ignore*/}
+      }catch(e){
+    /*ignore*/ console.warn('[dashboard.js:512] 异常(已忽略):', e);
+  }
 
       // 补货值：直接使用导入时从源数据"是否需补货"(J列)读取的原始数值，不做回退计算
       list.forEach(a => { const v = parseFloat(a.补货值); a.补货值 = isNaN(v) ? 0 : v; });
@@ -537,7 +557,7 @@ const DashboardModule = {
       const list = (await this._getCached('suppliers'))
         .map(s => {
           if (!s.年度合同到期时间) return null;
-          const diff = Math.ceil((new Date(s.年度合同到期时间) - now) / 86400000);
+          const diff = Math.ceil((new Date(s.年度合同到期时间) - now) / DAY_MS);
           return (diff > 30 && diff <= 90) ? { s, diff } : null;
         })
         .filter(Boolean)

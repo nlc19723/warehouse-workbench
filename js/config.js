@@ -10,6 +10,14 @@
 //   5. 真正私密的密钥请放到服务端代理或 Cloudflare Worker 中转
 // ============================================
 
+// 🟢 v210 AUDIT-602：时间相关魔法数字抽成命名常量，消除 86400000 / 25569 散落各文件
+//   DAY_MS           —— 一天的毫秒数
+//   EXCEL_EPOCH_DAYS —— Excel 1900 日期系统下 1970-01-01 的序列号（25569）。
+//                       该基准已内含 Excel 著名的「1900 闰年 bug」偏移，用于反推 JS Date 时
+//                       无需再额外 +1，对 1970 年后的业务日期（合同/订单/入库）完全自洽。
+const DAY_MS = 86400000;
+const EXCEL_EPOCH_DAYS = 25569;
+
 window.AppConfig = {
 
   // ────────────────────────────────────────
@@ -47,14 +55,14 @@ window.AppConfig = {
     //   覆盖本处写死的兜底值。发版只需 bump CSS 版本查询参数，徽章+控制台水印全链路自动同步。
     //   本值仅作为脚本加载失败/无 ?v= 时的兜底。
     // 🟢 v201：二维码白框上下边与基础信息白框严格对齐
-    // （h3 标题脱离文档流浮在白框上方，让 align-items:stretch 自然等高）
-    version: 'v201',
+    // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
+    version: 'v213',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
-    pages: {
-      outboundListPageSize: 20   // 出库列表每页固定条数
-    }
+    defaultPageSize: 20,         // 🟢 AUDIT-603：分页每页默认条数（原散落 20+ 处写死 20）
+    orderTrackPageSize: 50,      // 🟢 AUDIT-603：订单跟踪列表每页条数（原 order-track.js 写死 50）
+    queryPageSize: 30            // 🟢 AUDIT-603：综合查询每页条数（原 query.js 写死 30）
   }
 };
 

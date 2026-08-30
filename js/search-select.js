@@ -273,7 +273,9 @@ window.enhanceSearchSelect = function (id, opts) {
   // 重入检测：元素已不在组件 wrap 内（render 重建了 DOM）→ 销毁旧实例重建
   if (cached) {
     if (el.closest && el.closest('.ss-wrap')) return cached; // 仍有效
-    try { cached.destroy(); } catch (e) {}
+    try { cached.destroy(); } catch (e) {
+    console.warn('[search-select.js:276] 异常(已忽略):', e);
+  }
     delete window._ssRegistry[id];
   }
   const ss = new SearchSelect(el, opts);

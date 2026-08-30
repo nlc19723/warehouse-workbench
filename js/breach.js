@@ -6,7 +6,7 @@ const BreachModule = {
   currentData: [],
   currentFilter: { keyword: '' },
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
 
   async render(token) {
     if (token !== undefined) this._rt = token;
@@ -14,7 +14,7 @@ const BreachModule = {
     const content = document.getElementById('contentArea');
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="breachKw" placeholder="搜索供应商名称..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')BreachModule.applyFilter()">
+        <input type="text" id="breachKw" placeholder="搜索供应商名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')BreachModule.applyFilter()">
         <button class="search-glass" onclick="BreachModule.applyFilter()">🔍 搜索</button>
         <button class="secondary" onclick="BreachModule.resetFilter()">重置</button>
         <button class="secondary" onclick="BreachModule.exportData()">📥 导出</button>

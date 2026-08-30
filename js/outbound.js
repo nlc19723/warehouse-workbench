@@ -51,7 +51,7 @@ const OutboundModule = {
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <label style="font-size:12.5px;font-weight:600;color:var(--text-muted);white-space:nowrap;">出库时间</label>
-            <input type="text" id="obDate" value="${today}" readonly class="dp-input" style="width:130px;height:34px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:13px;background:var(--card-bg);color:var(--text-main);">
+            <input type="text" id="obDate" value="${escAttr(today)}" readonly class="dp-input" style="width:130px;height:34px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:13px;background:var(--card-bg);color:var(--text-main);">
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <label style="font-size:12.5px;font-weight:600;color:var(--text-muted);white-space:nowrap;">项目名称</label>
@@ -163,7 +163,9 @@ const OutboundModule = {
       if (document.activeElement === input && this._cachedProjects.length) {
         this.showProjectAutocomplete(input, this._cachedProjects);
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+    /* ignore */ console.warn('[outbound.js:166] 异常(已忽略):', e);
+  }
   },
 
   showProjectAutocomplete(inputEl, projects) {
@@ -232,18 +234,18 @@ const OutboundModule = {
           <td style="text-align:center;color:var(--text-muted);">${idx + 1}</td>
           <td style="position:relative;">
             <input type="text" class="ob-code-input ob-input" placeholder="输入编码联想..."
-              value="${r.存货编码 || ''}"
+              value="${escAttr(r.存货编码 || '')}"
               data-row="${idx}" autocomplete="off"
               >
           </td>
           <td><input type="text" class="ob-name-input ob-detail-input" readonly placeholder="自动填充"
-            value="${r.存货名称 || ''}" data-row="${idx}"
+            value="${escAttr(r.存货名称 || '')}" data-row="${idx}"
             ></td>
           <td><input type="text" class="ob-spec-input ob-detail-input" readonly placeholder="自动填充"
-            value="${r.规格型号 || ''}" data-row="${idx}"
+            value="${escAttr(r.规格型号 || '')}" data-row="${idx}"
             ></td>
           <td style="text-align:right;"><input type="number" class="ob-qty-input" placeholder="0"
-            value="${r.出库数量 || ''}" data-row="${idx}" min="0" step="any"
+            value="${escAttr(r.出库数量 || '')}" data-row="${idx}" min="0" step="any"
             ></td>
           <td style="text-align:center;"><button onclick="OutboundModule.removeRow(${idx})" style="border:none;background:none;color:var(--status-danger);cursor:pointer;font-size:15px;padding:2px 4px;" title="删除此行">🗑️</button></td>
         </tr>`;
@@ -785,13 +787,12 @@ const OutboundModule = {
     }
 
     try {
-      // 如果是编辑模式且单号变化，先删旧数据
-      if (this.editingMode && this.currentOrderNo && this.currentOrderNo !== orderNo) {
-        await db.outbound.where('出库单号').equals(this.currentOrderNo).delete();
-      }
-
-      // 删除同单号的旧明细（upsert 语义：先删后插）
-      await db.outbound.where('出库单号').equals(orderNo).delete();
+      // 🟢 v207 AUDIT-101：删除 + 插入整体包进事务（中途失败整体回滚，不会只剩删除），
+      //   事务成功后由 DataStore.write 统一失效 outbound 表缓存。
+      //   旧代码「先删后插」无事务 + 写后不失效缓存 → 后续读取拿到进入模块时的旧快照，
+      //   再被启动时 restoreOutboundFromSettings 用旧快照覆盖本地，新单凭空消失。
+      const delOld = this.editingMode && this.currentOrderNo && this.currentOrderNo !== orderNo
+        ? this.currentOrderNo : null;
 
       // 插入新明细
       const newRecords = details.map(d => ({
@@ -805,7 +806,11 @@ const OutboundModule = {
         出库数量: d.qty
       }));
 
-      await db.outbound.bulkAdd(newRecords);
+      await DataStore.write('outbound', () => db.transaction('rw', db.outbound, async () => {
+        if (delOld) await db.outbound.where('出库单号').equals(delOld).delete();
+        await db.outbound.where('出库单号').equals(orderNo).delete();
+        await db.outbound.bulkAdd(newRecords);
+      }));
 
       this.currentOrderNo = orderNo;
       this.editingMode = false;
@@ -850,7 +855,8 @@ const OutboundModule = {
         const cnt = await db.outbound.where('出库单号').equals(headerNo).count();
         if (cnt === 0) { this.showMsg(`❌ 出库单号 "${headerNo}" 不存在`, true); return; }
         if (!await WBModal.confirm(`确定要删除出库单 "${headerNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
-        await db.outbound.where('出库单号').equals(headerNo).delete();
+        // 🟢 v207 AUDIT-101：写后失效缓存（旧代码删除后列表仍显示已删单）
+        await DataStore.write('outbound', () => db.outbound.where('出库单号').equals(headerNo).delete());
         this.showMsg(`✅ 已删除出库单 "${headerNo}"（${cnt} 条明细）`);
         this._syncOutboundToCloud();   // ← 增量同步 outbound 表
         await this.resetForm();
@@ -861,7 +867,8 @@ const OutboundModule = {
       if (cnt === 0) { this.showMsg(`❌ 出库单号 "${orderNo}" 不存在`, true); return; }
       if (!await WBModal.confirm(`确定要删除出库单 "${orderNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
 
-      await db.outbound.where('出库单号').equals(orderNo).delete();
+      // 🟢 v207 AUDIT-101：写后失效缓存
+      await DataStore.write('outbound', () => db.outbound.where('出库单号').equals(orderNo).delete());
       this.showMsg(`✅ 已删除出库单 "${orderNo}"（${cnt} 条明细）`);
       this._syncOutboundToCloud();   // ← 增量同步 outbound 表
       await this.resetForm();
@@ -1010,7 +1017,7 @@ const Toast = {
 const OutboundListModule = {
   currentFilter: {},
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
 
   async render(token) {
     if (token !== undefined) this._rt = token;
@@ -1025,11 +1032,11 @@ const OutboundListModule = {
 
     content.innerHTML = `
       <div class="filter-bar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:0;">
-        <input type="text" id="oblKw" placeholder="搜索单号/编码/名称/领用人..." value="${this.currentFilter.keyword || ''}"
+        <input type="text" id="oblKw" placeholder="搜索单号/编码/名称/领用人..." value="${escAttr(this.currentFilter.keyword || '')}"
           onkeydown="if(event.key==='Enter')OutboundListModule.applyFilter()">
-        <input type="text" id="oblStartDate" value="${this.currentFilter.startDate || ''}" class="filter-date dp-input" placeholder="起始日期" readonly>
+        <input type="text" id="oblStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="起始日期" readonly>
         <span class="filter-sep">至</span>
-        <input type="text" id="oblEndDate" value="${this.currentFilter.endDate || ''}" class="filter-date dp-input" placeholder="结束日期" readonly>
+        <input type="text" id="oblEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" readonly>
         <select id="oblProject" title="按项目筛选">
           <option value="">全部项目</option>
           ${projects.map(p => `<option value="${escAttr(p)}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
@@ -1062,6 +1069,11 @@ const OutboundListModule = {
     if (rt !== undefined && rt !== App._goToken) return;
     const result = await DataStore.getOutbound(this.currentFilter, this.currentPage, this.pageSize);
     const { items, total, totalPages } = result;
+    // 🟢 v209 AUDIT-106：页码越界时钳制回合法范围（其余模块均有 Math.min，此处补齐，避免删末条后显示空白）
+    if (totalPages > 0 && this.currentPage > totalPages) {
+      this.currentPage = totalPages;
+      return this.loadData(rt);
+    }
 
     // KPI 统计（🟡 M6：基于全量筛选结果，而非仅当前分页，避免分页导致数值偏低）
     // 当选择「全部」时，当前结果已是全量，避免再查一次
@@ -1187,7 +1199,7 @@ const OutboundListModule = {
   resetFilter() {
     this.currentFilter = {};
     this.currentPage = 1;
-    this.pageSize = 20;
+    this.pageSize = AppConfig.app.defaultPageSize;
     document.getElementById('oblKw').value='';
     document.getElementById('oblStartDate').value='';
     document.getElementById('oblEndDate').value='';

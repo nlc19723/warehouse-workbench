@@ -183,7 +183,9 @@
             const txt = String(list[0].rawValue || '').trim();
             if (txt) { onDetected(txt); return; }
           }
-        } catch (_) { /* 单帧解码异常忽略 */ }
+        } catch (_) {
+    /* 单帧解码异常忽略 */ console.warn('[qr-scan.js:186] 异常(已忽略):', e);
+  }
       }
 
       // ② ZXing 兜底（iOS Safari 等无原生支持的浏览器，按需加载）
@@ -230,7 +232,9 @@
             let res = null;
             try {
               res = dec(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'dontInvert' });
-            } catch (_) { /* 单帧解码异常忽略，继续下一帧 */ }
+            } catch (_) {
+    /* 单帧解码异常忽略，继续下一帧 */ console.warn('[qr-scan.js:233] 异常(已忽略):', e);
+  }
             if (res && res.data) { onDetected(String(res.data).trim()); return; }
           }
 
@@ -275,7 +279,9 @@
     active = false;
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     if (stream) {
-      stream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
+      stream.getTracks().forEach(t => { try { t.stop(); } catch (_) {
+    console.warn('[qr-scan.js:278] 异常(已忽略):', e);
+  } });
       stream = null;
     }
     if (overlayEl) { overlayEl.remove(); overlayEl = null; }

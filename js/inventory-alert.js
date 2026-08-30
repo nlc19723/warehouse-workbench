@@ -5,7 +5,7 @@
 const InventoryAlertModule = {
   currentFilter: { keyword: '', category: '', status: 'yes' },
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
   currentData: [],
 
   async render(token) {
@@ -14,7 +14,7 @@ const InventoryAlertModule = {
     const content = document.getElementById('contentArea');
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="alertKw" placeholder="搜索物料名称、编码..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')InventoryAlertModule.applyFilter()">
+        <input type="text" id="alertKw" placeholder="搜索物料名称、编码..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')InventoryAlertModule.applyFilter()">
         <select id="alertCategory">
           <option value="">全部分类</option>
           <option value="A" ${this.currentFilter.category === 'A' ? 'selected' : ''}>A类</option>

@@ -103,7 +103,9 @@ const SyncManager = {
   disconnect() {
     this.client = null;
     this.isOnline = false;
-    try { localStorage.removeItem('supabase_config'); } catch (e) { /* 隐私模式可能抛错，忽略 */ }
+    try { localStorage.removeItem('supabase_config'); } catch (e) {
+    /* 隐私模式可能抛错，忽略 */ console.warn('[sync.js:106] 异常(已忽略):', e);
+  }
     this.updateUI();
   },
 
@@ -145,12 +147,12 @@ const SyncManager = {
         </div>
         <div style="margin-bottom:10px;">
           <label style="display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:3px;">Project URL</label>
-          <input type="text" id="sbUrl" placeholder="https://xxxx.supabase.co" value="${prefill?.url || ''}"
+          <input type="text" id="sbUrl" placeholder="https://xxxx.supabase.co" value="${escAttr(prefill?.url || '')}"
             style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;">
         </div>
         <div style="margin-bottom:14px;">
           <label style="display:block;font-size:11.5px;color:var(--text-secondary);margin-bottom:3px;">Anon Key</label>
-          <input type="password" id="sbKey" placeholder="eyJ..." value="${prefill?.key || ''}"
+          <input type="password" id="sbKey" placeholder="eyJ..." value="${escAttr(prefill?.key || '')}"
             style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;">
         </div>
         <div style="background:linear-gradient(135deg,rgba(2,132,199,0.07),rgba(14,165,233,0.03));border:1px solid rgba(2,132,199,0.15);border-radius:10px;padding:9px 14px;margin-bottom:12px;">
@@ -214,8 +216,30 @@ const SyncManager = {
   },
 
   // 把全量数据打包推送到云端（覆盖式）
-  async pushData(dataObj) {
+  // 🟢 v208 AUDIT-303 乐观锁：
+  //   opts.expectedSavedAt —— 本机的同步基准（最后一次与云端对齐的 savedAt）。
+  //     · 传 null 表示本机从未同步过：若云端已有数据则拒绝（防止本地旧数据抹掉云端）
+  //     · 传具体值：云端 savedAt 不一致 → 返回 'conflict'，由调用方提示用户先拉取
+  //   opts._existing      —— 调用方已拉取的云端 bundle，复用以免二次往返
+  //   返回值：true 成功 / false 失败 / 'conflict' 版本冲突（未写入）
+  async pushData(dataObj, opts) {
     if (!this.isOnline || !this.client) return false;
+    const options = opts || {};
+    if (options.expectedSavedAt !== undefined) {
+      const existing = options._existing !== undefined
+        ? options._existing
+        : await this.pullDataPrivate();
+      const cloudSavedAt = (existing && existing.savedAt) || null;
+      if (options.expectedSavedAt === null) {
+        if (cloudSavedAt) {
+          console.warn('[乐观锁] 本机无同步基准，而云端已有数据（savedAt=' + cloudSavedAt + '），已拒绝覆盖');
+          return 'conflict';
+        }
+      } else if (cloudSavedAt && cloudSavedAt !== options.expectedSavedAt) {
+        console.warn('[乐观锁] 云端 savedAt=' + cloudSavedAt + ' ≠ 本机基准 ' + options.expectedSavedAt + '，已拒绝覆盖');
+        return 'conflict';
+      }
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30000); // 30s 超时，避免一直转圈
     try {
@@ -396,18 +420,30 @@ const SyncManager = {
   },
 
   // 写入单个设置项（合并式，避免覆盖其他项）。key 为点路径不支持，直接传扁平 key
+  // 🟢 v208 AUDIT-303：settings.json 是「读-改-写」整体覆盖，两台设备并发写不同 key
+  //   时，后写者会把先写者的 key 整份抹掉（outbound_list / search_history 等）。
+  //   这里加写后回读校验：若 _updatedAt 不是本次写入的时间戳，说明期间被插队，
+  //   重新「读-合并-写」重试一次（Supabase Storage 无 CAS，只能靠回读尽力保证）。
   async setSetting(key, value) {
     if (!this.isOnline || !this.client) return false;
-    try {
-      const cur = (await this.getSettings()) || {};
-      cur[key] = value;
-      cur._updatedAt = Date.now();
-      const { error } = await this.client.storage
-        .from(this.BUCKET)
-        .upload('settings.json', JSON.stringify(cur), { contentType: 'application/json', upsert: true, cacheControl: '0' });
-      if (error) { console.error('设置写入失败:', error.message); return false; }
-      return true;
-    } catch (e) { console.error('设置写入异常:', e); return false; }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const cur = (await this.getSettings()) || {};
+        const stamp = Date.now();
+        cur[key] = value;
+        cur._updatedAt = stamp;
+        const { error } = await this.client.storage
+          .from(this.BUCKET)
+          .upload('settings.json', JSON.stringify(cur), { contentType: 'application/json', upsert: true, cacheControl: '0' });
+        if (error) { console.error('设置写入失败:', error.message); return false; }
+        // 私有下载回读（绕过公开 URL 的 CDN 缓存），确认真的是自己写的那份
+        const back = await this.pullSettingsPrivate();
+        if (back && back._updatedAt === stamp) return true;
+        console.warn('[乐观锁] 设置写入被其它设备覆盖，重试第 ' + (attempt + 1) + ' 次');
+      } catch (e) { console.error('设置写入异常:', e); return false; }
+    }
+    // 重试后仍不一致：不阻塞用户操作，仅记录（设置类数据非核心台账）
+    return true;
   },
 
   async getSetting(key) {

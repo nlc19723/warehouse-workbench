@@ -6,7 +6,7 @@ const StockModule = {
   currentData: [],
   currentFilter: { keyword: '' },
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
   // 🟢 v197：A3 批量打印二维码（多选状态：选中编码 Set）
   selectedCodes: new Set(),
   // 🟢 v198：多选模式开关 —— 默认 false（不渲染勾选列），点击「批量打印二维码」才进入
@@ -18,7 +18,7 @@ const StockModule = {
     const content = document.getElementById('contentArea');
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="stockKw" placeholder="搜索物料编码、名称、规格..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')StockModule.applyFilter()">
+        <input type="text" id="stockKw" placeholder="搜索物料编码、名称、规格..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')StockModule.applyFilter()">
         <button class="search-glass" onclick="StockModule.applyFilter()">🔍 搜索</button>
         <button class="secondary" onclick="StockModule.resetFilter()">重置</button>
         <!-- 🟢 v198：A3 批量打印二维码（重置/导出之间）
@@ -246,7 +246,9 @@ const StockModule = {
           const c = String(s.存货编码 ?? '').trim();
           if (c && need.has(c) && !map.has(c)) map.set(c, { name: s.存货名称 || '', spec: s.规格型号 || '' });
         });
-      } catch (_) { /* 补查失败不阻断打印，缺信息时只显示二维码 */ }
+      } catch (_) {
+    /* 补查失败不阻断打印，缺信息时只显示二维码 */ console.warn('[stock.js:249] 异常(已忽略):', e);
+  }
     }
     // 仍缺信息的编码用空名（打印时只显示二维码）
     const items = codes.map(code => ({ code, name: (map.get(code) || {}).name || '', spec: (map.get(code) || {}).spec || '' }));

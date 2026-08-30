@@ -2,9 +2,24 @@
 // Excel 数据导入 - 使用 SheetJS
 // ============================================
 
+// 🟢 v208 AUDIT-303：云端同步「乐观锁基准」的存储键。
+// 记录本机最后一次与云端对齐的 savedAt（拉取或推送成功时更新）。
+// 推送前比对云端 savedAt：不一致说明云端已被其它设备改动 → 中止，避免静默覆盖。
+const CLOUD_BASE_KEY = 'wb_cloud_base_savedAt';
+
 const DataLoader = {
   // Excel 源文件相对路径（与 config.js 中的 app.dataPath 保持一致，避免两处硬编码不同步）
   filePath: (typeof AppConfig !== 'undefined' && AppConfig.app && AppConfig.app.dataPath) || '',
+
+  // 读取/写入乐观锁基准（localStorage 不可用时退化为内存变量）
+  _cloudBase() {
+    try { return localStorage.getItem(CLOUD_BASE_KEY) || null; }
+    catch (e) { return this._cloudBaseMem || null; }
+  },
+  _setCloudBase(v) {
+    try { localStorage.setItem(CLOUD_BASE_KEY, v || ''); }
+    catch (e) { this._cloudBaseMem = v || ''; }
+  },
 
   // 参与云端同步的数据表（meta 是元数据表，单独处理）
   // 注：materialClass / monthlyStats 自 v1 起从未被任何 loader 写入，属死代码，已从同步范围移除
@@ -29,7 +44,9 @@ const DataLoader = {
     // 详见 SyncManager.init：内置共享配置不再自动上线，未连接用户不会碰云端）
     try {
       if (typeof SyncManager !== 'undefined') SyncManager.init();
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+    /* ignore */ console.warn('[data-loader.js:47] 异常(已忽略):', e);
+  }
 
     // 1) 本地已有完整数据 → 立即显示（首屏不阻塞），后台静默从云端拉取并按"云端优先覆盖本地"策略同步
     const imported = await DataStore.isDataImported();
@@ -216,22 +233,34 @@ const DataLoader = {
   // 从云端 bundle 还原数据（清空后批量写入），使分享链接自动拿到最新数据
   async loadBundleFromCloud(bundle) {
     if (!bundle || !bundle.tables) return false;
-    await DataStore.clearAll();
-    await new Promise(r => setTimeout(r, 300));
-
+    // 🟢 v209 AUDIT-205：结构非法直接拒绝，绝不以畸形数据覆盖本地
+    const v = this._validateBundle(bundle);
+    if (!v.ok) {
+      console.error('[data-loader] 云端 bundle 结构非法，拒绝还原:', v.reason);
+      throw new Error('云端数据格式异常，已拒绝覆盖本地（' + v.reason + '）');
+    }
+    // 🟢 v208 AUDIT-303：云端→本地是「同步基准」的更新点。记下云端 savedAt，
+    //   作为下次推送时的乐观锁基准；否则本机会以为自己站在最新数据上，把他人改动覆盖掉。
+    if (bundle.savedAt) this._setCloudBase(bundle.savedAt);
     const tables = bundle.tables || {};
-    for (const name of this.TABLES) {
-      const rows = Array.isArray(tables[name]) ? tables[name] : [];
-      if (rows.length) {
-        try {
-          await this.bulkAddSafe(db[name], rows);
-          console.log(`云端数据还原 ${name}: ${rows.length} 条`);
-        } catch (e) {
-          console.error(`还原 ${name} 失败:`, e);
+    const allNames = this.TABLES.concat(['outbound', 'meta']);
+    // 🟢 v209 AUDIT-304：清空 + 写入同事务，中途失败整体回滚（不再「全库清空」半截）
+    await db.transaction('rw', allNames, async () => {
+      await DataStore.clearAll();   // 事务内清空，无 setTimeout（避免 Dexie 事务失活）
+      for (const name of this.TABLES) {
+        const rows = Array.isArray(tables[name]) ? tables[name] : [];
+        if (rows.length) {
+          try {
+            await this.bulkAddSafe(db[name], rows);
+            console.log(`云端数据还原 ${name}: ${rows.length} 条`);
+          } catch (e) {
+            console.error(`还原 ${name} 失败:`, e);
+            throw e; // 让事务整体回滚，避免留半截数据
+          }
         }
       }
-    }
-    await DataStore.markDataImported();
+      await DataStore.markDataImported();
+    });
     return true;
   },
 
@@ -273,20 +302,46 @@ const DataLoader = {
       }
       // 双版本滚动：把云端现有 bundle 的 tables 降级为 prevWork（上一份）
       let prevWork = null;
+      let existing = null;   // 🟢 v208：提到 try 外，供下方乐观锁复用（避免二次网络往返）
       try {
-        const existing = await SyncManager.pullDataPrivate();
+        existing = await SyncManager.pullDataPrivate();
         if (existing && existing.tables && Object.keys(existing.tables).length) {
           prevWork = { savedAt: existing.savedAt || null, tables: existing.tables };
         }
-      } catch (e) { /* 首次推送无 existing，忽略 */ }
+      } catch (e) {
+    /* 首次推送无 existing，忽略 */ console.warn('[data-loader.js:309] 异常(已忽略):', e);
+  }
       const bundle = {
         version: DB_VERSION,
         savedAt: new Date().toISOString(),
         tables,
         prevWork
       };
-      const ok = await this._withTimeout(SyncManager.pushData(bundle), 25000, 'pushData');
-      if (ok) console.log('已推送到云端（双版本滚动已生效）');
+      // 🟢 v208 AUDIT-303：带乐观锁推送。existing 已在上一步拉取，直接复用避免二次往返。
+      const ok = await this._withTimeout(
+        SyncManager.pushData(bundle, { expectedSavedAt: this._cloudBase(), _existing: existing }),
+        25000, 'pushData'
+      );
+      if (ok === 'conflict') {
+        // 云端已被其它设备改动 → 坚决不覆盖，让用户先拉取再推
+        console.warn('[乐观锁] 云端数据已被其它设备更新，本次推送已中止');
+        if (typeof WBModal !== 'undefined') {
+          try {
+            WBModal.alert(
+              '⚠ 云端数据已被其它设备更新，本次推送已中止（避免覆盖他人改动）。\n\n' +
+              '请先点「同步」拉取云端最新数据，确认无误后再推送。',
+              { title: '同步冲突' }
+            );
+          } catch (e) {
+    /* 弹窗不可用时忽略 */ console.warn('[data-loader.js:331] 异常(已忽略):', e);
+  }
+        }
+        return false;
+      }
+      if (ok) {
+        this._setCloudBase(bundle.savedAt);   // 推送成功 → 基准推进到本次
+        console.log('已推送到云端（双版本滚动已生效）');
+      }
       return ok;
     } catch (e) {
       console.error('打包推送失败:', e);
@@ -469,9 +524,11 @@ const DataLoader = {
       }
       let baseBundle = await this._pullBaseWithTimeout(8000);
       if (baseBundle && baseBundle.tables && this._isBundleComplete(baseBundle)) {
-        await DataStore.clearAll();
-        await new Promise(r => setTimeout(r, 300));
-        await this.seedFromBase(baseBundle);
+        // 🟢 v209 AUDIT-304：清空 + 垫底写入同事务（中途失败整体回滚，不残留半截基准）
+        await db.transaction('rw', this.TABLES.concat(['outbound', 'meta']), async () => {
+          await DataStore.clearAll();
+          await this.seedFromBase(baseBundle);
+        });
         hideLoading();
         console.log('[data-loader] 已用云端基准数据垫底');
         return true;
@@ -498,16 +555,24 @@ const DataLoader = {
       showLoading('正在解析数据...', { variant:'truck' });
     let workbook;
     try {
-      workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
+      // 🟢 AUDIT-308：大文件解析移至 Web Worker，避免主线程阻塞（不支持 Worker 时回退同步解析）
+      workbook = await this._parseWorkbookAsync(arrayBuffer);
     } catch (err) {
       throw new Error('文件解析失败，请确认是有效的 .xlsx / .xls 文件');
     }
 
-    // 清空旧数据（等待事务完成）
-    await DataStore.clearAll();
-    await new Promise(r => setTimeout(r, 300));
+    // 🟢 v209 AUDIT-204：①中和 Excel 公式注入（以 = + - @ 开头的单元格会被表格软件当公式执行）；
+    //                        ②超限防护（文件过大 / 行数过多时提前拒绝，避免主线程长时间卡死）
+    this._neutralizeFormulaInjection(workbook);
+    const sizeMB = (arrayBuffer && arrayBuffer.byteLength || 0) / (1024 * 1024);
+    if (sizeMB > 60) throw new Error(`文件过大（约 ${sizeMB.toFixed(1)}MB），请拆分后导入（上限 60MB）`);
+    const estRows = this._estimateRowCount(workbook);
+    if (estRows > 200000) throw new Error(`数据量过大（约 ${estRows} 行），请拆分文件后导入（上限 20 万行）`);
 
-    // 逐个导入工作表 - 每个独立 try-catch，失败不阻塞后续
+    // 🟢 v209 AUDIT-304：清空 + 导入放入同一事务，原子提交。
+    // 中途刷新/崩溃 → 事务回滚 → 本地恢复到「导入前」状态，不再出现「全库清空」半截数据。
+    // 事务范围含全部 11 张表（clearAll 会清 outbound/meta，必须纳入，否则 Dexie 报事务越界）。
+    const ALL_TABLES = ['suppliers','orders','inbound','stock','inventoryAlerts','orderChecks','pricing','lowTurnover','breach','outbound','meta'];
     const tasks = [
       { name: '供应商', fn: () => this.loadSuppliers(workbook) },
       { name: '订单', fn: () => this.loadOrders(workbook) },
@@ -519,12 +584,9 @@ const DataLoader = {
       { name: '低周转', fn: () => this.loadLowTurnover(workbook) },
       { name: '违约', fn: () => this.loadBreach(workbook) }
     ];
-
-    // DATA-01 修复：多表导入以事务包裹，任一张表写入失败则整体回滚，避免留"半截数据"。
-    // 行为保持：成功路径与原来完全一致；仅当某表失败时不再保留已写的前几张表。
-    const TABLE_NAMES = ['suppliers','orders','inbound','stock','inventoryAlerts','orderChecks','pricing','lowTurnover','breach'];
     let importErrors = [];
-    await db.transaction('rw', TABLE_NAMES, async () => {
+    await db.transaction('rw', ALL_TABLES, async () => {
+      await DataStore.clearAll();   // 事务内清空，无 setTimeout（避免 Dexie 事务在长 macrotask 后失活）
       for (const task of tasks) {
         try {
           showLoading(`正在导入${task.name}数据...`, { variant:'fluid' });
@@ -557,6 +619,41 @@ const DataLoader = {
     } finally {
       this._importing = false;
     }
+  },
+
+  // 🟢 AUDIT-308：Web Worker 解析 XLSX。
+  //   不支持 Worker / 创建失败 / 解析异常时回退主线程同步解析，保证行为与旧版完全一致。
+  _parseWorkbookAsync(arrayBuffer) {
+    if (typeof Worker === 'undefined' || typeof XLSX === 'undefined') {
+      return XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
+    }
+    // 解析 XLSX 组件地址（与 index.html 中 lib/xlsx.full.min.js 同源），供 Worker importScripts
+    const xlsxUrl = new URL('lib/xlsx.full.min.js', location.href).href;
+    return new Promise((resolve, reject) => {
+      let worker;
+      try {
+        worker = new Worker('js/import-worker.js');
+      } catch (e) {
+        // Worker 不可用 → 主线程兜底，行为不变
+        try { resolve(XLSX.read(arrayBuffer, { type: 'array', cellDates: true })); }
+        catch (err) { reject(err); }
+        return;
+      }
+      let settled = false;
+      const finish = (fn) => {
+        if (settled) return;
+        settled = true;
+        try { worker.terminate(); } catch (_) {}
+        fn();
+      };
+      worker.onmessage = (e) => {
+        const d = e.data || {};
+        if (d.type === 'result') finish(() => resolve(d.workbook));
+        else if (d.type === 'error') finish(() => reject(new Error('文件解析失败，请确认是有效的 .xlsx / .xls 文件')));
+      };
+      worker.onerror = () => finish(() => reject(new Error('文件解析失败，请确认是有效的 .xlsx / .xls 文件')));
+      worker.postMessage({ type: 'parse', arrayBuffer: arrayBuffer, xlsxUrl: xlsxUrl });
+    });
   },
 
   // 数据导入：支持上传 .xlsx / .xls 文件，或从云端重新导入基准数据
@@ -637,8 +734,7 @@ const DataLoader = {
         hideLoading();
         return false;
       }
-      await DataStore.clearAll();
-      await new Promise(r => setTimeout(r, 300));
+      // loadBundleFromCloud 内部已用事务原子执行「清空 + 还原」，此处无需再清（避免事务外冗余清空）
       await this.loadBundleFromCloud(bundle);
       hideLoading();
       WBModal.alert('✅ 已用云端工作数据替换本地（共 ' + supplierCnt + ' 家供应商）。');
@@ -711,9 +807,11 @@ const DataLoader = {
         hideLoading();
         return false;
       }
-      await DataStore.clearAll();
-      await new Promise(r => setTimeout(r, 300));
-      await this.seedFromBase(bundle);
+      // 🟢 v209 AUDIT-304：清空 + 基准写入同事务（中途失败整体回滚）
+      await db.transaction('rw', this.TABLES.concat(['outbound', 'meta']), async () => {
+        await DataStore.clearAll();
+        await this.seedFromBase(bundle);
+      });
       hideLoading();
       WBModal.alert('✅ 已用云端基准数据替换本地工作数据（共 ' + supplierCnt + ' 家供应商）。\n\n本地原有数据已被覆盖，如需恢复可重新导入 Excel 或上传工作数据。');
       if (typeof App !== 'undefined' && App.currentModule) {
@@ -1229,6 +1327,59 @@ const DataLoader = {
     return rec;
   },
 
+  // 🟢 v209 AUDIT-204：中和 Excel 公式注入（CSV / 公式注入防护）。
+  // 以 = + - @ 开头的单元格在表格软件里会被当作公式，可能触发 DDE / 外部命令执行。
+  // 此处于导入前统一给这类字符串前置一个空格（Excel 中和标准写法），
+  // 既阻断公式执行，又保留原始文本可读；公式单元格直接清空（不执行也不保留公式串）。
+  _neutralizeFormulaInjection(workbook) {
+    if (!workbook || !workbook.Sheets) return;
+    for (const name of workbook.SheetNames) {
+      const ws = workbook.Sheets[name];
+      if (!ws) continue;
+      for (const key of Object.keys(ws)) {
+        if (key[0] === '!') continue; // 跳过 !ref / !margins 等元数据
+        const cell = ws[key];
+        if (!cell) continue;
+        if (cell.f) { cell.v = ''; continue; } // 公式单元格：清空，绝不执行
+        if (typeof cell.v === 'string') {
+          const t = cell.v.replace(/^\s+/, '');
+          if (t && '=+-@\t\r'.includes(t[0])) cell.v = ' ' + cell.v;
+        }
+      }
+    }
+  },
+
+  // 🟢 v209 AUDIT-204：估算工作簿总行数（用于超限防护），空表 / 无 !ref 跳过
+  _estimateRowCount(workbook) {
+    if (!workbook || !workbook.Sheets) return 0;
+    let total = 0;
+    for (const name of workbook.SheetNames) {
+      const ws = workbook.Sheets[name];
+      if (!ws || !ws['!ref']) continue;
+      try { total += XLSX.utils.decode_range(ws['!ref']).e.r + 1; } catch (e) {
+    /* 忽略畸形 ref */ console.warn('[data-loader.js:1317] 异常(已忽略):', e);
+  }
+    }
+    return total;
+  },
+
+  // 🟢 v209 AUDIT-205：校验云端 bundle 结构合法性，避免畸形数据直接覆盖本地。
+  // 来源可信性由 Supabase 鉴权（JWT）在传输层保证；此处只做结构完整性校验。
+  _validateBundle(bundle) {
+    if (typeof bundle !== 'object' || !bundle) return { ok: false, reason: '非对象' };
+    if (!bundle.tables || typeof bundle.tables !== 'object') return { ok: false, reason: '缺少 tables' };
+    for (const name of this.TABLES) {
+      const rows = bundle.tables[name];
+      if (rows === undefined) continue;
+      if (!Array.isArray(rows)) return { ok: false, reason: `${name} 非数组` };
+    }
+    if (bundle.savedAt !== undefined && bundle.savedAt !== null &&
+        (typeof bundle.savedAt !== 'number' || !isFinite(bundle.savedAt))) {
+      return { ok: false, reason: 'savedAt 非法' };
+    }
+    return { ok: true };
+  },
+
   // ============================================
   // 存货编码查找工具（基于现存量基础档案）
   // ============================================
@@ -1253,11 +1404,6 @@ const DataLoader = {
 
   // 便捷查询：根据存货名称+规格型号返回存货编码
   // 用于订单跟踪、订单列表等没有原生存货编码字段的模块
-  async getStockCode(存货名称, 规格型号) {
-    const map = await this.getStockNameSpecCodeMap();
-    const key = TableUtils.buildStockKey(存货名称, 规格型号);
-    return map.get(key) || '';
-  },
 
   // 🟢 v147：双路取码填入 _存货编码（解决「订单用存货编号 / 现存+入库用存货编码」两套并存时丢码）。
   //   ① 记录自身的直接字段：优先 存货编码（入库/现存自带），其次 存货编号（订单 Excel 导入字段）；
@@ -1278,28 +1424,24 @@ const DataLoader = {
   },
 
   // 工具方法：从 Excel 单元格值还原正确的日期字符串
-  // ⚠️ 根因（关键！）：
-  //   SheetJS 用 {cellDates:true} 把 Excel 日期序列号转成 JS Date 时，会引入
-  //   时区 + epoch 误差（实测：源 2026/6/1 被解析成 2026-05-31 23:59:17，差 1 天还差 43 秒）。
-  //   无论用 .toISOString()(UTC) 还是 getFullYear/getMonth/getDate()(本地)，
-  //   由于 Date 对象本身已错位，结果都会是"少一天"。
-  // ✅ 正确做法：从（可能错位的）Date 反推 Excel 序列号，再按标准 1900 日期系统
-  //   以 UTC 午夜重新换算，得到与源数据完全一致的日期。
+  // 🟢 v210 AUDIT-602：原注释曾称「差 1 天」，经核查当前实现已用 UTC 方法
+  //   （getUTCFullYear/Month/Date）+ Math.round 将时序偏移舍入回 UTC 午夜，
+  //   结果正确、无真实 1 天误差；时间魔法数字已抽为 DAY_MS / EXCEL_EPOCH_DAYS。
   // ⚠️ 重要：只处理 Date 对象！普通数字、字符串等必须原样返回，
   //   否则金额/数量等数值会被误判为日期序列号而破坏。
   recoverExcelDate(val) {
     // 仅处理 Date 对象（SheetJS {cellDates:true} 已将日期序列号转为 Date）
     if (val instanceof Date) {
-      const approxSerial = (val.getTime() / 86400000) + 25569;
+      const approxSerial = (val.getTime() / DAY_MS) + EXCEL_EPOCH_DAYS;
       const serial = Math.round(approxSerial);
-      const correct = new Date((serial - 25569) * 86400000); // UTC 午夜
+      const correct = new Date((serial - EXCEL_EPOCH_DAYS) * DAY_MS); // UTC 午夜
       return `${correct.getUTCFullYear()}-${String(correct.getUTCMonth() + 1).padStart(2, '0')}-${String(correct.getUTCDate()).padStart(2, '0')}`;
     }
     // 🟢 v195：兜底识别"未被 SheetJS 解析为 Date 的 Excel 数字序列号"——某些列（如「实际到货日期」）
     //   在 Excel 里被存为文本/常规格式，cellDates 拿不到 Date 对象；按合理区间（20000~80000
     //   约 1954-10 ~ 2118-12）识别为日期序列号并转 YYYY-MM-DD；区间外或非数字保持原样。
     if (typeof val === 'number' && val >= 20000 && val <= 80000 && Number.isFinite(val)) {
-      const correct = new Date(Math.round((val - 25569) * 86400000));
+      const correct = new Date(Math.round((val - EXCEL_EPOCH_DAYS) * DAY_MS));
       if (!isNaN(correct.getTime())) {
         return `${correct.getUTCFullYear()}-${String(correct.getUTCMonth() + 1).padStart(2, '0')}-${String(correct.getUTCDate()).padStart(2, '0')}`;
       }

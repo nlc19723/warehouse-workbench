@@ -6,7 +6,7 @@ const LowTurnoverModule = {
   currentData: [],
   currentFilter: { keyword: '' },
   currentPage: 1,
-  pageSize: 20,
+  pageSize: AppConfig.app.defaultPageSize,
 
   async render(token) {
     if (token !== undefined) this._rt = token;
@@ -14,7 +14,7 @@ const LowTurnoverModule = {
     const content = document.getElementById('contentArea');
     content.innerHTML = `
       <div class="filter-bar">
-        <input type="text" id="ltKw" placeholder="搜索物料名称..." value="${this.currentFilter.keyword || ''}" onkeydown="if(event.key==='Enter')LowTurnoverModule.applyFilter()">
+        <input type="text" id="ltKw" placeholder="搜索物料名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')LowTurnoverModule.applyFilter()">
         <button class="search-glass" onclick="LowTurnoverModule.applyFilter()">🔍 搜索</button>
         <button class="secondary" onclick="LowTurnoverModule.resetFilter()">重置</button>
         <button class="secondary" onclick="LowTurnoverModule.exportData()">📥 导出</button>

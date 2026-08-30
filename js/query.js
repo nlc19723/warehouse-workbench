@@ -4,7 +4,7 @@
 
 const QueryModule = {
   currentTab: 'stock', // stock | orders | inbound | pricing
-  page: 1, pageSize: 30,
+  page: 1, pageSize: AppConfig.app.queryPageSize,
   searchKW: '', results: [],
   currentFilter: {}, // 跨模块带参跳转（M1）：App.go 注入的 { keyword } 自动触发搜索
   startDate: '',
@@ -69,9 +69,9 @@ const QueryModule = {
       <div class="filter-bar" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;padding:0;align-items:flex-start;">
         <div class="filter-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
           <input type="text" id="querySearch" class="filter-search-short" autocomplete="off" placeholder="多关键词搜索（空格/逗号分隔）..." value="${this.escapeHtml(this.searchKW)}" onkeydown="if(event.key==='Enter')QueryModule.doSearch()" onfocus="QueryModule.showHistory()">
-          <input type="text" id="queryStartDate" value="${this.startDate}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="QueryModule.onDateChange()" readonly>
+          <input type="text" id="queryStartDate" value="${escAttr(this.startDate)}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="QueryModule.onDateChange()" readonly>
           <span class="filter-sep">至</span>
-          <input type="text" id="queryEndDate" value="${this.endDate}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="QueryModule.onDateChange()" readonly>
+          <input type="text" id="queryEndDate" value="${escAttr(this.endDate)}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="QueryModule.onDateChange()" readonly>
           <button class="search-glass" onclick="QueryModule.doSearch()">搜索</button>
           <button class="secondary" onclick="QueryModule.clearSearch()">清空</button>
         </div>
@@ -106,8 +106,9 @@ const QueryModule = {
     this.currentTab = tabId;
     this.page = 1;
     this.results = [];
-    // 调用 render() 重建 tab-bar 修复高亮，同时保留搜索词
-    this.render();
+    // 🟢 v209 AUDIT-107：传入 token 启用竞态守卫（快速切 tab 时旧渲染自动失效），并补 catch 避免异常静默
+    const token = (App._goToken = (App._goToken || 0) + 1);
+    this.render(token).catch(e => console.error('[query] switchTab 渲染失败:', e));
   },
 
   async loadTabData(token) {
@@ -273,7 +274,9 @@ const QueryModule = {
       try {
         const cloud = await DataStore.getSetting('search_history_query');
         if (Array.isArray(cloud) && cloud.length) return cloud.slice(0, this.HISTORY_MAX);
-      } catch (e) {}
+      } catch (e) {
+    console.warn('[query.js:277] 异常(已忽略):', e);
+  }
     }
     return this.getHistory();
   },
@@ -284,26 +287,24 @@ const QueryModule = {
     let arr = this.getHistory().filter(k => k !== kw);
     arr.unshift(kw);
     arr = arr.slice(0, this.HISTORY_MAX);
-    try { localStorage.setItem(this.HISTORY_KEY, JSON.stringify(arr)); } catch (e) {}
+    try { localStorage.setItem(this.HISTORY_KEY, JSON.stringify(arr)); } catch (e) {
+    console.warn('[query.js:288] 异常(已忽略):', e);
+  }
     if (typeof DataStore !== 'undefined' && DataStore.setSetting) {
       DataStore.setSetting('search_history_query', arr).catch(() => {});
     }
   },
-  saveHistory(kw) {
-    kw = (kw || '').trim();
-    if (!kw) return;
-    let arr = this.getHistory().filter(k => k !== kw);
-    arr.unshift(kw);
-    arr = arr.slice(0, this.HISTORY_MAX);
-    try { localStorage.setItem(this.HISTORY_KEY, JSON.stringify(arr)); } catch (e) {}
-  },
   removeHistory(kw) {
     const arr = this.getHistory().filter(k => k !== kw);
-    try { localStorage.setItem(this.HISTORY_KEY, JSON.stringify(arr)); } catch (e) {}
+    try { localStorage.setItem(this.HISTORY_KEY, JSON.stringify(arr)); } catch (e) {
+    console.warn('[query.js:295] 异常(已忽略):', e);
+  }
     if (this._historyOpen) this.showHistory();
   },
   clearHistory() {
-    try { localStorage.removeItem(this.HISTORY_KEY); } catch (e) {}
+    try { localStorage.removeItem(this.HISTORY_KEY); } catch (e) {
+    console.warn('[query.js:299] 异常(已忽略):', e);
+  }
     this.hideHistory();
   },
 

@@ -63,7 +63,9 @@
     }
   }
   function saveConfig(cfg) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg)); } catch (e) {}
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg)); } catch (e) {
+    console.warn('[color-theme.js:66] 异常(已忽略):', e);
+  }
   }
 
   // 合并 preset + overrides → 实际组色
@@ -189,7 +191,9 @@
   // 主题切换（data-theme 变化）自动重绘（暗色反相）
   if (typeof MutationObserver !== 'undefined') {
     const _obs = new MutationObserver(() => {
-      try { repaintAll(); } catch (e) {}
+      try { repaintAll(); } catch (e) {
+    console.warn('[color-theme.js:192] 异常(已忽略):', e);
+  }
     });
     _obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   }

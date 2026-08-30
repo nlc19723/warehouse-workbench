@@ -138,13 +138,27 @@ const DataStore = {
 
   // 取得某表的全部行（带缓存）。写入/清空数据后需调用 invalidate 失效。
   async getRows(table) {
-    if (this._tableCache[table]) return this._tableCache[table];
+    // 🟢 v207 AUDIT-101：改用 hasOwnProperty 判定而非真值判定。
+    // 旧写法 `if (this._tableCache[table])` 对空数组 [] 也为假 → 空库每次回查 IndexedDB，
+    // 而一旦写入首条数据又被永久缓存、写后不失效（见下方 write()）。
+    if (Object.prototype.hasOwnProperty.call(this._tableCache, table)) {
+      return this._tableCache[table];
+    }
     const rows = await db[table].toArray();
     this._tableCache[table] = rows;
     return rows;
   },
   invalidate(table) { if (this._tableCache) delete this._tableCache[table]; },
   invalidateAll() { this._tableCache = {}; },
+
+  // 🟢 v207 AUDIT-101：统一写入口 —— 业务层禁止直接 db.xxx.bulkAdd/bulkDelete，
+  // 一律经本方法，写后自动失效表缓存，杜绝「读到进入模块时的旧快照」。
+  // 用法：await DataStore.write('orderChecks', () => db.orderChecks.bulkAdd(rows));
+  async write(table, fn) {
+    const ret = await fn();
+    this.invalidate(table);
+    return ret;
+  },
 
   // 检查是否已导入数据
   async isDataImported() {
@@ -205,8 +219,12 @@ const DataStore = {
     try {
       const rows = await SyncManager.getSetting('outbound_list');
       if (Array.isArray(rows) && rows.length) {
-        await db.outbound.clear();
-        await db.outbound.bulkPut(rows);
+        // 🟢 v207 AUDIT-101：覆盖写本地后必须失效缓存，否则本次会话内 getRows
+        // 仍返回覆盖前的旧快照，界面与库内容不一致。
+        await this.write('outbound', async () => {
+          await db.outbound.clear();
+          await db.outbound.bulkPut(rows);
+        });
         console.log(`[设置] 已从云端恢复出库列表 ${rows.length} 条`);
         return true;
       }
@@ -352,15 +370,6 @@ const DataStore = {
   },
 
   // ===== 订货核对 =====
-  async getOrderChecks(filter = {}) {
-    let query = db.orderChecks.toCollection();
-    if (filter.分类) query = query.filter(o => o.分类 === filter.分类);
-    if (filter.keyword) {
-      const kw = filter.keyword.toLowerCase();
-      query = query.filter(o => (o.存货名称 && o.存货名称.toLowerCase().includes(kw)));
-    }
-    return query.toArray();
-  },
 
   // ===== 合同价格 =====
   async getPricing(filter = {}) {
@@ -473,7 +482,9 @@ const DataStore = {
         const rv = parseFloat(a.补货值);
         a.补货值 = isNaN(rv) ? 0 : rv;
       });
-    } catch(e) { /* ignore */ }
+    } catch(e) {
+    /* ignore */ console.warn('[db.js:485] 异常(已忽略):', e);
+  }
 
     const needRestock = alerts.filter(a => a.补货值 && a.补货值 > 0);
     const needRestockCount = needRestock.length;

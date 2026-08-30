@@ -50,13 +50,19 @@ const App = {
     this.startClock();
     this.initTheme();
     // 🟢 v159：配色引擎注入分组变量（确保模块 render 内 _paintCells 加的类能读到变量）
-    if (typeof ColorTheme !== 'undefined') { try { ColorTheme.applyGroupVars(ColorTheme.loadConfig()); } catch (e) {} }
+    if (typeof ColorTheme !== 'undefined') { try { ColorTheme.applyGroupVars(ColorTheme.loadConfig()); } catch (e) {
+    console.warn('[app.js:53] 异常(已忽略):', e);
+  } }
     this.initSidebarState();
     this.initSidebarCustomizations();
 
     // 🟢 v188：版本号动态同步——从 CSS 资源 URL 的 ?v= 参数自动派生，
     // 免去每次发版手动改 config.js 字符串；bump CSS 版本即全链路（徽章+控制台）自动更新。
     this.syncVersionFromCss();
+    // 🟢 v206：新版本检测——比对服务器 index.html 上的 CSS ?v= 版本号与当前页面。
+    // 背景：SPA 切模块不刷新页面，Service Worker 缓存的旧 CSS 会一直生效，
+    // 用户「发版了但看不到变化」。这里定期探测一次，发现新版本即提示刷新。
+    this.startVersionWatch();
     // 渲染当前版本号徽章（用户可见的版本号标识）
     const _badge = document.getElementById('appVersionBadge');
     if (_badge) _badge.textContent = ((typeof AppConfig !== 'undefined' && AppConfig.app && AppConfig.app.version) || 'v???');
@@ -162,7 +168,9 @@ const App = {
           inst[f] = typeof state[f] === 'object' && state[f] !== null
             ? JSON.parse(JSON.stringify(state[f]))
             : state[f];
-        } catch (e) { /* 忽略结构不兼容的恢复 */ }
+        } catch (e) {
+    /* 忽略结构不兼容的恢复 */ console.warn('[app.js:169] 异常(已忽略):', e);
+  }
       }
     });
   },
@@ -269,7 +277,8 @@ const App = {
     const saved = localStorage.getItem('sidebarAvatar');
     if (saved) {
       if (saved.startsWith('data:') || saved.startsWith('http')) {
-        avatar.innerHTML = `<img src="${saved}" alt="头像">`;
+        // 🟢 v207 AUDIT-203：属性值转义，防止 `data:x" onerror=...` 逃逸出 src 属性
+        avatar.innerHTML = `<img src="${escAttr(saved)}" alt="头像">`;
       } else {
         avatar.textContent = saved;
       }
@@ -342,6 +351,64 @@ const App = {
 
   // 🟢 v188：从 CSS 资源 URL 的 ?v= 参数自动派生版本号（如 style.css?v=188 → v188）
   // 发版时只需 bump index.html 里 style.css 的版本查询参数，徽章与控制台水印即自动同步。
+  // 🟢 v206：新版本检测 + 刷新提示（解决「发版了但移动端看不到变化」）
+  //   每 5 分钟（以及从后台切回前台时）拉一次 index.html，解析其中 style.css 的 ?v= 版本号，
+  //   与当前页面不一致即弹提示条，用户点「刷新」即 location.reload(true)。
+  startVersionWatch() {
+    try {
+      const currentV = (() => {
+        const link = document.querySelector('link[rel="stylesheet"][href*="style.css"]');
+        const m = link && (link.getAttribute('href') || '').match(/[?&]v=(\d+)/);
+        return m ? parseInt(m[1], 10) : null;
+      })();
+      if (!currentV) return;
+      let prompted = false;
+      const check = async () => {
+        if (document.hidden || prompted) return;
+        try {
+          const res = await fetch('index.html?_vchk=' + Date.now(), { cache: 'no-store' });
+          if (!res.ok) return;
+          const html = await res.text();
+          const m = html.match(/style\.css\?v=(\d+)/);
+          const latestV = m ? parseInt(m[1], 10) : null;
+          if (latestV && latestV > currentV) { prompted = true; this._showUpdateBar(currentV, latestV); }
+        } catch (e) {
+    /* 离线/失败静默，不打扰用户 */ console.warn('[app.js:371] 异常(已忽略):', e);
+  }
+      };
+      setTimeout(check, 15000);                       // 启动 15s 后首次探测
+      setInterval(check, 5 * 60 * 1000);              // 之后每 5 分钟
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+    } catch (e) {
+    /* 探测失败不影响主流程 */ console.warn('[app.js:376] 异常(已忽略):', e);
+  }
+  },
+
+  // 顶部滑入提示条：有新版本，点击即刷新
+  _showUpdateBar(fromV, toV) {
+    try {
+      if (document.getElementById('__updateBar')) return;
+      const bar = document.createElement('div');
+      bar.id = '__updateBar';
+      bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;background:#2f6fb0;color:#fff;'
+        + 'padding:10px 14px;font-size:13px;display:flex;align-items:center;justify-content:space-between;'
+        + 'gap:10px;box-shadow:0 2px 10px rgba(0,0,0,.25);';
+      bar.innerHTML = `<span>🆕 有新版本（v${fromV} → v${toV}），刷新后生效</span>`
+        + `<button id="__updateBtn" style="flex:0 0 auto;background:#fff;color:#2f6fb0;border:none;`
+        + `border-radius:6px;padding:6px 14px;font-size:13px;font-weight:600;cursor:pointer;">刷新</button>`;
+      document.body.appendChild(bar);
+      const btn = bar.querySelector('#__updateBtn');
+      if (btn) btn.addEventListener('click', () => {
+        if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+          navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister()));
+        }
+        setTimeout(() => location.reload(true), 150);
+      });
+    } catch (e) {
+    /* 提示条失败不影响使用 */ console.warn('[app.js:399] 异常(已忽略):', e);
+  }
+  },
+
   syncVersionFromCss() {
     try {
       const link = document.querySelector('link[rel="stylesheet"][href*="style.css"]');
@@ -351,7 +418,9 @@ const App = {
       if (v && typeof AppConfig !== 'undefined' && AppConfig.app) {
         AppConfig.app.version = 'v' + v;
       }
-    } catch (e) { /* 出错则保留 config.js 中写死的版本 */ }
+    } catch (e) {
+    /* 出错则保留 config.js 中写死的版本 */ console.warn('[app.js:411] 异常(已忽略):', e);
+  }
   },
 
   openSettingsDrawer() {
@@ -456,69 +525,120 @@ const App = {
   },
 
   // ===== 模块切换 =====
+  // 轻量顶栏进度条（仅慢加载可见，非阻塞、不遮挡内容）
+  _ensureSwitchBar() {
+    if (!this._switchBar) {
+      const bar = document.createElement('div');
+      bar.className = 'switch-bar';
+      document.body.appendChild(bar);
+      this._switchBar = bar;
+    }
+    return this._switchBar;
+  },
+
+  // ===== 模块切换（v213 优化：离屏双缓冲 + 去全屏遮罩闪跳）=====
+  // 轻量顶栏进度条（仅慢加载可见，非阻塞、不遮挡内容）
+  _ensureSwitchBar() {
+    if (!this._switchBar) {
+      const bar = document.createElement('div');
+      bar.className = 'switch-bar';
+      document.body.appendChild(bar);
+      this._switchBar = bar;
+    }
+    return this._switchBar;
+  },
+
+  // ===== 模块切换（v213 优化：去全屏遮罩闪跳 + 轻量进度条 + 平滑淡入）=====
   async go(moduleName, params) {
     if (!this.modules[moduleName]) return;
-    // 🟢 v173：模块切换前关闭可能存在的表格列筛选弹窗（挂在 body 上、不随模块 DOM 销毁），
-    // 否则从弹窗内点击实体链接跳转到详情页时，弹窗会残留在新页面之上
+    // 🟢 v173：切换前关闭表格列筛选弹窗（挂在 body 上、不随模块 DOM 销毁）
     if (typeof TableUtils !== 'undefined' && typeof TableUtils._hideFilterPopup === 'function') {
       TableUtils._hideFilterPopup();
     }
-    // 🟡 M7：离开上一模块前调用其 onLeave 清理钩子（停止定时器 / 销毁图表实例），避免资源泄漏
-    if (this.currentModule && this.currentModule !== moduleName) {
+    const switching = !!(this.currentModule && this.currentModule !== moduleName);
+    const targetMeta = this.modules[moduleName];
+
+    // 🟡 M7：离开上一模块前调用 onLeave 清理钩子（停止定时器 / 销毁图表实例），避免资源泄漏
+    if (switching) {
       const prev = this.modules[this.currentModule];
       if (prev && prev.instance) {
-        // 保存上一模块的搜索/筛选/分页/tab 状态（刷新页面后清空）
         this.saveModuleState(prev.instance, this.currentModule);
         if (typeof prev.instance.onLeave === 'function') {
           try { prev.instance.onLeave(); } catch (e) { console.error('[onLeave]', e); }
         }
       }
     }
-    // 🟢 v134：模块切换前统一卸载所有挂在 document.body 上的移动端浮层（mobile-float-thead/firstcol），
-    // 防止旧模块的浮层在 body 残留造成"切换后看不到新表数据"或"下一次手势激活旧浮层"
+    // 🟢 v134：切换前统一卸载挂在 document.body 上的移动端浮层，防止旧浮层残留
     if (typeof TableStickyOverlay !== 'undefined' && TableStickyOverlay.uninstallAll) {
       try { TableStickyOverlay.uninstallAll(); } catch (e) { console.error('[uninstallAll]', e); }
     }
-    // 恢复目标模块之前保留的搜索/筛选/分页/tab 等状态（页面刷新后 moduleState 为空，自动重置）
-    this.restoreModuleState(this.modules[moduleName].instance, moduleName);
-
-    // 跨模块联动：进入模块前写入该模块的预设筛选/参数（如从档案跳转入库带供应商筛选）
-    if (params && this.modules[moduleName].instance) {
-      const inst = this.modules[moduleName].instance;
+    this.restoreModuleState(targetMeta.instance, moduleName);
+    if (params && targetMeta.instance) {
+      const inst = targetMeta.instance;
       if (inst.currentFilter && params.filter) Object.assign(inst.currentFilter, params.filter);
       if (params.preset) Object.assign(inst, params.preset);
-      if (typeof inst.onPreset === 'function') { try { inst.onPreset(params); } catch (e) {} }
+      if (typeof inst.onPreset === 'function') { try { inst.onPreset(params); } catch (e) { console.warn('[onPreset] 异常(已忽略):', e); } }
     }
-    // 🟡 渲染令牌（M5）：快速切换模块时，丢弃过期 render 的后续副作用，避免竞态与 DOM 互相覆盖
+
     const token = (this._goToken = (this._goToken || 0) + 1);
     this.currentModule = moduleName;
     document.querySelectorAll('.sidebar-item[data-module]').forEach(item => {
       item.classList.toggle('active', item.getAttribute('data-module') === moduleName);
     });
-    // 更新顶部标题为当前模块名称
     const titleEl = document.querySelector('.top-bar-left strong');
-    if (titleEl) titleEl.textContent = this.modules[moduleName].title || '库管工作台';
-    const meta = this.modules[moduleName];
-    // 🟢 v194：模块切换时给出加载反馈，避免「旧页面停住」的卡顿感（仅当从其它模块切换过来时）
-    if (this.currentModule && this.currentModule !== moduleName) {
-      try { showLoading('加载 ' + (meta.title || '') + ' …'); } catch (e) {}
-    }
+    if (titleEl) titleEl.textContent = targetMeta.title || '库管工作台';
+
+    // 🟢 v213 优化：不再使用全屏遮罩（消除「全屏空白闪烁 + 卡顿」观感）。
+    // 旧内容保留可见，渲染完成后再平滑淡入新内容；仅慢加载时显示轻量顶栏进度条。
+    const realArea = document.getElementById('contentArea');
+    const bar = this._ensureSwitchBar();
+    bar.classList.remove('switch-bar--done');
+    bar.style.opacity = '0';
+    bar.style.width = '0%';
+    let barShown = false;
+    const barTimer = setTimeout(() => {
+      if (token === App._goToken) { barShown = true; bar.style.opacity = '1'; bar.style.width = '35%'; }
+    }, 140);
+
+    // 先让浏览器绘制一帧（旧内容 + 进度条），再做可能较重的渲染，降低首帧卡顿感
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+    let renderErr = null;
     try {
-      await meta.instance.render(token);
-      if (token !== this._goToken) return; // 已被更新的模块切换打断， 丢弃过期操作
-      // 出库模块：检查是否有从列表页跳转过来的待加载单号（render 已 await 完成，obSearchNo 已就绪，无需定时器）
-      if (moduleName === 'outbound' && typeof OutboundListModule !== 'undefined') {
-        OutboundListModule.checkPendingLoad();
-      }
-      hideLoading(); // 确保加载遮罩在模块渲染后关闭
-      // 🟢 v159：模块渲染完成后按配色配置重绘（分组变量 + 列/单元格维度）
-      if (typeof ColorTheme !== 'undefined') { try { ColorTheme.repaintAll(); } catch (e) {} }
+      await targetMeta.instance.render(token);
     } catch (err) {
+      renderErr = err;
       console.error(`${moduleName} render error:`, err);
-      const area = document.getElementById('contentArea');
-      if (area) area.innerHTML =
-        `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-text">加载出错: ${esc(err.message || err)}</div></div>`;
-      hideLoading();
+    } finally {
+      clearTimeout(barTimer);
+    }
+
+    if (token !== this._goToken) return; // 被更新的模块切换打断，丢弃过期结果
+
+    if (renderErr) {
+      if (realArea) realArea.innerHTML =
+        '<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-text">加载出错: ' +
+        esc(renderErr.message || renderErr) + '</div></div>';
+    } else if (realArea) {
+      // 平滑淡入，弱化「清空 → 出现数据」的突兀感
+      realArea.classList.remove('content-fade');
+      void realArea.offsetWidth; // 触发重排以重启动画
+      realArea.classList.add('content-fade');
+    }
+
+    if (moduleName === 'outbound' && typeof OutboundListModule !== 'undefined') {
+      OutboundListModule.checkPendingLoad();
+    }
+    if (typeof ColorTheme !== 'undefined') { try { ColorTheme.repaintAll(); } catch (e) { console.warn('[repaintAll] 异常(已忽略):', e); } }
+
+    // 进度条收尾（仅慢加载时可见）
+    if (barShown) {
+      bar.style.width = '100%';
+      bar.style.opacity = '1';
+      setTimeout(() => { bar.classList.add('switch-bar--done'); bar.style.opacity = '0'; bar.style.width = '0%'; }, 180);
+    } else {
+      bar.style.opacity = '0';
+      bar.style.width = '0%';
     }
   },
 

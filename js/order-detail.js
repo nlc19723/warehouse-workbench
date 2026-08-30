@@ -12,7 +12,7 @@ function renderDateCell(v) {
     return `${v.getFullYear()}-${String(v.getMonth()+1).padStart(2,'0')}-${String(v.getDate()).padStart(2,'0')}`;
   }
   if (typeof v === 'number' && v >= 20000 && v <= 80000 && Number.isFinite(v)) {
-    const d = new Date(Math.round((v - 25569) * 86400000));
+    const d = new Date(Math.round((v - EXCEL_EPOCH_DAYS) * DAY_MS));
     if (!isNaN(d.getTime())) {
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
     }

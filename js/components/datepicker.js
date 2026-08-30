@@ -96,11 +96,18 @@ const DatePicker = (() => {
   function toISO(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
   function parseISO(s) { if (!s) return null; const [y, m, d] = s.split('-').map(Number); if (!y || !m || !d) return null; const dt = new Date(y, m - 1, d); return isNaN(dt) ? null : dt; }
 
+  // 🟢 v208 AUDIT-105：每个 mount 实例持有一个 AbortController 并集中登记。
+  //   旧代码在 document / window 上挂匿名监听且从不 removeEventListener，unmountAll
+  //   只 remove 浮层 DOM —— 每次模块切换泄漏 2 个僵尸回调，切换几十次后点击/resize 逐次变卡。
+  const _controllers = new Set();
+
   function mount(inputId) {
     ensureStyle();
     const input = document.getElementById(inputId);
     if (!input || input.dataset.dpMounted === '1') return;
     input.dataset.dpMounted = '1';
+    const _ac = new AbortController();
+    _controllers.add(_ac);
     input.readOnly = true;
     input.classList.add('dp-input');
     if (input.type === 'date') input.type = 'text'; // 兼容仍保留 type=date 的字段
@@ -241,14 +248,26 @@ const DatePicker = (() => {
     function open() { place(); renderDay(); pop.style.display = 'block'; input.classList.add('open'); }
     function close() { pop.style.display = 'none'; input.classList.remove('open'); }
 
-    input.addEventListener('mousedown', (e) => e.preventDefault()); // 避免 mousedown 让 input 失焦
-    input.addEventListener('click', (e) => { e.stopPropagation(); pop.style.display === 'block' ? close() : open(); });
-    document.addEventListener('mousedown', (e) => { if (!pop.contains(e.target) && e.target !== input) close(); });
-    window.addEventListener('resize', () => { if (pop.style.display === 'block') close(); });
+    // 全部监听挂载同一个 signal，unmountAll 时一次 abort 全解绑
+    const _sig = { signal: _ac.signal };
+    input.addEventListener('mousedown', (e) => e.preventDefault(), _sig); // 避免 mousedown 让 input 失焦
+    input.addEventListener('click', (e) => { e.stopPropagation(); pop.style.display === 'block' ? close() : open(); }, _sig);
+    document.addEventListener('mousedown', (e) => { if (!pop.contains(e.target) && e.target !== input) close(); }, _sig);
+    window.addEventListener('resize', () => { if (pop.style.display === 'block') close(); }, _sig);
   }
 
   function unmountAll() {
+    // 🟢 v208 AUDIT-105：先 abort 全部监听（document/window 上的匿名回调否则永久驻留），
+    //   再移除浮层，并清掉 input 上的挂载标记 —— 旧代码漏掉这一步，导致同一 input 元素
+    //   再次 mount 时被 `dpMounted === '1'` 挡住，日期框点击无反应。
+    _controllers.forEach(ac => { try { ac.abort(); } catch (e) { /* 已 abort 忽略 */ } });
+    _controllers.clear();
     document.querySelectorAll('.dp-pop').forEach(p => p.remove());
+    document.querySelectorAll('input.dp-input[data-dp-mounted="1"]').forEach(inp => {
+      delete inp.dataset.dpMounted;
+      if (inp.__dpPop) { try { delete inp.__dpPop; } catch (e) { /* 只读属性忽略 */ } }
+      inp.classList.remove('open');
+    });
   }
 
   return { mount, unmountAll };
