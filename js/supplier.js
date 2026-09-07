@@ -16,25 +16,29 @@ const SupplierModule = {
     if (myToken !== undefined && myToken !== App._goToken) return;
 
     content.innerHTML = `
-      <div class="filter-bar">
-        <input type="text" id="supplierKw" placeholder="搜索供应商名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')SupplierModule.applyFilter()">
-        <select id="supplierType">
+      <div class="filter-bar filter-bar-m" data-mod="supplier">
+        <input type="text" id="supplierKw" class="fb-search" placeholder="搜索供应商名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')SupplierModule.applyFilter()">
+        <div class="fb-row fb-row--fields">
+          <div class="fb-field"><select id="supplierType">
           <option value="">全部类型</option>
           ${types.map(t => `<option value="${escAttr(t)}" ${this.currentFilter.类型 === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
-        </select>
-        <select id="supplierDept">
+        </select></div>
+          <div class="fb-field"><select id="supplierDept">
           <option value="">全部招采部门</option>
           ${departments.map(d => `<option value="${escAttr(d)}" ${this.currentFilter.招采部门 === d ? 'selected' : ''}>${esc(d)}</option>`).join('')}
-        </select>
-        <select id="contractWarn">
+        </select></div>
+          <div class="fb-field"><select id="contractWarn">
           <option value="">合同状态</option>
           <option value="expiring">即将到期(&lt;30天)</option>
           <option value="near">临近期(30-90天)</option>
           <option value="expired">已到期</option>
-        </select>
-        <button class="search-glass" onclick="SupplierModule.applyFilter()">筛选</button>
-        <button class="secondary" onclick="SupplierModule.resetFilter()">重置</button>
-        <button class="secondary" onclick="SupplierModule.exportData()">📥 导出Excel</button>
+        </select></div>
+        </div>
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="SupplierModule.applyFilter()">筛选</button>
+          <button class="btn--ghost" onclick="SupplierModule.resetFilter()">重置</button>
+          <button class="btn--ghost" onclick="SupplierModule.exportData()">📥 导出Excel</button>
+        </div>
       </div>
 
       <!-- 合同状态统计区 -->
@@ -43,6 +47,9 @@ const SupplierModule = {
       <div id="supplierTableArea"></div>
       <div id="supplierPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
+
+    // 🟢 v227.74：移动端筛选栏字段行配平（≤768px 按最长选项动态分配 flex-grow）
+    if (window.FilterLayout) FilterLayout.balanceAll();
 
     await this.loadTable(myToken);
   },
@@ -376,23 +383,21 @@ const SupplierModule = {
     }
 
     const orderAmounts = months.map(m => {
-      return orders
-        .filter(o => {
-          if (!o.日期) return false;
-          const d = new Date(o.日期);
-          return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
-        })
-        .reduce((sum, o) => sum + (parseFloat(o.原币价税合计) || 0), 0) / 10000; // 转万元
+      const rows = orders.filter(o => {
+        if (!o.日期) return false;
+        const d = new Date(o.日期);
+        return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
+      });
+      return TableUtils.sumMoney(rows, '原币价税合计') / 10000; // 🟢 AUDIT-003 整数分聚合后转万元
     });
 
     const inboundAmounts = months.map(m => {
-      return inbound
-        .filter(i => {
-          if (!i.入库日期) return false;
-          const d = new Date(i.入库日期);
-          return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
-        })
-        .reduce((sum, i) => sum + (parseFloat(i.原币价税合计) || 0), 0) / 10000; // 转万元
+      const rows = inbound.filter(i => {
+        if (!i.入库日期) return false;
+        const d = new Date(i.入库日期);
+        return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
+      });
+      return TableUtils.sumMoney(rows, '原币价税合计') / 10000; // 🟢 AUDIT-003 整数分聚合后转万元
     });
 
     return { labels: months.map(m => m.label), orderAmounts, inboundAmounts };

@@ -66,14 +66,16 @@ const QueryModule = {
     // 版式与订单列表完全一致：日期框放在 .filter-bar 内，与搜索框、按钮同一行
     content.innerHTML = `
       <div class="tab-bar" style="display:flex;align-items:center;gap:4px;">${tabBtns}</div>
-      <div class="filter-bar" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;padding:0;align-items:flex-start;">
-        <div class="filter-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
-          <input type="text" id="querySearch" class="filter-search-short" autocomplete="off" placeholder="多关键词搜索（空格/逗号分隔）..." value="${this.escapeHtml(this.searchKW)}" onkeydown="if(event.key==='Enter')QueryModule.doSearch()" onfocus="QueryModule.showHistory()">
-          <input type="text" id="queryStartDate" value="${escAttr(this.startDate)}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="QueryModule.onDateChange()" readonly>
-          <span class="filter-sep">至</span>
-          <input type="text" id="queryEndDate" value="${escAttr(this.endDate)}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="QueryModule.onDateChange()" readonly>
-          <button class="search-glass" onclick="QueryModule.doSearch()">搜索</button>
-          <button class="secondary" onclick="QueryModule.clearSearch()">清空</button>
+      <div class="filter-bar filter-bar-m" style="margin-bottom:14px;">
+        <input type="text" id="querySearch" class="fb-search filter-search-short" autocomplete="off" placeholder="多关键词搜索（空格/逗号分隔）..." value="${this.escapeHtml(this.searchKW)}" onkeydown="if(event.key==='Enter')QueryModule.doSearch()" onfocus="QueryModule.showHistory()">
+        <div class="fb-row fb-row--date">
+          <div class="fb-field"><input type="text" id="queryStartDate" value="${escAttr(this.startDate)}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="QueryModule.onDateChange()" readonly></div>
+          <span class="fb-sep filter-sep">至</span>
+          <div class="fb-field"><input type="text" id="queryEndDate" value="${escAttr(this.endDate)}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="QueryModule.onDateChange()" readonly></div>
+        </div>
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="QueryModule.doSearch()">搜索</button>
+          <button class="btn--ghost" onclick="QueryModule.clearSearch()">清空</button>
         </div>
       </div>
       <div id="queryResultArea"></div>
@@ -84,6 +86,8 @@ const QueryModule = {
       DatePicker.mount('queryStartDate');
       DatePicker.mount('queryEndDate');
     }
+    // 🟢 v227.58：移动端筛选栏分轨（查询系统无下拉框，仅分日期组/按钮行）
+    if (window.FilterLayout) FilterLayout.balanceAll();
 
     if (this.results.length > 0) {
       this.renderResults(myToken);

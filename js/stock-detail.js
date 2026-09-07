@@ -59,7 +59,7 @@ window.StockDetailModule = {
     return `<div class="empty-state" style="padding:56px 20px;text-align:center;">
       <div class="empty-icon">📦</div>
       <div style="font-size:15px;margin-top:10px;color:var(--text-secondary);">未指定存货编码</div>
-      <button class="btn-secondary" onclick="App.back()">← 返回</button></div>`;
+      <button class="btn--ghost" onclick="App.back()">← 返回</button></div>`;
   },
 
   // 🟢 v197：基础信息网格 + 存货二维码卡片（并排由 CSS 控制）
@@ -74,6 +74,7 @@ window.StockDetailModule = {
     const baseGridHtml = `<div class="detail-grid">${base.map(c => `<div class="detail-kv"><span class="k">${c.label}</span><span class="v">${esc(DetailCommon.fmt(main[c.field]))}</span></div>`).join('')}</div>`;
 
     // 🟢 A1：档案页存货二维码（编码纯文本 = 存货编码；离线生成，零存储；新增存货自动有码）
+    // 🟢 v227.91：按钮排在二维码右边 —— qr-actions 提到 qr-body 内，与 qr-img 平级作为 flex 子项
     const qrSvg = window.QR ? QR.svg(code) : '';
     const qrCardHtml = qrSvg ? `<div class="detail-section qr-card">
       <div class="qr-body">
@@ -81,10 +82,10 @@ window.StockDetailModule = {
         <div class="qr-meta">
           <div class="qr-name">${esc(main.存货名称 || '')}</div>
           ${main.规格型号 ? `<div class="qr-spec">规格：${esc(main.规格型号)}</div>` : ''}
-          <div class="qr-actions">
-            <button class="btn-secondary" type="button" data-qr-download="${esc(code)}">⬇ 下载 PNG</button>
-            <button class="btn-secondary" type="button" data-qr-print="${esc(code)}">🖨 打印</button>
-          </div>
+        </div>
+        <div class="qr-actions">
+          <button class="btn--ghost" type="button" data-qr-download="${esc(code)}">⬇ 下载 PNG</button>
+          <button class="btn--ghost" type="button" data-qr-print="${esc(code)}">🖨 打印</button>
         </div>
       </div></div>` : '';
 

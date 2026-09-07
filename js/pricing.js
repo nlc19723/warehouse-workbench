@@ -43,22 +43,28 @@ const PricingModule = {
     if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
 
     content.innerHTML = `
-      <div class="filter-bar">
-        <input type="text" id="pricingKw" placeholder="搜索供应商、物料..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')PricingModule.applyFilter()">
-        <select id="pricingSupplier">
-          <option value="">全部供应商</option>
-          ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
-        </select>
-        <select id="pricingType">
-          <option value="">全部类型</option>
-          ${types.map(t => `<option value="${escAttr(t)}" ${this.currentFilter.类型 === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
-        </select>
-        <input type="text" id="pricingStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="生效起始日期" title="生效起始日期" onchange="PricingModule.onDateChange()" readonly>
-        <span class="filter-sep">至</span>
-        <input type="text" id="pricingEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="生效结束日期" title="生效结束日期" onchange="PricingModule.onDateChange()" readonly>
-        <button class="search-glass" onclick="PricingModule.applyFilter()">筛选</button>
-        <button class="secondary" onclick="PricingModule.resetFilter()">重置</button>
-        <button class="secondary" onclick="PricingModule.exportData()">📥 导出</button>
+      <div class="filter-bar filter-bar-m">
+        <input type="text" id="pricingKw" class="fb-search" placeholder="搜索供应商、物料..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')PricingModule.applyFilter()">
+        <div class="fb-row fb-row--fields">
+          <div class="fb-field"><select id="pricingSupplier">
+            <option value="">全部供应商</option>
+            ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+          </select></div>
+          <div class="fb-field"><select id="pricingType">
+            <option value="">全部类型</option>
+            ${types.map(t => `<option value="${escAttr(t)}" ${this.currentFilter.类型 === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+          </select></div>
+        </div>
+        <div class="fb-row fb-row--date">
+          <div class="fb-field"><input type="text" id="pricingStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="生效起始日期" title="生效起始日期" onchange="PricingModule.onDateChange()" readonly></div>
+          <span class="fb-sep filter-sep">至</span>
+          <div class="fb-field"><input type="text" id="pricingEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="生效结束日期" title="生效结束日期" onchange="PricingModule.onDateChange()" readonly></div>
+        </div>
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="PricingModule.applyFilter()">筛选</button>
+          <button class="btn--ghost" onclick="PricingModule.resetFilter()">重置</button>
+          <button class="btn--ghost" onclick="PricingModule.exportData()">📥 导出</button>
+        </div>
       </div>
 
       <div id="pricingSummary"></div>
@@ -75,6 +81,8 @@ const PricingModule = {
       DatePicker.mount('pricingStartDate');
       DatePicker.mount('pricingEndDate');
     }
+    // 🟢 v227.58：移动端筛选栏下拉框按内部最长选项字符长度动态等分（文本框两行等长）
+    if (window.FilterLayout) FilterLayout.balanceAll();
 
     await this.loadData(myToken);
   },

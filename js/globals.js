@@ -49,3 +49,18 @@ window.StockDetailModule = StockDetailModule;
 window.SupplierDetailModule = SupplierDetailModule;
 window.esc = window.esc;
 window.escAttr = window.escAttr;
+
+// 🟢 AUDIT-004：兜底捕获未处理的 Promise 异常 / 运行时错误，避免「静默失败」被吞掉。
+//   背景：全仓大量写/同步/导入路径的 await 无就近 catch（审计约 513 处），异常被静默 reject 后
+//   UI 可能误报「成功」或显示陈旧数据。此处统一在 console 留痕，使静默失败至少可见（便于排查），
+//   不主动弹 Toast——避免对既有 fire-and-forget 调用造成干扰性 UX 抖动。具体写路径（如 db.clearAll）
+//   仍额外包 try/catch 向上抛出，交由调用方决定提示与回滚。
+window.addEventListener('unhandledrejection', (ev) => {
+  const reason = ev && ev.reason;
+  console.error('[未捕获 Promise 异常]', reason && (reason.stack || reason.message || reason));
+});
+window.addEventListener('error', (ev) => {
+  if (ev && ev.message) {
+    console.error('[运行时错误]', ev.message, ev.filename ? '(' + ev.filename + ':' + ev.lineno + ')' : '');
+  }
+});

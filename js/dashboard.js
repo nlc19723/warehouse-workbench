@@ -67,13 +67,13 @@ const DashboardModule = {
     return `
       <!-- 3D CoverFlow 快捷入口 -->
       <div class="coverflow-wrapper" style="position:relative;padding:0 12px;margin-bottom:18px;">
-        <button class="coverflow-nav prev-btn" onclick="DashboardModule.coverflowPrev()">‹</button>
+        <button class="coverflow-nav wb-pager-btn wb-prev prev-btn" onclick="DashboardModule.coverflowPrev()" aria-label="上一张" title="上一张"></button>
         <div class="coverflow-container" id="coverflowContainer">
           <div class="coverflow-stage" id="coverflowStage">
             ${cfCards}
           </div>
         </div>
-        <button class="coverflow-nav next-btn" onclick="DashboardModule.coverflowNext()">›</button>
+        <button class="coverflow-nav wb-pager-btn wb-next next-btn" onclick="DashboardModule.coverflowNext()" aria-label="下一张" title="下一张"></button>
       </div>
 
       ${this.recentBarHtml()}

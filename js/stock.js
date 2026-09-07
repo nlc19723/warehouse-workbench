@@ -17,16 +17,18 @@ const StockModule = {
     const myToken = token;
     const content = document.getElementById('contentArea');
     content.innerHTML = `
-      <div class="filter-bar">
-        <input type="text" id="stockKw" placeholder="搜索物料编码、名称、规格..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')StockModule.applyFilter()">
-        <button class="search-glass" onclick="StockModule.applyFilter()">🔍 搜索</button>
-        <button class="secondary" onclick="StockModule.resetFilter()">重置</button>
-        <!-- 🟢 v198：A3 批量打印二维码（重置/导出之间）
-             默认不渲染勾选列；首次点击进入多选模式（显示勾选框 + 退出按钮），
-             再次点击才真正打印所选。 -->
-        <button class="secondary" id="stockBulkBtn" onclick="StockModule.toggleBulk()">🖨 批量打印二维码</button>
-        <button class="secondary" id="stockBulkExitBtn" style="display:none;" onclick="StockModule.exitBulk()">✖ 退出多选</button>
-        <button class="secondary" onclick="StockModule.exportData()">📥 导出</button>
+      <div class="filter-bar filter-bar-m" data-mod="stock">
+        <input type="text" id="stockKw" class="fb-search" placeholder="搜索物料编码、名称、规格..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')StockModule.applyFilter()">
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="StockModule.applyFilter()">🔍 搜索</button>
+          <button class="btn--ghost" onclick="StockModule.resetFilter()">重置</button>
+          <!-- 🟢 v227.76：现存量工具栏顺序（搜索 → 重置 → 导出 → 打印二维码 → 退出打印） -->
+          <button class="btn--ghost" onclick="StockModule.exportData()">📥 导出</button>
+          <!-- 🟢 v227.76：A3 批量打印二维码 → 打印二维码；默认不渲染勾选列，
+               首次点击进入多选模式（显示勾选框 + 退出打印按钮），再次点击才真正打印所选。 -->
+          <button class="btn--ghost" id="stockBulkBtn" onclick="StockModule.toggleBulk()">🖨 打印二维码</button>
+          <button class="btn--ghost btn-hidden" id="stockBulkExitBtn" onclick="StockModule.exitBulk()">✖ 退出打印</button>
+        </div>
       </div>
 
       <div id="stockSummary"></div>
@@ -207,16 +209,16 @@ const StockModule = {
     this.renderTable();
   },
 
-  // 🟢 v198：刷新批量按钮文案 / 退出按钮显隐 / 计数
+  // 🟢 v227.76：刷新批量按钮文案 / 退出按钮显隐 / 计数（默认仅显示「打印二维码」，多选模式才显示「退出打印」）
   _setBulkUI() {
     const btn = document.getElementById('stockBulkBtn');
     const exitBtn = document.getElementById('stockBulkExitBtn');
     if (btn) {
       btn.innerHTML = this.bulkMode
         ? '🖨 打印所选 <span id="stockSelCount"></span>'
-        : '🖨 批量打印二维码';
+        : '🖨 打印二维码';
     }
-    if (exitBtn) exitBtn.style.display = this.bulkMode ? '' : 'none';
+    if (exitBtn) exitBtn.classList.toggle('btn-hidden', !this.bulkMode);
     this._updateSelCount();
   },
 

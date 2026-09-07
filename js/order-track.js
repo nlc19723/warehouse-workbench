@@ -15,15 +15,19 @@ const OrderTrackModule = {
     if (myToken !== undefined && myToken !== App._goToken) return;
 
     content.innerHTML = `
-      <div class="filter-bar">
-        <input type="text" id="trackKw" placeholder="搜索订单编号、供应商、存货名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')OrderTrackModule.applyFilter()">
-        <select id="trackSupplier">
+      <div class="filter-bar filter-bar-m" data-mod="track">
+        <input type="text" id="trackKw" class="fb-search" placeholder="搜索订单编号、供应商、存货名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')OrderTrackModule.applyFilter()">
+        <div class="fb-row fb-row--fields">
+          <div class="fb-field"><select id="trackSupplier">
           <option value="">全部供应商</option>
           ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.supplier === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
-        </select>
-        <button class="search-glass" onclick="OrderTrackModule.applyFilter()">筛选</button>
-        <button class="secondary" onclick="OrderTrackModule.resetFilter()">重置</button>
-        <button class="secondary" onclick="OrderTrackModule.exportData()">📥 导出</button>
+        </select></div>
+        </div>
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="OrderTrackModule.applyFilter()">筛选</button>
+          <button class="btn--ghost" onclick="OrderTrackModule.resetFilter()">重置</button>
+          <button class="btn--ghost" onclick="OrderTrackModule.exportData()">📥 导出</button>
+        </div>
       </div>
 
       <div id="trackSummary"></div>
@@ -36,6 +40,9 @@ const OrderTrackModule = {
     if (window.enhanceSearchSelect) {
       enhanceSearchSelect('trackSupplier', { placeholder: '搜索供应商', widthMode: 'full' });
     }
+
+    // 🟢 v227.74：移动端筛选栏字段行配平（≤768px 按最长选项动态分配 flex-grow）
+    if (window.FilterLayout) FilterLayout.balanceAll();
 
     await this.loadData(myToken);
   },
@@ -59,14 +66,14 @@ const OrderTrackModule = {
       orders = orders.filter(o => o.供应商 === supplier);
     }
 
-    // 仅显示有未入库量的订单
-    const pending = orders.filter(o => parseFloat(o.未入库量) > 0);
+    // 仅显示有未入库量的订单；且排除「行关闭人」非空的行（已关闭说明供应商不需再送，无须跟踪）
+    const pending = orders.filter(o => parseFloat(o.未入库量) > 0 && !(o.行关闭人 && String(o.行关闭人).trim()));
 
     // ===== 去重统计 =====
     const uniqueOrderNos = new Set(pending.map(o => o.订单编号).filter(Boolean));
     const uniqueCount = uniqueOrderNos.size;
     const totalUninbound = pending.reduce((s, o) => s + (parseFloat(o.未入库量) || 0), 0);
-    const totalUninboundAmount = pending.reduce((s, o) => s + (parseFloat(o.未入总金额) || 0), 0);
+    const totalUninboundAmount = TableUtils.sumMoney(pending, '未入总金额'); // 🟢 AUDIT-003 整数分聚合
 
     if (rt !== undefined && rt !== App._goToken) return;
     document.getElementById('trackSummary').innerHTML = `

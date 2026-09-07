@@ -13,11 +13,13 @@ const LowTurnoverModule = {
     const myToken = token;
     const content = document.getElementById('contentArea');
     content.innerHTML = `
-      <div class="filter-bar">
-        <input type="text" id="ltKw" placeholder="搜索物料名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')LowTurnoverModule.applyFilter()">
-        <button class="search-glass" onclick="LowTurnoverModule.applyFilter()">🔍 搜索</button>
-        <button class="secondary" onclick="LowTurnoverModule.resetFilter()">重置</button>
-        <button class="secondary" onclick="LowTurnoverModule.exportData()">📥 导出</button>
+      <div class="filter-bar filter-bar-m" data-mod="lt">
+        <input type="text" id="ltKw" class="fb-search" placeholder="搜索物料名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')LowTurnoverModule.applyFilter()">
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="LowTurnoverModule.applyFilter()">🔍 搜索</button>
+          <button class="btn--ghost" onclick="LowTurnoverModule.resetFilter()">重置</button>
+          <button class="btn--ghost" onclick="LowTurnoverModule.exportData()">📥 导出</button>
+        </div>
       </div>
 
       <div id="ltSummary"></div>

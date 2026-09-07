@@ -71,8 +71,8 @@
       '<div class="qr-modal-meta">编码：' + escapeHtml(key) +
       (spec ? '　规格：' + escapeHtml(spec) : '') + '</div>' +
       '<div class="qr-modal-actions">' +
-      '<button class="btn-secondary" type="button" data-qr-dl="' + escapeHtml(key) + '">⬇ 下载 PNG</button>' +
-      '<button class="btn-secondary" type="button" data-qr-close>关闭</button>' +
+      '<button class="btn--ghost" type="button" data-qr-dl="' + escapeHtml(key) + '">⬇ 下载 PNG</button>' +
+      '<button class="btn--ghost" type="button" data-qr-close>关闭</button>' +
       '</div></div>';
     document.body.appendChild(overlay);
     const close = () => overlay.remove();

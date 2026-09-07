@@ -2,15 +2,16 @@
 <html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="库管工作台">
-  <link rel="apple-touch-icon" href="icons/icon-192.png?v=55" type="image/png">
-  <link rel="manifest" href="manifest.json?v=2">
+  <link rel="apple-touch-icon" href="icons/icon-192.png?v=227.92" type="image/png">
+  <link rel="icon" href="icons/icon-192.png?v=227.92" type="image/png">
+  <link rel="manifest" href="manifest.json?v=227.92">
   <meta name="theme-color" content="#357ABD">
   <title>库管系统工作台</title>
-  <link rel="stylesheet" href="css/style.css?v=214">
+  <link rel="stylesheet" href="css/style.css?v=227.92">
   <script defer src="lib/dexie.min.js?v=55"></script>
   <script defer src="lib/chart.min.js?v=55"></script>
   <script defer src="lib/xlsx.full.min.js?v=55"></script>
@@ -47,7 +48,7 @@ document.addEventListener('DOMContentLoaded', function(){
       <div class="sidebar-header">
         <div class="sidebar-logo-icon" id="sidebarAvatar" title="点击更换头像">库</div>
         <div class="sidebar-header-info">
-          <div class="sidebar-title" id="sidebarTitle" title="点击修改名称">库管工作台</div>
+          <div class="sidebar-title" id="sidebarTitle" title="点击切换账号 / 退出登录">库管工作台</div>
           <div class="sidebar-subtitle" id="sidebarSubtitle">
             <input type="text" class="sidebar-mood-input" id="sidebarMood" placeholder="写点什么（如：今日心情、当班备注）" maxlength="30">
           </div>
@@ -56,6 +57,8 @@ document.addEventListener('DOMContentLoaded', function(){
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 4L6 8L10 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
       </div>
+
+      <!-- 🟢 v227.46：原「账号状态条」已删除 —— 账号入口统一为侧栏标题（点击可切换/退出）与顶部胶囊 -->
 
       <!-- 导航滚动区：小屏/移动端高度不足时内部滚动，保证所有功能模块可达 -->
       <nav class="sidebar-nav">
@@ -89,6 +92,14 @@ document.addEventListener('DOMContentLoaded', function(){
           <span class="item-icon" style="background:var(--accent-mint-light);">🏪</span>
           <span class="item-text">现存量</span>
         </a>
+        <a class="sidebar-item" data-module="stocktake" href="#stocktake">
+          <span class="item-icon" style="background:var(--accent-mint-light);">📋</span>
+          <span class="item-text">盘点</span>
+        </a>
+        <a class="sidebar-item" data-module="stocktakeRecord" href="#stocktakeRecord">
+          <span class="item-icon" style="background:var(--accent-mint-light);">📝</span>
+          <span class="item-text">盘点记录列表</span>
+        </a>
         <a class="sidebar-item" data-module="orders" href="#orders">
           <span class="item-icon" style="background:var(--status-info-bg);">📝</span>
           <span class="item-text">订单列表</span>
@@ -117,23 +128,28 @@ document.addEventListener('DOMContentLoaded', function(){
           <span class="item-icon">❌</span><span class="item-text">违约台账</span>
         </a>
         <a class="sidebar-item" data-module="outbound" href="#outbound">
-          <span class="item-icon">📤</span><span class="item-text">出库</span>
+          <span class="item-icon">📤</span><span class="item-text">临时出库</span>
         </a>
         <a class="sidebar-item" data-module="outboundList" href="#outboundList">
-          <span class="item-icon">📋</span><span class="item-text">出库列表</span>
+          <span class="item-icon">🏬</span><span class="item-text">中心出库列表</span>
         </a>
       </div>
       </nav>
 
       <div class="sidebar-footer">
-        <!-- 🟢 v190：云端同步按钮已隐藏，SyncManager 仍可由设置抽屉/空状态引导调用 -->
-        <a class="sidebar-item" onclick="DataLoader.reimport()">
+        <!-- 🟢 v227.39：4 个系统入口（云端同步 / 数据导入 / 设置 / 源码）走与业务模块同一套权限
+             - data-entry 标识入口类型；App._applyEntryVisibility() 按 canAccessEntry 显隐
+             - 未授权者 DOM 隐藏 + 事件守卫双保险；顶栏仍保留「已同步」只读状态角标 -->
+        <a class="sidebar-item" data-entry="cloud" onclick="App.openCloudEntry()">
+          <span class="item-icon">☁️</span><span class="item-text">云端同步</span>
+        </a>
+        <a class="sidebar-item" data-entry="import" onclick="App.openImportEntry()">
           <span class="item-icon">🔄</span><span class="item-text">数据导入</span>
         </a>
-        <a class="sidebar-item" id="sidebarSettingsBtn">
+        <a class="sidebar-item" data-entry="settings" id="sidebarSettingsBtn">
           <span class="item-icon">⚙️</span><span class="item-text">设置</span>
         </a>
-        <a class="sidebar-item" id="sourceDownloadBtn" href="javascript:void(0)" title="下载工作台源代码">
+        <a class="sidebar-item" data-entry="source" id="sourceDownloadBtn" href="javascript:void(0)" title="下载工作台源代码">
           <span class="item-icon">📦</span><span class="item-text">源码</span>
         </a>
       </div>
@@ -150,12 +166,11 @@ document.addEventListener('DOMContentLoaded', function(){
           <button class="hamburger-btn mobile-only" id="hamburgerBtn">
             <span></span><span></span><span></span>
           </button>
-          <strong style="font-size:16px;color:var(--text-primary);white-space:nowrap;">库管工作台</strong>
+          <strong style="font-size:16px;color:var(--text-primary);white-space:nowrap;">StockHub</strong>
           <span id="appVersionBadge" style="font-size:10.5px;color:var(--text-secondary);background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.18);padding:2px 7px;border-radius:6px;margin-left:6px;font-weight:500;letter-spacing:0.3px;" title="当前发布版本号"></span>
         </div>
         <div class="search-box">
-          <input type="text" id="globalSearch" placeholder="搜索订单/物料/供应商..." autocomplete="off">
-          <span class="search-icon">🔍</span>
+          <button class="topbar-account-btn" id="topbarAccountBtn" title="点击切换账号" aria-label="当前账号"></button>
         </div>
         <div class="top-bar-right">
           <!-- 🟢 v197：扫一扫图标（WebRTC + jsQR）→ 识别存货编码 → 直达档案页 -->
@@ -170,11 +185,10 @@ document.addEventListener('DOMContentLoaded', function(){
           </button>
           <button class="theme-toggle" id="themeToggle" title="切换主题">🌙</button>
           <span class="current-time" id="currentTime">--:--</span>
-          <div class="sync-status" id="syncStatus" title="点击配置云端同步">
+          <div class="sync-status" id="syncStatus" title="云端连接状态">
             <span class="status-dot"></span>
             <span id="syncStatusText">未连接</span>
           </div>
-          <div class="user-avatar">管</div>
         </div>
       </header>
 
@@ -183,6 +197,19 @@ document.addEventListener('DOMContentLoaded', function(){
         <!-- 动态渲染 -->
       </div>
     </main>
+
+    <!-- 🟢 v227.33：移动端底部 Tab 栏（一级入口仅「查询 / 盘点」，其余模块走汉堡抽屉）
+         理由：库管员户外单手操作，高频就这两个；只放 2 个 Tab 可给足触控宽度（≥44px）。 -->
+    <nav class="mobile-tabbar" id="mobileTabbar" aria-label="底部快捷导航">
+      <button class="mtab-item" type="button" data-tab-module="query">
+        <span class="mtab-icon">🔍</span>
+        <span class="mtab-label">查询</span>
+      </button>
+      <button class="mtab-item" type="button" data-tab-module="stocktake">
+        <span class="mtab-icon">📋</span>
+        <span class="mtab-label">盘点</span>
+      </button>
+    </nav>
   </div>
 
   <!-- 加载遮罩 -->
@@ -279,46 +306,59 @@ document.addEventListener('DOMContentLoaded', function(){
   </div>
 
   <script defer src="lib/jszip.min.js?v=1"></script>
-  <script defer src="js/table-utils.js?v=214"></script>
-  <script defer src="js/qr-util.js?v=214"></script>
-  <script defer src="js/qr-scan.js?v=214"></script>
-  <script defer src="js/search-select.js?v=214"></script>
-  <script defer src="js/entity-links.js?v=214"></script>
-  <script defer src="js/db.js?v=214"></script>
-  <script defer src="js/config.js?v=214"></script>
+  <script defer src="js/table-utils.js?v=227.92"></script>
+  <script defer src="js/qr-util.js?v=227.92"></script>
+  <script defer src="js/qr-scan.js?v=227.92"></script>
+  <script defer src="js/search-select.js?v=227.92"></script>
+  <script defer src="js/entity-links.js?v=227.92"></script>
+  <script defer src="js/db.js?v=227.92"></script>
+  <script defer src="js/config.js?v=227.92"></script>
   <!-- 🟢 v200：工作台主题弹窗（替换浏览器原生 alert/confirm/prompt） -->
-  <script defer src="js/modal.js?v=214"></script>
-  <script defer src="js/sync.js?v=214"></script>
-  <script defer src="js/data-loader.js?v=214"></script>
-  <script defer src="js/dashboard.js?v=214"></script>
-  <script defer src="js/supplier.js?v=214"></script>
-  <script defer src="js/query.js?v=214"></script>
-  <script defer src="js/reconciliation.js?v=214"></script>
-  <script defer src="js/order-track.js?v=214"></script>
-  <script defer src="js/inventory-alert.js?v=214"></script>
-  <script defer src="js/order-check.js?v=214"></script>
-  <script defer src="js/components/datepicker.js?v=214"></script>
-  <script defer src="js/orders.js?v=214"></script>
-  <script defer src="js/inbound.js?v=214"></script>
-  <script defer src="js/stock.js?v=214"></script>
-  <script defer src="js/pricing.js?v=214"></script>
-  <script defer src="js/low-turnover.js?v=214"></script>
-  <script defer src="js/breach.js?v=214"></script>
-  <script defer src="js/outbound.js?v=214"></script>
-  <script defer src="js/stock-detail.js?v=214"></script>
-  <script defer src="js/supplier-detail.js?v=214"></script>
-  <script defer src="js/order-detail.js?v=214"></script>
-  <script defer src="js/color-theme.js?v=214"></script>
-  <script defer src="js/app.js?v=214"></script>
-  <script defer src="js/globals.js?v=214"></script>
+  <script defer src="js/modal.js?v=227.92"></script>
+  <script defer src="js/sync.js?v=227.92"></script>
+  <script defer src="js/data-loader.js?v=227.92"></script>
+  <script defer src="js/dashboard.js?v=227.92"></script>
+  <script defer src="js/supplier.js?v=227.92"></script>
+  <script defer src="js/query.js?v=227.92"></script>
+  <script defer src="js/reconciliation.js?v=227.92"></script>
+  <script defer src="js/order-track.js?v=227.92"></script>
+  <script defer src="js/inventory-alert.js?v=227.92"></script>
+  <script defer src="js/order-check.js?v=227.92"></script>
+  <script defer src="js/filter-layout.js?v=227.92"></script>
+  <script defer src="js/components/datepicker.js?v=227.92"></script>
+  <script defer src="js/orders.js?v=227.92"></script>
+  <script defer src="js/inbound.js?v=227.92"></script>
+  <script defer src="js/stock.js?v=227.92"></script>
+  <script defer src="js/pricing.js?v=227.92"></script>
+  <script defer src="js/low-turnover.js?v=227.92"></script>
+  <script defer src="js/breach.js?v=227.92"></script>
+  <script defer src="js/outbound.js?v=227.92"></script>
+  <script defer src="js/stock-detail.js?v=227.92"></script>
+  <script defer src="js/supplier-detail.js?v=227.92"></script>
+  <script defer src="js/order-detail.js?v=227.92"></script>
+  <script defer src="js/stocktake.js?v=227.92"></script>
+  <script defer src="js/stocktake-batch.js?v=227.92"></script>
+  <script defer src="js/stocktake-records.js?v=227.92"></script>
+  <script defer src="js/color-theme.js?v=227.92"></script>
+  <script defer src="js/app.js?v=227.92"></script>
+  <script defer src="js/globals.js?v=227.92"></script>
   <!-- PWA: 注册 Service Worker（支持离线 + 安装为桌面应用） -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('service-worker.js?v=214').then(function(reg) {
+        // 🟢 v227.21：注册 URL 带版本戳 + updateViaCache:'none'，确保每次发版浏览器都重新拉取 SW 脚本，
+        //   避免「改了 CACHE_NAME 但旧 ?v= 被 CDN 缓存、SW 永不更新」的卡死。
+        navigator.serviceWorker.register('service-worker.js?v=227.92', { updateViaCache: 'none' }).then(function(reg) {
           console.log('[PWA] Service Worker 注册成功:', reg.scope);
         }).catch(function(err) {
           console.warn('[PWA] Service Worker 注册失败:', err);
+        });
+        // 🟢 v227.21：新 SW 接管控制时自动刷新一次，让新版资源立即生效（防「发了版却看不到」）。
+        let __swRefreshing = false;
+        navigator.serviceWorker.addEventListener('controllerchange', function() {
+          if (__swRefreshing) return;
+          __swRefreshing = true;
+          location.reload();
         });
       });
     }
@@ -372,20 +412,32 @@ document.addEventListener('DOMContentLoaded', function(){
       var PW      = '1122';
 
       // ===== 需要打包的文件清单（相对路径，与项目根目录一致）=====
+      // 🟢 v227.89：兜底清单与 SOURCE_FILES.json 同步：新增 filter-layout.js / stocktake-batch.js，
+      //   移除已删除的 css/style.css.bak-css501（旧备份，根目录已无此文件）。
+      // 优先路径仍是动态目录扫描（沙箱/常规 http server 支持），此清单仅在 GH Pages 等
+      // 不支持目录列表的部署环境作为回退兜底。
       var FILES_TO_PACKAGE = [
         'index.html',
         'manifest.json',
         'service-worker.js',
         '.gitignore',
         'css/style.css',
+        'docs/全局代码审查标准.md',
+        'bridge/decrypt_bridge.py', 'bridge/dump_one.py', 'bridge/start_bridge.bat',
+        'bridge/test_bridge.py', 'bridge/README.md', 'bridge/FRONTEND_INTEGRATION.md',
         'js/table-utils.js', 'js/db.js', 'js/config.js', 'js/sync.js', 'js/data-loader.js',
         'js/dashboard.js', 'js/supplier.js', 'js/query.js', 'js/reconciliation.js',
         'js/order-track.js', 'js/inventory-alert.js', 'js/orders.js', 'js/inbound.js',
         'js/stock.js', 'js/pricing.js', 'js/low-turnover.js', 'js/breach.js',
         'js/outbound.js', 'js/app.js', 'js/order-check.js',
         'js/stock-detail.js', 'js/supplier-detail.js', 'js/order-detail.js', 'js/entity-links.js',
+        'js/stocktake.js', 'js/stocktake-batch.js', 'js/stocktake-records.js',
+        'js/filter-layout.js', 'js/globals.js', 'js/color-theme.js', 'js/modal.js',
+        'js/qr-scan.js', 'js/qr-util.js', 'js/search-select.js', 'js/import-worker.js',
+        'js/components/datepicker.js',
         'lib/dexie.min.js', 'lib/chart.min.js', 'lib/xlsx.full.min.js',
-        'lib/supabase.min.js', 'lib/jszip.min.js',
+        'lib/supabase.min.js', 'lib/jszip.min.js', 'lib/zxing.min.js',
+        'lib/jsqr.min.js', 'lib/qrcode.min.js',
         'icons/icon-72.svg','icons/icon-96.svg','icons/icon-128.svg','icons/icon-144.svg',
         'icons/icon-152.svg','icons/icon-192.svg','icons/icon-512.svg','icons/icon-design.svg',
         'icons/icon-72.png','icons/icon-96.png','icons/icon-128.png','icons/icon-144.png',
@@ -393,27 +445,33 @@ document.addEventListener('DOMContentLoaded', function(){
         '.github/workflows/deploy.yml',
         '.gitlab-ci.yml',
         'releases/app-manifest.json',
-        'screenshots/fixed_dashboard.png',
         '.nojekyll'
       ];
 
       // ===== 动态清单：优先用「目录列表扫描」实时获取当前部署的所有源码文件 =====
       // 这样以后新增任何文件，无需手动更新 SOURCE_FILES.json，下载的源码包都会自动包含。
       // 仅当服务器不支持目录列表（如 GitHub Pages）时，才回退到 SOURCE_FILES.json / 内置清单。
-      var SCAN_ROOTS = ['js', 'lib', 'css', 'icons'];
+      var SCAN_ROOTS = ['js', 'lib', 'css', 'icons', 'bridge', 'docs'];
       var SKIP_DIRS  = new Set(['node_modules', '.git', 'tools', 'scripts', 'releases']);
       var ROOT_FILES = ['index.html', 'manifest.json', 'service-worker.js',
                         '.gitignore', '.gitlab-ci.yml', '.nojekyll', 'SOURCE_FILES.json',
                         '.github/workflows/deploy.yml', 'releases/app-manifest.json'];
-      function _isDevJunk(name) {
-        return /^(dp-|settings-verify)/.test(name) || name.endsWith('_preview.html') || name.endsWith('.md');
+      // 排除「根目录级别」的临时报告/草稿（如 全局代码审查报告_v227.50.md、UI优化方案.md 等），
+      // 但【保留 docs/ 与 bridge/ 下的文档】——含《全局代码审查标准.md》及 bridge 的 README/集成说明。
+      // 参数传相对路径（含目录），以区分根级垃圾与子目录里的正式文档。
+      function _isDevJunk(relPath) {
+        var base = relPath.indexOf('/') >= 0 ? relPath.split('/').pop() : relPath;
+        if (/^(dp-|settings-verify)/.test(base) || base.endsWith('_preview.html')) return true;
+        // 仅当 .md 位于仓库根目录时才视为垃圾；docs/、bridge/ 下的 .md 一律保留
+        if (base.endsWith('.md') && relPath.indexOf('/') === -1) return true;
+        return false;
       }
       // 仅在「目录扫描」路径下排除无用图片：保留 manifest 引用的 PWA 图标
       // (icons/icon-<size>.png|svg)，排除设计稿/预览/截图/草稿类图片（如 icon-design.svg）。
       function _isUselessImage(name) {
         var lower = name.toLowerCase();
         if (!/\.(png|jpe?g|gif|webp|svg)$/.test(lower)) return false;
-        return /\bdesign\b|preview|screenshot|_bak|mock|draft|tmp/i.test(lower);
+        return /\bdesign\b|preview|screenshot|_bak|mock|draft|tmp|^v\d/i.test(lower);
       }
       async function _listDirEntries(relDir) {
         try {
@@ -440,7 +498,7 @@ document.addEventListener('DOMContentLoaded', function(){
             if (SKIP_DIRS.has(dirName) || dirName.charAt(0) === '.') continue;
             files = files.concat(await _scanRecursive(base + dirName));
           } else {
-            if (e.charAt(0) === '.' || _isDevJunk(e) || _isUselessImage(e)) continue;
+            if (e.charAt(0) === '.' || _isDevJunk(base + e) || _isUselessImage(e)) continue;
             files.push(base + e);
           }
         }
@@ -555,30 +613,17 @@ document.addEventListener('DOMContentLoaded', function(){
         });
       }
 
-      function openDl() {
-        overlay.classList.add('show');
-        input.value = ''; error.textContent = '';
-        setTimeout(function () { try { input.focus(); } catch (e) {} }, 60);
-      }
-      function closeDl() { overlay.classList.remove('show'); }
-
+      // 🟢 v227.35：源码下载统一纳入管理员权限（与「数据导入 / 设置」一致，使用同一管理员密码校验）
+      // 🟢 v227.39：4 个系统入口统一改为按权限放行（不再强制要求管理员特权；keeper 单独勾选「源码」权限即可）
+      window.__startSourceDownload = doDynamicDownload;
       document.getElementById('sourceDownloadBtn').addEventListener('click', function (e) {
         e.preventDefault();
-        openDl();
-      });
-      document.getElementById('dlPwClose').addEventListener('click', closeDl);
-      overlay.addEventListener('click', function (e) { if (e.target === overlay) closeDl(); });
-      function submit() {
-        if (input.value === PW) {
-          closeDl();
-          doDynamicDownload();
+        if (typeof App !== 'undefined' && App.openSourceEntry) {
+          App.openSourceEntry();
         } else {
-          error.textContent = '密码错误，请重试';
-          input.value = ''; input.focus();
+          doDynamicDownload();
         }
-      }
-      document.getElementById('dlPwSubmit').addEventListener('click', submit);
-      input.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+      });
     })();
   </script>
 </body>

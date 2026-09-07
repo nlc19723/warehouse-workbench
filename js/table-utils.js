@@ -138,8 +138,52 @@ window.TablePrefs = TablePrefs;
 window._overlayGlobalListeners = window._overlayGlobalListeners || [];
 window._installedWraps = window._installedWraps || new WeakSet();
 
+// 🟢 v227.50：移动端收起态按模块指定保留列（列头文字匹配，抗索引漂移：stock 批量模式首列插复选框、stocktake showInOut 动态列）
+const COLLAPSE_KEEP = {
+  inbound:           ['存货名称','规格型号','入库量'],
+  oblTableArea:      ['存货名称','规格型号','出库数量'],   // 出库列表（表头叫“出库数量”）
+  orders:            ['存货名称','规格型号','订单量'],
+  trackTableArea:    ['存货名称','规格型号','未入库订单量'], // 订单跟踪（表头叫“未入库订单量”）
+  stockTableArea:    ['存货名称','规格型号','现存数量'],   // 现存量（表头叫“现存数量”）
+  inventoryAlert:    ['存货名称','规格型号','补货值'],
+  stArea:            ['存货名称','规格型号','盘点数量'],
+  stRecArea:         ['存货名称','规格型号','盘点数量'],   // 盘点记录列表
+  pricingTableArea:  ['存货名称','规格型号','含税单价'],
+  recTableArea:      ['存货名称','规格型号','含税金额'],
+  supplierTableArea: ['供应商','合同到期日','已入库金额'], // 供应商管理（特殊3列：表头“供应商/合同到期日/已入库金额(元)”）
+  'stk-alert':       ['分类','现存量','补货值'],           // 档案页-库存预警
+};
+const QUERY_KEEP = {
+  stock:   ['存货名称','规格型号','现存量'],
+  orders:  ['存货名称','规格型号','订单量'],
+  inbound: ['存货名称','规格型号','入库量'],
+  pricing: ['存货名称','规格型号','含税单价'],
+};
+
 const TableStickyOverlay = {
   isNarrow() { return window.innerWidth <= 768; },
+
+  // 🟢 v227.50：按表格 key 取该模块收起态要保留的列头文字数组；无配置返回 null（回退保留前3列）
+  _resolveKeepConfig(table) {
+    const key = TableUtils._deriveTableKey(table);
+    if (key === 'queryResultArea' && window.QueryModule) return QUERY_KEEP[window.QueryModule.currentTab] || null;
+    return key ? (COLLAPSE_KEEP[key] || null) : null;
+  },
+  // 🟢 v227.50：把列头文字 token 解析为列索引。
+  //   匹配策略：先精确相等（t === tok），否则再“表头包含 token”（t.includes(tok)）——兼容“已入库金额(元)”等带后缀表头。
+  //   注意只用单向 t.includes(tok)，不用 tok.includes(t)：否则“未入库订单量”会误命中更靠前的“订单量”子串列。
+  _resolveKeepHeaders(table, tokens) {
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    const texts = ths.map(th => (th.textContent || '').trim());
+    const idxs = [];
+    for (const tok of tokens) {
+      let hit = -1;
+      for (let i = 0; i < texts.length; i++) { if (texts[i] === tok) { hit = i; break; } } // 精确优先
+      if (hit === -1) for (let i = 0; i < texts.length; i++) { if (texts[i] && texts[i].includes(tok)) { hit = i; break; } } // 再表头包含 token
+      if (hit !== -1) idxs.push(hit);
+    }
+    return idxs;
+  },
 
   /**
    * 给 .table-wrapper 安装移动端浮动表头/首列
@@ -177,11 +221,12 @@ const TableStickyOverlay = {
     const ths = table.querySelectorAll('thead th');
     const colCount = ths.length;
     const btn = wrap._colCollapseBtn;
-    // 🟢 v144：移动端一律保留前 2 列（序号 + 主数据列）
-    // 🟢 v198：首列若是复选框列（现存量「批量打印二维码」多选模式），保留列数 +1，
-    //   否则折叠后只剩「勾选框 + 二维码」，用户看不出自己勾的是哪个存货。
-    const hasCheckCol = !!table.querySelector('thead th.col-checkbox');
-    const keepMin = Math.min(2 + (hasCheckCol ? 1 : 0), Math.max(1, colCount - 1));
+    // 🟢 v227.50：移动端收起态保留列策略
+    //   有模块配置（COLLAPSE_KEEP / QUERY_KEEP）→ 按列头文字匹配保留指定列（多为“存货名称+规格型号+关键列”）；
+    //   无配置（订货核对 / 出库模块 / 违约 / 低周转 / 档案页非配置区等）→ 回退“保留前 3(+复选框) 列”（v227.49 行为，满足“不改”）。
+    const keepTokens = this._resolveKeepConfig(table);
+    const keepIdx = keepTokens ? this._resolveKeepHeaders(table, keepTokens) : null;
+    const useKeepIdx = !!(keepIdx && keepIdx.length > 0 && keepIdx.length < colCount);
 
     // 重置：所有列显示；表格恢复原始 table-layout（多数模块在 inline style 写 fixed，宽列拖拽需要它）
     table.querySelectorAll('thead th, tbody td, tfoot td').forEach(c => c.classList.remove('col-collapsed'));
@@ -218,80 +263,90 @@ const TableStickyOverlay = {
       return;
     }
 
-    // 🟢 v144：列数 ≤ keepMin（≤2 列）无需折叠，隐藏按钮
-    if (colCount <= keepMin) {
-      if (btn) btn.style.display = 'none';
+    // —— 回退分支：无配置 / 匹配不到列 → 保留前 3(+复选框) 列（v227.49 行为，订货核对/出库/违约等保持“不改”）——
+    if (!useKeepIdx) {
+      const hasCheckCol = !!table.querySelector('thead th.col-checkbox');
+      const keepMin = Math.min(3 + (hasCheckCol ? 1 : 0), Math.max(1, colCount - 1));
+      if (colCount <= keepMin) { if (btn) btn.style.display = 'none'; return; }
+      if (!wrap._colCollapsed) {
+        table.style.tableLayout = 'fixed'; table.style.width = 'auto'; table.style.minWidth = '0';
+        if (btn) { btn.style.display = ''; btn.textContent = '收起 ▴'; btn.dataset.state = 'expanded'; }
+        return;
+      }
+      let hidden = 0;
+      if (!table.dataset.origTableLayout) table.dataset.origTableLayout = table.style.tableLayout || '';
+      if (!table.dataset.origThWidths) {
+        table.dataset.origThWidths = JSON.stringify(Array.from(ths).map(th => th.style.width || ''));
+      }
+      table.style.tableLayout = 'fixed';
+      for (let i = colCount - 1; i >= keepMin; i--) { this._hideColInTable(table, i, true); ths[i].style.width = ''; hidden++; }
+      const visThs = Array.from(table.querySelectorAll('thead th')).filter(th => !th.classList.contains('col-collapsed'));
+      if (visThs.length > 0) this._equalizeCols(table, visThs, wrap);
+      else { table.style.width = ''; table.style.minWidth = '0'; }
+      if (hidden === 0) { if (btn) btn.style.display = 'none'; }
+      else { if (btn) { btn.style.display = ''; btn.textContent = `展开剩余 ${hidden} 列 ▾`; btn.dataset.state = 'collapsed'; } }
       return;
     }
 
-    // —— 移动端：无论是否「超宽」，一律默认折叠到前 2 列（用户需求：收齐展示 2 列）——
+    // —— 按列头文字匹配保留（useKeepIdx）：只隐藏不在 keepIdx 的列，可见列等宽分配 ——
     if (!wrap._colCollapsed) {
-      // 展开态：还原所有列，恢复自然列宽，允许横向滑动看剩余列（每列正常宽度，不挤）
-      // 表格改为内容自适应宽度（width:auto + 各列自然/原始 inline 宽），由外层 .table-wrapper 的
-      // overflow-x:auto 提供横向滚动条；不再等分/压扁列宽。
+      // 展开态：还原所有列，恢复自然列宽，允许横向滑动看剩余列
       table.style.tableLayout = 'fixed';
       table.style.width = 'auto';
       table.style.minWidth = '0';
       if (btn) { btn.style.display = ''; btn.textContent = '收起 ▴'; btn.dataset.state = 'expanded'; }
       return;
     }
-
-    // 折叠态：隐藏第 3 列起到末尾，前 keepMin 列等分容器宽（展示 2 列、不挤）
     let hidden = 0;
     if (!table.dataset.origTableLayout) table.dataset.origTableLayout = table.style.tableLayout || '';
     if (!table.dataset.origThWidths) {
       table.dataset.origThWidths = JSON.stringify(Array.from(ths).map(th => th.style.width || ''));
     }
     table.style.tableLayout = 'fixed';
-    for (let i = colCount - 1; i >= keepMin; i--) {
-      this._hideColInTable(table, i, true);
-      ths[i].style.width = '';
-      hidden++;
+    const keepSet = new Set(keepIdx);
+    for (let i = colCount - 1; i >= 0; i--) {
+      if (!keepSet.has(i)) { this._hideColInTable(table, i, true); ths[i].style.width = ''; hidden++; }
     }
-    // 等分剩余可见列宽（统一以「小号」为准：列宽上限 160px，避免「两列放大」视觉与溢出）
-    const visThs = Array.from(table.querySelectorAll('thead th')).filter(th => !th.classList.contains('col-collapsed'));
-    const N = visThs.length;
-    if (N > 0) {
-      const wrapW = wrap.clientWidth || 360;
-      const MAX_COL = 160; // 🟢 v172：折叠后列宽上限（"统一以小号为准"）
-      // 容器够宽则均分；不够宽则每列固定 160，总表宽 = N*160，靠 .table-wrapper 横向滚动
-      const each = Math.min(MAX_COL, Math.floor((wrapW - 2) / N));
-      // 🟢 v172：标记父容器进入折叠模式（CSS 兜底用）
-      if (wrap.parentElement) wrap.parentElement.classList.add('col-collapse-mode');
-      visThs.forEach(th => {
-        th.style.width = each + 'px';
-        th.style.minWidth = each + 'px';
-        th.style.maxWidth = each + 'px';
-        th.style.overflow = 'hidden';
-        th.style.textOverflow = 'ellipsis';
-        th.style.whiteSpace = 'nowrap';
-      });
-      // 🟢 v172：所有可见行 td 都设 ellipsis + nowrap + overflow（不再仅首行；防止长文本溢出到右列）
-      table.querySelectorAll('tbody tr').forEach(tr => {
-        Array.from(tr.children).forEach(td => {
-          if (!td.classList.contains('col-collapsed')) {
-            td.style.width = each + 'px';
-            td.style.maxWidth = each + 'px';
-            td.style.minWidth = each + 'px';
-            td.style.overflow = 'hidden';
-            td.style.textOverflow = 'ellipsis';
-            td.style.whiteSpace = 'nowrap';
-          }
-        });
-      });
-      // 表格总宽 = N * each；可能略 > wrap.clientWidth，触发 .table-wrapper 的 overflow-x:auto 横向滚动
-      table.style.width = (each * N) + 'px';
-      table.style.minWidth = (each * N) + 'px';
-    } else {
-      table.style.width = '';
-      table.style.minWidth = '0';
-    }
+    const visThs = keepIdx.map(i => ths[i]).filter(Boolean);
+    if (visThs.length > 0) this._equalizeCols(table, visThs, wrap);
+    else { table.style.width = ''; table.style.minWidth = '0'; }
 
     if (hidden === 0) {
       if (btn) btn.style.display = 'none';
     } else {
       if (btn) { btn.style.display = ''; btn.textContent = `展开剩余 ${hidden} 列 ▾`; btn.dataset.state = 'collapsed'; }
     }
+  },
+
+  // 🟢 v227.50：把可见列等宽分配（列宽上限 160px，统一以“小号”为准，避免两列放大/溢出）
+  _equalizeCols(table, visThs, wrap) {
+    const N = visThs.length;
+    const wrapW = wrap.clientWidth || 360;
+    const MAX_COL = 160;
+    const each = Math.min(MAX_COL, Math.floor((wrapW - 2) / N));
+    if (wrap.parentElement) wrap.parentElement.classList.add('col-collapse-mode');
+    visThs.forEach(th => {
+      th.style.width = each + 'px';
+      th.style.minWidth = each + 'px';
+      th.style.maxWidth = each + 'px';
+      th.style.overflow = 'hidden';
+      th.style.textOverflow = 'ellipsis';
+      th.style.whiteSpace = 'nowrap';
+    });
+    table.querySelectorAll('tbody tr').forEach(tr => {
+      Array.from(tr.children).forEach(td => {
+        if (!td.classList.contains('col-collapsed')) {
+          td.style.width = each + 'px';
+          td.style.maxWidth = each + 'px';
+          td.style.minWidth = each + 'px';
+          td.style.overflow = 'hidden';
+          td.style.textOverflow = 'ellipsis';
+          td.style.whiteSpace = 'nowrap';
+        }
+      });
+    });
+    table.style.width = (each * N) + 'px';
+    table.style.minWidth = (each * N) + 'px';
   },
 
   _hideColInTable(tableEl, idx, hide) {
@@ -567,9 +622,15 @@ const TableUtils = {
       const field = colFields[colIdx];
       if (!field) return;
       const a = TablePrefs.getAlign(tableKey, field) || 'center';
+      // 🟢 v227.77：重放对齐偏好时同步设 td 内 input/textarea/select 的 textAlign，
+      //   否则录入型明细表重渲染后「已记忆对齐」对 input 文本不可见。
       table.querySelectorAll('tbody tr').forEach(tr => {
         const td = tr.children[colIdx];
-        if (td) td.style.textAlign = a;
+        if (!td) return;
+        td.style.textAlign = a;
+        td.querySelectorAll('input, textarea, select').forEach(el => {
+          el.style.textAlign = a;
+        });
       });
     });
   },
@@ -592,6 +653,12 @@ const TableUtils = {
   _bindHeaderInteractions(th, colIdx, ctx) {
     const { ths, table, tableKey, colFields, columnFilters, sortState, opts } = ctx;
     if (th.getAttribute('data-nofilter') === '1') {
+      th.style.cursor = '';
+      return;
+    }
+    // 🟢 v227：表头内若含交互控件（如盘点记录列表多选删除的「全选」checkbox），
+    //   保留原控件、不挂筛选/排序图标——否则重写 th.innerHTML 会把 input 冲掉（#stRecAll 消失）。
+    if (th.querySelector('input, button, select')) {
       th.style.cursor = '';
       return;
     }
@@ -619,9 +686,16 @@ const TableUtils = {
         tableKey,
         colField: colFields[colIdx],
         applyAlign: (align) => {
+          // 🟢 v227.77：明细表 / 含 input 的表格，点击对齐时除设 td.textAlign 外，
+          //   还需同步设 td 内 input 的 textAlign——否则 input 文本对齐不动，
+          //   用户感觉「点了没反应」。
           table.querySelectorAll('tbody tr').forEach(tr => {
             const td = tr.children[colIdx];
-            if (td) td.style.textAlign = align;
+            if (!td) return;
+            td.style.textAlign = align;
+            td.querySelectorAll('input, textarea, select').forEach(el => {
+              el.style.textAlign = align;
+            });
           });
         }
       });
@@ -1547,6 +1621,15 @@ const TableUtils = {
     return new Intl.NumberFormat('zh-CN', { minimumFractionDigits: fractionDigits, maximumFractionDigits: fractionDigits }).format(n);
   },
 
+  // 🟢 AUDIT-003：金额求和（以「分」为整数单位累加，规避 0.1+0.2 类浮点漂移）。
+  //   fieldOrFn：字段名字符串，或 (row)=>数值 的取数函数；返回普通 Number（展示前再交给 formatMoney）。
+  //   用途：违约扣款总额、对账金额汇总等关键财务聚合，避免浮点求和尾巴（如 0.30000000000000004）。
+  sumMoney(rows, fieldOrFn) {
+    if (!Array.isArray(rows)) return 0;
+    const get = typeof fieldOrFn === 'function' ? fieldOrFn : (r) => r && r[fieldOrFn];
+    return rows.reduce((s, r) => s + Math.round((parseFloat(get(r)) || 0) * 100), 0) / 100;
+  },
+
   // 数量格式化（M3 统一入口：最多 4 位小数、去尾随 0、千分位、空值返回 ''；不再 Math.round 丢精度）
   formatNum(num, maxFractionDigits = 4) {
     if (num == null || num === '') return '';
@@ -1590,11 +1673,11 @@ const TableUtils = {
     el.innerHTML = `
       <span style="font-size:12px;color:var(--text-secondary);">共 <b>${total}</b> 条</span>
       <span class="page-btns">
-        <button onclick="${module}.goPage(${secArg}1)" ${p === 1 ? 'disabled' : ''}>«</button>
-        <button onclick="${module}.goPage(${secArg}${p - 1})" ${p === 1 ? 'disabled' : ''}>‹</button>
+        <button class="wb-pager-btn wb-first" onclick="${module}.goPage(${secArg}1)" ${p === 1 ? 'disabled' : ''} aria-label="首页" title="首页"></button>
+        <button class="wb-pager-btn wb-prev" onclick="${module}.goPage(${secArg}${p - 1})" ${p === 1 ? 'disabled' : ''} aria-label="上一页" title="上一页"></button>
         ${nums.map(i => `<button class="${i === p ? 'active' : ''}" onclick="${module}.goPage(${secArg}${i})">${i}</button>`).join('')}
-        <button onclick="${module}.goPage(${secArg}${p + 1})" ${p === tp ? 'disabled' : ''}>›</button>
-        <button onclick="${module}.goPage(${secArg}${tp})" ${p === tp ? 'disabled' : ''}>»</button>
+        <button class="wb-pager-btn wb-next" onclick="${module}.goPage(${secArg}${p + 1})" ${p === tp ? 'disabled' : ''} aria-label="下一页" title="下一页"></button>
+        <button class="wb-pager-btn wb-last" onclick="${module}.goPage(${secArg}${tp})" ${p === tp ? 'disabled' : ''} aria-label="尾页" title="尾页"></button>
       </span>
       <span style="font-size:12px;color:var(--text-secondary);">
         每页 <select onchange="${module}.changePageSize(${secArg}this.value === 'all' ? 'all' : parseInt(this.value, 10))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">

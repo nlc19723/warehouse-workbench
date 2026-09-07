@@ -42,18 +42,20 @@ const OrdersModule = {
 
     content.innerHTML = `
       <div class="filter-bar" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;padding:0;align-items:flex-start;">
-        <div class="filter-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
+        <div class="filter-row filter-row-main" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
           <input type="text" id="orderKw" class="filter-search-short" placeholder="搜索订单编号、供应商、存货名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')OrdersModule.applyFilter()">
-          <input type="text" id="orderStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="OrdersModule.onDateChange()" readonly>
-          <span class="filter-sep">至</span>
-          <input type="text" id="orderEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="OrdersModule.onDateChange()" readonly>
+          <div class="filter-row-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:4px;">
+            <input type="text" id="orderStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="OrdersModule.onDateChange()" readonly>
+            <span class="filter-sep">至</span>
+            <input type="text" id="orderEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="OrdersModule.onDateChange()" readonly>
+          </div>
           <div class="filter-row-buttons" style="display:flex;gap:6px;">
-            <button class="search-glass" onclick="OrdersModule.applyFilter()">筛选</button>
-            <button class="secondary" onclick="OrdersModule.resetFilter()">重置</button>
-            <button class="secondary" onclick="OrdersModule.exportData()">📥 导出</button>
+            <button class="btn--primary" onclick="OrdersModule.applyFilter()">筛选</button>
+            <button class="btn--ghost" onclick="OrdersModule.resetFilter()">重置</button>
+            <button class="btn--ghost" onclick="OrdersModule.exportData()">📥 导出</button>
           </div>
         </div>
-        <div class="filter-row" style="display:flex;gap:10px;margin:0;padding:0;">
+        <div class="filter-row filter-row-selects fb-row--fields" style="display:flex;gap:10px;margin:0;padding:0;">
           <select id="orderSupplier" title="按供应商筛选" style="max-width:200px;">
             <option value="">全部供应商</option>
             ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
@@ -114,7 +116,7 @@ const OrdersModule = {
     const uninbound = filteredOrders.filter(o => parseFloat(o.未入库量) > 0);
     const uninboundUnique = new Set(uninbound.map(o => o.订单编号).filter(Boolean)).size;
 
-    const totalAmount = filteredOrders.reduce((s, o) => s + (parseFloat(o.原币价税合计) || 0), 0);
+    const totalAmount = TableUtils.sumMoney(filteredOrders, '原币价税合计'); // 🟢 AUDIT-003 整数分聚合
 
     if (rt !== undefined && rt !== App._goToken) return;
     document.getElementById('orderSummary').innerHTML = `
@@ -277,7 +279,7 @@ const OrdersModule = {
         return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
       });
       const uniqueNos = new Set(matched.map(o => o.订单编号).filter(Boolean));
-      const amount = matched.reduce((s, o) => s + (parseFloat(o.原币价税合计) || 0), 0);
+      const amount = TableUtils.sumMoney(matched, '原币价税合计'); // 🟢 AUDIT-003 整数分聚合
       return { count: uniqueNos.size, amount };
     });
 

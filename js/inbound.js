@@ -50,9 +50,9 @@ const InboundModule = {
             <input type="text" id="inboundEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="InboundModule.onDateChange()" readonly>
           </div>
           <div class="filter-row-buttons" style="display:flex;gap:6px;">
-            <button class="search-glass" onclick="InboundModule.applyFilter()">筛选</button>
-            <button class="secondary" onclick="InboundModule.resetFilter()">重置</button>
-            <button class="secondary" onclick="InboundModule.exportData()">📥 导出</button>
+            <button class="btn--primary" onclick="InboundModule.applyFilter()">筛选</button>
+            <button class="btn--ghost" onclick="InboundModule.resetFilter()">重置</button>
+            <button class="btn--ghost" onclick="InboundModule.exportData()">📥 导出</button>
           </div>
         </div>
         <div class="filter-row filter-row-selects" style="display:flex;gap:10px;margin:0;padding:0;">
@@ -110,7 +110,7 @@ const InboundModule = {
 
     const uniqueInboundNos = new Set(filteredInbound.map(i => i.入库单号).filter(Boolean));
     const uniqueCount = uniqueInboundNos.size;
-    const totalAmount = filteredInbound.reduce((s, i) => s + (parseFloat(i.原币价税合计) || 0), 0);
+    const totalAmount = TableUtils.sumMoney(filteredInbound, '原币价税合计'); // 🟢 AUDIT-003 整数分聚合
     const totalQty = filteredInbound.reduce((s, i) => s + (parseFloat(i.数量) || 0), 0);
     const supplierCount = [...new Set(allInbound.map(i => i.供应商).filter(Boolean))].length;
     const projectCount = [...new Set(allInbound.map(i => i.项目名称).filter(Boolean))].length;
@@ -267,7 +267,7 @@ const InboundModule = {
         return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
       });
       const uniqueNos = new Set(matched.map(i => i.入库单号).filter(Boolean));
-      const amount = matched.reduce((s, i) => s + (parseFloat(i.原币价税合计) || 0), 0);
+      const amount = TableUtils.sumMoney(matched, '原币价税合计'); // 🟢 AUDIT-003 整数分聚合
       return { count: uniqueNos.size, amount };
     });
 

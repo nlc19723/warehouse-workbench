@@ -17,20 +17,19 @@ const OutboundModule = {
     const myToken = token;
     const content = document.getElementById('contentArea');
     const today = new Date().toISOString().split('T')[0];
-    const projects = await DataStore.getOutboundProjects();
-    if (myToken !== undefined && myToken !== App._goToken) return;
 
+    // 🟢 v227.25：先渲染骨架 DOM，把 projects/下一单号这类"取数重活"挪到 rIC（不阻塞首屏绘制）。
     content.innerHTML = `
       <!-- 操作栏 -->
       <div class="filter-bar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:0;">
         <input type="text" id="obSearchNo" placeholder="搜索出库单号..." value=""
           onkeydown="if(event.key==='Enter')OutboundModule.searchOrder()">
-        <button class="search-glass" onclick="OutboundModule.searchOrder()">🔍 搜索</button>
-        <button class="secondary" onclick="OutboundModule.resetForm()">重置</button>
-        <button class="primary" onclick="OutboundModule.saveOrder()">💾 录入</button>
-        <button class="secondary" onclick="OutboundModule.activateEdit()">✏️ 修改</button>
-        <button class="secondary" style="color:var(--status-danger);border-color:var(--status-danger);" onclick="OutboundModule.deleteOrder()">🗑️ 删除</button>
-        <button class="secondary" onclick="OutboundModule.printOrder()">🖨️ 打印</button>
+        <button class="btn--primary" onclick="OutboundModule.searchOrder()">🔍 搜索</button>
+        <button class="btn--ghost" onclick="OutboundModule.resetForm()">重置</button>
+        <button class="btn--primary" onclick="OutboundModule.saveOrder()">💾 录入</button>
+        <button class="btn--ghost" onclick="OutboundModule.activateEdit()">✏️ 修改</button>
+        <button class="btn--danger" onclick="OutboundModule.deleteOrder()">🗑️ 删除</button>
+        <button class="btn--ghost" onclick="OutboundModule.printOrder()">🖨️ 打印</button>
       </div>
 
       <!-- 表头信息区 -->
@@ -39,27 +38,25 @@ const OutboundModule = {
           <span class="glass-card-title"><span class="title-icon">📤</span>出库单信息</span>
         </div>
         <div class="ob-header-grid" style="display:grid;grid-template-columns:auto auto auto auto;gap:12px 24px;padding:16px;">
-          <div class="ob-field">
-            <label style="font-size:12.5px;font-weight:600;color:var(--text-muted);white-space:nowrap;">出库单号</label>
+          <div class="ob-field ob-field-row">
+            <label class="ob-field-label" style="font-size:14px;font-weight:700;color:var(--text-main);white-space:nowrap;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">出库单号</label>
             <div class="ob-orderno-row">
-              <button id="obPrevBtn" onclick="OutboundModule.navigateOrder(-1)" title="上一单"
-                style="width:40px;height:44px;border:1px solid var(--card-border);border-radius:8px;background:linear-gradient(180deg,var(--card-bg),rgba(0,0,0,0.04));box-shadow:0 2px 4px rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,0.6);color:var(--text-main);font-size:16px;cursor:pointer;transition:all 0.15s;">◀</button>
-              <input type="text" id="obOrderNo" placeholder="自动生成或手动输入" style="width:100%;height:44px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:16px;background:var(--card-bg);color:var(--text-main);">
-              <button id="obNextBtn" onclick="OutboundModule.navigateOrder(1)" title="下一单"
-                style="width:40px;height:44px;border:1px solid var(--card-border);border-radius:8px;background:linear-gradient(180deg,var(--card-bg),rgba(0,0,0,0.04));box-shadow:0 2px 4px rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,0.6);color:var(--text-main);font-size:16px;cursor:pointer;transition:all 0.15s;">▶</button>
+              <button id="obPrevBtn" class="ob-orderno-btn wb-pager-btn wb-prev" onclick="OutboundModule.navigateOrder(-1)" title="减小单号" aria-label="减小单号"></button>
+              <input type="text" id="obOrderNo" placeholder="自动生成或手动输入">
+              <button id="obNextBtn" class="ob-orderno-btn wb-pager-btn wb-next" onclick="OutboundModule.navigateOrder(1)" title="增大单号" aria-label="增大单号"></button>
             </div>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <label style="font-size:12.5px;font-weight:600;color:var(--text-muted);white-space:nowrap;">出库时间</label>
-            <input type="text" id="obDate" value="${escAttr(today)}" readonly class="dp-input" style="width:130px;height:34px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:13px;background:var(--card-bg);color:var(--text-main);">
+          <div class="ob-field ob-field-row">
+            <label class="ob-field-label" style="font-size:14px;font-weight:700;color:var(--text-main);white-space:nowrap;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">出库时间</label>
+            <input type="text" id="obDate" value="${escAttr(today)}" readonly class="dp-input">
           </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <label style="font-size:12.5px;font-weight:600;color:var(--text-muted);white-space:nowrap;">项目名称</label>
-            <input type="text" id="obProject" placeholder="输入或选择项目名称" style="width:280px;height:34px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:13px;background:var(--card-bg);color:var(--text-main);" autocomplete="off">
+          <div class="ob-field ob-field-row">
+            <label class="ob-field-label" style="font-size:14px;font-weight:700;color:var(--text-main);white-space:nowrap;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">项目名称</label>
+            <input type="text" id="obProject" placeholder="输入或选择项目名称" style="width:280px" autocomplete="off">
           </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <label style="font-size:12.5px;font-weight:600;color:var(--text-muted);white-space:nowrap;">领用人员</label>
-            <input type="text" id="obReceiver" placeholder="输入领用人员" style="width:130px;height:34px;border:1px solid var(--card-border);border-radius:8px;padding:0 10px;font-size:13px;background:var(--card-bg);color:var(--text-main);">
+          <div class="ob-field ob-field-row">
+            <label class="ob-field-label" style="font-size:14px;font-weight:700;color:var(--text-main);white-space:nowrap;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">领用人员</label>
+            <input type="text" id="obReceiver" placeholder="输入领用人员" style="width:160px">
           </div>
         </div>
       </div>
@@ -76,22 +73,30 @@ const OutboundModule = {
       <div id="obStatusMsg" style="font-size:12px;color:var(--text-muted);text-align:center;"></div>
     `;
 
-    // 自动生成单号（如果为空）
-    if (!document.getElementById('obOrderNo').value) {
-      const nextNo = await this.generateNextOrderNo();
-      if (myToken !== undefined && myToken !== App._goToken) return; // 🔴 竞态：等待期间切走则丢弃过期渲染
-      const obNoEl = document.getElementById('obOrderNo');
-      if (obNoEl) obNoEl.value = nextNo;
-    }
-
-    // 渲染默认空白行
+    // 渲染默认空白行（先有骨架）
     this.renderDetailRows();
-
     // 挂载出库时间自定义日期选择器（替换原生 type=date）
     if (typeof DatePicker !== 'undefined') DatePicker.mount('obDate');
 
-    // 绑定项目名称联想（来源：入库列表去重后的项目名称）
-    setTimeout(() => this.bindProjectAutocomplete(), 100);
+    // 🟢 v227.25：projects 取数、生成单号、绑定联想全部延后到浏览器空闲帧（消除「点出库→卡片闪一下」卡顿）。
+    const ric = window.requestIdleCallback || function(cb){ return setTimeout(cb, 16); };
+    ric(() => {
+      // 期间用户可能已切走 —— 守卫
+      if (myToken !== undefined && myToken !== App._goToken) return;
+      (async () => {
+        try {
+          if (!document.getElementById('obOrderNo').value) {
+            const nextNo = await this.generateNextOrderNo();
+            if (myToken !== undefined && myToken !== App._goToken) return;
+            const obNoEl = document.getElementById('obOrderNo');
+            if (obNoEl) obNoEl.value = nextNo;
+          }
+          this.bindProjectAutocomplete();
+        } catch (e) {
+          console.warn('[outbound] 后台取数失败(已忽略):', e && e.message);
+        }
+      })();
+    });
   },
 
   // 🟡 修复：离开出库模块时清理 document 级 click 监听，避免监听器泄漏
@@ -635,9 +640,11 @@ const OutboundModule = {
 
   // 搜索/加载已有出库单
   // 获取所有已存在的出库单号列表（按单号字符串升序）
+  // 🟢 AUDIT-005：仅取「出库单号」字段，改用游标 each 遍历，避免把整行（含明细）全量载入内存
   async getAllOrderNos() {
-    const all = await db.outbound.toArray();
-    const set = new Set(all.map(r => r.出库单号).filter(Boolean));
+    // 🟢 v227.77：临时出库独立 store —— OutboundModule（侧边栏「临时出库」）只看 db.tempOutbound
+    const set = new Set();
+    await db.tempOutbound.each(r => { if (r && r.出库单号) set.add(r.出库单号); });
     return [...set].sort();
   },
 
@@ -666,7 +673,7 @@ const OutboundModule = {
     return prefix + String(nextSeq).padStart(3, '0');
   },
 
-  // 翻阅前后出库单（dir: -1=上一单, 1=下一单）
+  // 翻阅前后出库单（dir: -1=减小单号，1=增大单号）
   async navigateOrder(dir) {
     const allNos = await this.getAllOrderNos();
     if (allNos.length === 0) {
@@ -676,16 +683,26 @@ const OutboundModule = {
     const current = document.getElementById('obOrderNo').value.trim();
     let idx = allNos.indexOf(current);
     if (idx === -1) {
-      // 当前单号不在列表中（可能是新建的或手动改的），从最近的一单开始
+      // 当前单号不在列表中（可能是新建的或手动改的），按方向取最近边界
       idx = dir > 0 ? -1 : 0;
     }
     const newIdx = idx + dir;
-    if (newIdx < 0) { this.showMsg('已经是第一单了', true); return; }
-    if (newIdx >= allNos.length) { this.showMsg('已经是最后一单了', true); return; }
+    // 🟢 v227.24：到边禁用，停止翻阅（同时禁用按钮）
+    if (newIdx < 0)  { this._setObOrderNoBtnsDisabled(0, allNos.length - 1); this.showMsg('已经是第一单了', true); return; }
+    if (newIdx >= allNos.length) { this._setObOrderNoBtnsDisabled(0, allNos.length - 1); this.showMsg('已经是最后一单了', true); return; }
 
     const targetNo = allNos[newIdx];
     document.getElementById('obSearchNo').value = targetNo;
     await this.searchOrder();
+    this._setObOrderNoBtnsDisabled(newIdx, allNos.length);
+  },
+
+  /** 🟢 v227.24：根据当前 idx/总数更新出库单号翻号键 disabled */
+  _setObOrderNoBtnsDisabled(idx, total) {
+    const prev = document.getElementById('obPrevBtn');
+    const next = document.getElementById('obNextBtn');
+    if (prev) prev.disabled = idx <= 0;
+    if (next) next.disabled = idx >= total - 1;
   },
 
   async searchOrder() {
@@ -695,7 +712,8 @@ const OutboundModule = {
     const orderNo = el.value.trim();
     if (!orderNo) { this.showMsg('请输入出库单号进行搜索', true); return; }
 
-    const records = await db.outbound.where('出库单号').equals(orderNo).toArray();
+    // 🟢 v227.77：临时出库独立表
+    const records = await db.tempOutbound.where('出库单号').equals(orderNo).toArray();
     if (records.length === 0) {
       this.showMsg(`未找到出库单号 "${orderNo}" 的记录`, true);
       return;
@@ -778,8 +796,8 @@ const OutboundModule = {
       }
     }
 
-    // 重复单号校验：如果不是修改模式 或 单号变了，则禁止保存已存在的单号
-    const exists = await db.outbound.where('出库单号').equals(orderNo).count();
+    // 重复单号校验（v227.77：临时出库独立表，与中心库房出库单列表互不影响）
+    const exists = await db.tempOutbound.where('出库单号').equals(orderNo).count();
     const isSameAsEditing = this.editingMode && this.currentOrderNo === orderNo;
     if (exists > 0 && !isSameAsEditing) {
       this.showMsg(`❌ 出库单号 "${orderNo}" 已存在！如需修改请先点击"✏️ 修改"按钮再录入`, true);
@@ -806,10 +824,12 @@ const OutboundModule = {
         出库数量: d.qty
       }));
 
-      await DataStore.write('outbound', () => db.transaction('rw', db.outbound, async () => {
-        if (delOld) await db.outbound.where('出库单号').equals(delOld).delete();
-        await db.outbound.where('出库单号').equals(orderNo).delete();
-        await db.outbound.bulkAdd(newRecords);
+      // 🟢 v227.77：写入临时出库独立表 db.tempOutbound（与中心库房出库单列表的 db.outbound 物理隔离）
+      //   左/右键翻页 + 录入 + 修改 + 删除 全部走此表；不触碰老 db.outbound。
+      await DataStore.write('tempOutbound', () => db.transaction('rw', db.tempOutbound, async () => {
+        if (delOld) await db.tempOutbound.where('出库单号').equals(delOld).delete();
+        await db.tempOutbound.where('出库单号').equals(orderNo).delete();
+        await db.tempOutbound.bulkAdd(newRecords);
       }));
 
       this.currentOrderNo = orderNo;
@@ -821,8 +841,8 @@ const OutboundModule = {
       document.getElementById('obProject').value = '';
       document.getElementById('obReceiver').value = '';
       this.renderDetailRows();
-      this.showMsg(`✅ 出库单 "${orderNo}" 已保存（${details.length} 条明细），新单号：${nextNo}`);
-      this._syncOutboundToCloud();   // ← 增量同步 outbound 表到云端
+      this.showMsg(`✅ 临时出库单 "${orderNo}" 已保存（${details.length} 条明细），新单号：${nextNo}`);
+      this._syncTemporaryOutboundToCloud();   // 🟢 v227.77：仅同步到临时出库云端数据包（不影响中心库房出库单列表）
     } catch (err) {
       console.error('保存出库单失败:', err);
       this.showMsg('❌ 保存失败: ' + err.message, true);
@@ -842,7 +862,7 @@ const OutboundModule = {
     this.showMsg(`已激活编辑模式，修改后点击「录入」保存`);
   },
 
-  // 删除当前出库单（带成功/失败提示）
+  // 🟢 v227.77：临时出库独立表 —— OutboundModule 删除走 db.tempOutbound（不影响中心库房出库单列表）
   async deleteOrder() {
     if (this._busy) { this.showMsg('⏳ 正在删除，请稍候…', true); return; }
     this._busy = true;
@@ -852,25 +872,25 @@ const OutboundModule = {
         // 尝试从表头取
         const headerNo = document.getElementById('obOrderNo').value.trim();
         if (!headerNo) { this.showMsg('❌ 请先指定要删除的出库单号', true); return; }
-        const cnt = await db.outbound.where('出库单号').equals(headerNo).count();
+        const cnt = await db.tempOutbound.where('出库单号').equals(headerNo).count();
         if (cnt === 0) { this.showMsg(`❌ 出库单号 "${headerNo}" 不存在`, true); return; }
-        if (!await WBModal.confirm(`确定要删除出库单 "${headerNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
-        // 🟢 v207 AUDIT-101：写后失效缓存（旧代码删除后列表仍显示已删单）
-        await DataStore.write('outbound', () => db.outbound.where('出库单号').equals(headerNo).delete());
-        this.showMsg(`✅ 已删除出库单 "${headerNo}"（${cnt} 条明细）`);
-        this._syncOutboundToCloud();   // ← 增量同步 outbound 表
+        if (!await WBModal.confirm(`确定要删除临时出库单 "${headerNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
+        // 🟢 v207 AUDIT-101：写后失效缓存
+        await DataStore.write('tempOutbound', () => db.tempOutbound.where('出库单号').equals(headerNo).delete());
+        this.showMsg(`✅ 已删除临时出库单 "${headerNo}"（${cnt} 条明细）`);
+        this._syncTemporaryOutboundToCloud();
         await this.resetForm();
         return;
       }
 
-      const cnt = await db.outbound.where('出库单号').equals(orderNo).count();
+      const cnt = await db.tempOutbound.where('出库单号').equals(orderNo).count();
       if (cnt === 0) { this.showMsg(`❌ 出库单号 "${orderNo}" 不存在`, true); return; }
-      if (!await WBModal.confirm(`确定要删除出库单 "${orderNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
+      if (!await WBModal.confirm(`确定要删除临时出库单 "${orderNo}" 及其全部 ${cnt} 条明细吗？此操作不可恢复！`, { title: '⚠ 危险操作' })) return;
 
       // 🟢 v207 AUDIT-101：写后失效缓存
-      await DataStore.write('outbound', () => db.outbound.where('出库单号').equals(orderNo).delete());
-      this.showMsg(`✅ 已删除出库单 "${orderNo}"（${cnt} 条明细）`);
-      this._syncOutboundToCloud();   // ← 增量同步 outbound 表
+      await DataStore.write('tempOutbound', () => db.tempOutbound.where('出库单号').equals(orderNo).delete());
+      this.showMsg(`✅ 已删除临时出库单 "${orderNo}"（${cnt} 条明细）`);
+      this._syncTemporaryOutboundToCloud();
       await this.resetForm();
     } catch (err) {
       console.error('删除失败:', err);
@@ -880,14 +900,20 @@ const OutboundModule = {
     }
   },
 
-  // 异步增量同步 outbound 到云端（不阻塞 UI，失败仅在 console 提示）
-  // v164+：双通道——① 工作 bundle 增量（保留分享链接兼容）② 设置数据 outbound_list（跨设备长期记忆）
-  _syncOutboundToCloud() {
-    if (typeof DataLoader !== 'undefined' && DataLoader.pushOutboundToCloud) {
-      DataLoader.pushOutboundToCloud().catch(err => console.warn('[出库] 增量同步失败:', err.message || err));
+  // 🟢 v227.77：异步增量同步「临时出库」到独立云端 bundle + 独立 setting key
+  //   老 _syncOutboundToCloud 走的是 db.outbound（中心库房出库单列表），已废弃。
+  _syncTemporaryOutboundToCloud() {
+    if (typeof DataLoader !== 'undefined' && DataLoader.pushTempOutboundToCloud) {
+      DataLoader.pushTempOutboundToCloud().catch(err => {
+        console.warn('[临时出库] 增量同步失败:', err && err.message ? err.message : err);
+        if (typeof Toast !== 'undefined') Toast.warn('临时出库已保存，但云端同步失败，下次改动将自动重试');
+      });
     }
-    if (typeof DataStore !== 'undefined' && DataStore.syncOutboundToSettings) {
-      DataStore.syncOutboundToSettings().catch(err => console.warn('[出库] 设置同步失败:', err.message || err));
+    if (typeof DataStore !== 'undefined' && DataStore.syncTemporaryOutboundToSettings) {
+      DataStore.syncTemporaryOutboundToSettings().catch(err => {
+        console.warn('[临时出库] 设置同步失败:', err && err.message ? err.message : err);
+        if (typeof Toast !== 'undefined') Toast.warn('临时出库已保存，但跨设备设置同步失败');
+      });
     }
   },
 
@@ -925,13 +951,13 @@ const OutboundModule = {
           打印时间：${new Date().toLocaleString('zh-CN')}
         </p>
         <table style="width:100%;border-collapse:collapse;margin-bottom:16px;font-size:13px;">
-          <tr><td style="padding:6px 10px;border:1px solid #ddd;width:25%;background:#f9f9f9;font-weight:600;">出库单号</td><td style="padding:6px 10px;border:1px solid #ddd;">${esc(printNo)}</td>
-              <td style="padding:6px 10px;border:1px solid #ddd;width:25%;background:#f9f9f9;font-weight:600;">出库时间</td><td style="padding:6px 10px;border:1px solid #ddd;">${esc(printDate)}</td></tr>
-          <tr><td style="padding:6px 10px;border:1px solid #ddd;background:#f9f9f9;font-weight:600;">项目名称</td><td style="padding:6px 10px;border:1px solid #ddd;">${esc(printProject)}</td>
-              <td style="padding:6px 10px;border:1px solid #ddd;background:#f9f9f9;font-weight:600;">领用人员</td><td style="padding:6px 10px;border:1px solid #ddd;">${esc(printReceiver)}</td></tr>
+          <tr><td class="op-print-cell op-print-label" style="width:25%;">出库单号</td><td class="op-print-cell">${esc(printNo)}</td>
+              <td class="op-print-cell op-print-label" style="width:25%;">出库时间</td><td class="op-print-cell">${esc(printDate)}</td></tr>
+          <tr><td class="op-print-cell op-print-label">项目名称</td><td class="op-print-cell">${esc(printProject)}</td>
+              <td class="op-print-cell op-print-label">领用人员</td><td class="op-print-cell">${esc(printReceiver)}</td></tr>
         </table>
         <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
-          <thead><tr style="background:#f0f0f0;">
+          <thead><tr class="op-print-thead">
             <th style="padding:8px;border:1px solid #ccc;width:40px;text-align:center;">序号</th>
             <th style="padding:8px;border:1px solid #ccc;width:120px;">存货编码</th>
             <th style="padding:8px;border:1px solid #ccc;">存货名称</th>
@@ -939,7 +965,7 @@ const OutboundModule = {
             <th style="padding:8px;border:1px solid #ccc;width:80px;text-align:right;">出库数量</th>
           </tr></thead>
           <tbody>${rowsHtml}</tbody>
-          <tfoot><tr style="background:#f9f9f9;font-weight:700;">
+          <tfoot><tr class="op-print-tfoot">
             <td colspan="4" style="padding:8px;border:1px solid #ccc;text-align:right;">合计</td>
             <td style="padding:8px;border:1px solid #ccc;text-align:right;">${totalQty}</td>
           </tr></tfoot>
@@ -1031,19 +1057,26 @@ const OutboundListModule = {
     if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
 
     content.innerHTML = `
-      <div class="filter-bar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:0;">
-        <input type="text" id="oblKw" placeholder="搜索单号/编码/名称/领用人..." value="${escAttr(this.currentFilter.keyword || '')}"
+      <div class="filter-bar filter-bar-m" data-mod="obl">
+        <input type="text" id="oblKw" class="fb-search" placeholder="搜索单号/编码/名称/项目..." value="${escAttr(this.currentFilter.keyword || '')}"
           onkeydown="if(event.key==='Enter')OutboundListModule.applyFilter()">
-        <input type="text" id="oblStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="起始日期" readonly>
-        <span class="filter-sep">至</span>
-        <input type="text" id="oblEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" readonly>
-        <select id="oblProject" title="按项目筛选">
+        <div class="fb-row fb-row--date">
+          <div class="fb-field"><input type="text" id="oblStartDate" value="${escAttr(this.currentFilter.startDate || '')}" class="filter-date dp-input" placeholder="起始日期" readonly></div>
+          <span class="fb-sep">至</span>
+          <div class="fb-field"><input type="text" id="oblEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" readonly></div>
+        </div>
+        <div class="fb-row fb-row--fields">
+          <div class="fb-field"><select id="oblProject" class="filter-row-selects-select" title="按项目筛选">
           <option value="">全部项目</option>
           ${projects.map(p => `<option value="${escAttr(p)}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
-        </select>
-        <button class="search-glass" onclick="OutboundListModule.applyFilter()">筛选</button>
-        <button class="secondary" onclick="OutboundListModule.resetFilter()">重置</button>
-        <button class="secondary" onclick="OutboundListModule.exportData()">📥 导出Excel</button>
+        </select></div>
+        </div>
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="OutboundListModule.applyFilter()">筛选</button>
+          <button class="btn--ghost" onclick="OutboundListModule.resetFilter()">重置</button>
+          <button class="btn--ghost" onclick="OutboundListModule.importData()">⬆ 导入</button>
+          <button class="btn--ghost" onclick="OutboundListModule.exportData()">📥 导出Excel</button>
+        </div>
       </div>
 
       <div id="oblSummary"></div>
@@ -1060,6 +1093,9 @@ const OutboundListModule = {
       DatePicker.mount('oblStartDate');
       DatePicker.mount('oblEndDate');
     }
+
+    // 🟢 v227.74：移动端筛选栏字段行配平（≤768px 按最长选项动态分配 flex-grow）
+    if (window.FilterLayout) FilterLayout.balanceAll();
 
     await this.loadData(myToken);
   },
@@ -1112,8 +1148,7 @@ const OutboundListModule = {
           <colgroup>
             <col style="width:48px;">       <!-- 序号 -->
             <col style="width:130px;">      <!-- 出库单号 -->
-            <col style="width:240px;">      <!-- 项目名称（最长） -->
-            <col style="width:90px;">       <!-- 领用人员 -->
+            <col style="width:260px;">      <!-- 项目名称（最长，删除领用人列后加宽） -->
             <col style="width:108px;">      <!-- 出库时间 -->
             <col style="width:118px;">      <!-- 存货编码 -->
             <col style="width:118px;">      <!-- 存货名称 = 1 × 存货编码（缩短一半） -->
@@ -1125,7 +1160,6 @@ const OutboundListModule = {
               <th class="ob-th-center">序号</th>
               <th class="ob-th-center">出库单号</th>
               <th class="ob-th-center">项目名称</th>
-              <th class="ob-th-center">领用人员</th>
               <th class="ob-th-center">出库时间</th>
               <th class="ob-th-center">存货编码</th>
               <th class="ob-th-center">存货名称</th>
@@ -1139,7 +1173,6 @@ const OutboundListModule = {
                 <td class="ob-td-center">${(this.currentPage - 1) * (this.pageSize === 'all' ? items.length : this.pageSize) + idx + 1}</td>
                 <td class="ob-td-center"><a href="#outbound" onclick="OutboundListModule.goToEntry('${escAttr(item.出库单号 || '')}'); return false;" style="color:var(--primary);text-decoration:none;font-weight:600;">${esc(item.出库单号 ?? '')}</a></td>
                 <td style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escAttr(item.项目名称 || '')}">${esc(item.项目名称 ?? '')}</td>
-                <td class="ob-td-center">${esc(item.领用人员 ?? '')}</td>
                 <td class="ob-td-center">${esc(item.出库时间 ?? '')}</td>
                 <!-- 🟢 v199：去掉内联 font-size:11.5px，三列字号跟随单元格统一（monospace 保留） -->
                 <td class="ob-td-center" style="font-family:monospace;">${TableUtils.link('stock', item.存货编码 ?? '', item.存货编码 ?? '')}</td>
@@ -1210,5 +1243,117 @@ const OutboundListModule = {
     const all = await db.outbound.toArray();
     // 🟢 O1：统一导出（行为与旧逻辑一致）
     TableUtils.exportToExcel(all, `出库明细_${new Date().toISOString().split('T')[0]}.xlsx`, '出库明细');
+  },
+
+  // ===== v227.78：导入 Excel（整体覆盖当前「中心出库列表」） =====
+  // 源表头(22列) 关联至工作台列；领用人列已删除故不导入；序号列渲染时自然递增（不入库）。
+  importData() {
+    let input = document.getElementById('oblImportFile');
+    if (!input) {
+      input = document.createElement('input');
+      input.type = 'file';
+      input.id = 'oblImportFile';
+      input.accept = '.xlsx,.xls';
+      input.style.display = 'none';
+      input.addEventListener('change', (e) => this._onImportFile(e));
+      document.body.appendChild(input);
+    }
+    input.value = '';
+    input.click();
+  },
+
+  async _onImportFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const ok = await WBModal.confirm(
+      '导入将清空「中心出库列表」当前全部数据，并用本文件内容整体覆盖。确定继续？',
+      { title: '导入确认' }
+    );
+    if (!ok) return;
+    showLoading('正在读取 Excel…');
+    try {
+      const buf = await file.arrayBuffer();
+      // 🟢 v227.78：复用 DataLoader 的 Worker 解析（不支持 Worker 时主线程兜底），与系统导入一致
+      const wb = await DataLoader._parseWorkbookAsync(buf);
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      if (!rows.length) { Toast.warn('文件中没有可导入的数据行'); return; }
+      // 🟢 v227.80：先建存货档案映射（存货名称+规格型号 → 存货编码），源缺编码时补全
+      this._stockFilled = 0;
+      await this._loadStockCodeMap();
+      const mapped = this._mapImportRows(rows);
+      if (!mapped.length) { Toast.warn('未识别到可导入明细（请确认表头含「出库单号/项目/出库日期」等列）'); return; }
+      // 🟢 v227.80：整表覆盖 —— 清空现有数据 + 批量写入（恢复为覆盖式导入）
+      await DataStore.write('outbound', () => db.transaction('rw', db.outbound, async () => {
+        await db.outbound.clear();
+        await db.outbound.bulkAdd(mapped);
+      }));
+      // 🟢 v227.78：同步云端，否则下次启动 restoreOutboundFromSettings 会用旧云端数据覆盖本次导入
+      // 🟢 v227.84：失败时给用户明确反馈 —— 之前 .catch 静默吞掉，用户刷新后才发现数据消失
+      let syncTip = '';
+      if (typeof DataStore.syncOutboundToSettings === 'function') {
+        const syncOk = await DataStore.syncOutboundToSettings();
+        if (!syncOk) syncTip = '（云端同步失败，请检查云端配置；本地已保存）';
+        else syncTip = '（已同步云端）';
+      }
+      this.currentFilter = {};
+      this.currentPage = 1;
+      await this.loadData();
+      const filledMsg = this._stockFilled ? `，其中 ${this._stockFilled} 条依据存货档案补全编码` : '';
+      Toast.success(`✅ 导入完成，共 ${mapped.length} 条明细（已整体覆盖${filledMsg}）${syncTip}`);
+    } catch (err) {
+      console.error('导入失败:', err);
+      Toast.error('❌ 导入失败：' + (err && err.message ? err.message : err));
+    } finally {
+      hideLoading();
+    }
+  },
+
+  // 源表头 → 工作台列（仅映射当前列表显示的字段，财务等列按"对应工作台表头"原则不导入）
+  _mapImportRows(rows) {
+    const out = [];
+    for (const r of rows) {
+      // 🟢 v227.78：本地日期格式化。SheetJS 解析 Excel 日期有浮点漂移（00:00:00 → 前一天 23:59:17，
+      //   源于 Excel 1900 闰年序列化误差），直接 getDate 会"减一天"。这里 +1 分钟容错再取整到本地日，
+      //   对纯日期数据万无一失（真实日期相差整日，1 分钟容差不会跨日）。
+      let 出库时间 = '';
+      const d = r['出库日期'];
+      if (d instanceof Date) {
+        const s = new Date(d.getTime() + 60000);
+        出库时间 = `${s.getFullYear()}-${String(s.getMonth() + 1).padStart(2, '0')}-${String(s.getDate()).padStart(2, '0')}`;
+      } else if (d != null && d !== '') {
+        出库时间 = String(d).slice(0, 10);
+      }
+      const qty = r['数量'];
+      // 🟢 v227.80：存货编码 —— 源有则用源；源缺失则按 存货名称+规格型号 从存货档案补全
+      let 存货编码 = (r['存货编码'] ?? '').toString().trim();
+      if (!存货编码 && this._stockCodeMap) {
+        const key = TableUtils.buildStockKey(r['存货名称'], r['规格型号']);
+        存货编码 = this._stockCodeMap.get(key) || '';
+        if (存货编码) this._stockFilled = (this._stockFilled || 0) + 1;
+      }
+      out.push({
+        出库单号: (r['出库单号'] ?? '').toString().trim(),
+        项目名称: (r['项目'] ?? '').toString().trim(),
+        出库时间,
+        存货编码,
+        存货名称: (r['存货名称'] ?? '').toString().trim(),
+        规格型号: (r['规格型号'] ?? '').toString().trim(),
+        出库数量: (qty === '' || qty == null) ? 0 : Number(qty)
+      });
+    }
+    return out;
+  },
+
+  // 🟢 v227.80：构建存货档案映射 存货名称+规格型号 → 存货编码（用于源缺编码时补全）
+  async _loadStockCodeMap() {
+    const rows = await db.stock.toArray();
+    const m = new Map();
+    for (const s of rows) {
+      if (!s.存货编码) continue;
+      const key = TableUtils.buildStockKey(s.存货名称, s.规格型号);
+      if (key && !m.has(key)) m.set(key, String(s.存货编码).trim());
+    }
+    this._stockCodeMap = m;
   }
 };

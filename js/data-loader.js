@@ -23,7 +23,7 @@ const DataLoader = {
 
   // 参与云端同步的数据表（meta 是元数据表，单独处理）
   // 注：materialClass / monthlyStats 自 v1 起从未被任何 loader 写入，属死代码，已从同步范围移除
-  TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach', 'outbound'],
+  TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach', 'outbound', 'tempOutbound'],
 
   // 核心必填表（用于"完整性校验"）：这些表为空会直接导致页面/模块空白，必须非空。
   // breach / outbound / materialClass / monthlyStats 可能合法为空（无违约记录、尚未录入出库单等），
@@ -107,11 +107,26 @@ const DataLoader = {
     return await this.importFromExcel();
   },
 
-  // 校验云端 bundle 是否包含全部 9 张核心表且都有数据
-  // 任一张缺失或为空 → 视为不完整，避免用残缺数据覆盖内置 Excel 的权威数据
+  // 校验云端 bundle 结构完整性（v227.2.1 放宽）
+  // 仅校验"8 张核心表全部存在且为数组"；不再强制 length>0，
+  // 避免"pricing/lowTurnover 等业务表合法为空"被误判为"数据不完整"。
+  // 真正的"残缺"判定：tables 缺失、某核心表不是数组、元数据缺失（savedAt）。
   _isBundleComplete(bundle) {
+    if (!bundle || !bundle.tables || typeof bundle.tables !== 'object' || !bundle.savedAt) return false;
     const coreTables = this.REQUIRED_TABLES;
-    return coreTables.every(t => Array.isArray(bundle.tables[t]) && bundle.tables[t].length > 0);
+    return coreTables.every(t => Array.isArray(bundle.tables[t]));
+  },
+
+  // 统计 bundle 中"非空核心表 / 核心表总数"（用于给用户友好提示：哪些表为空属正常）
+  _bundleStats(bundle) {
+    if (!bundle || !bundle.tables) return { populated: 0, total: 0, emptyTables: [] };
+    const coreTables = this.REQUIRED_TABLES;
+    const emptyTables = coreTables.filter(t => !bundle.tables[t] || bundle.tables[t].length === 0);
+    return {
+      populated: coreTables.length - emptyTables.length,
+      total: coreTables.length,
+      emptyTables
+    };
   },
 
   // 校验本地库 9 张核心表是否都已有数据（防御云端部分还原）
@@ -243,7 +258,7 @@ const DataLoader = {
     //   作为下次推送时的乐观锁基准；否则本机会以为自己站在最新数据上，把他人改动覆盖掉。
     if (bundle.savedAt) this._setCloudBase(bundle.savedAt);
     const tables = bundle.tables || {};
-    const allNames = this.TABLES.concat(['outbound', 'meta']);
+    const allNames = this.TABLES.concat(['meta']);
     // 🟢 v209 AUDIT-304：清空 + 写入同事务，中途失败整体回滚（不再「全库清空」半截）
     await db.transaction('rw', allNames, async () => {
       await DataStore.clearAll();   // 事务内清空，无 setTimeout（避免 Dexie 事务失活）
@@ -358,7 +373,7 @@ const DataLoader = {
     }
     const bundle = await SyncManager.pullDataPrivate();
     if (!bundle || !bundle.prevWork || !bundle.prevWork.tables) {
-      WBModal.alert('云端没有可恢复的上一份数据。\n\n原因：上一份数据只在「两次及以上导入/上传」后才存在。\n如果你只导入过一次，或上一份已被恢复过，就没有可恢复的版本。\n\n如需回到更早的数据，请改用「🔄 重新导入基准」（需先「标记为基准」）。');
+      WBModal.alert('云端暂无可恢复的上一份数据。\n仅「两次及以上导入/上传」后才存在上一份；若已恢复过则不可再恢复。\n需回到更早数据，请用「🔄 重新导入基准」。');
       return false;
     }
     try {
@@ -433,7 +448,7 @@ const DataLoader = {
     }
     if (ok) {
       const savedAt = new Date().toLocaleString('zh-CN');
-      WBModal.alert('✅ 基准数据已备份到云端（base.json）\n\n时间：' + savedAt + '\n\n说明：此操作仅把当前工作台数据「复制一份」到云端作为系统底账，\n本地现有数据完全不受影响、不会被移动或清空。\n后续空库/新设备打开时，才会自动以这份基准打底。');
+      WBModal.alert('✅ 基准数据已备份到云端（base.json）\n时间：' + savedAt + '\n仅复制一份作为系统底账，本地数据不受影响；空库/新设备打开时自动以此打底。');
     } else {
       WBModal.alert('❌ 基准数据上传失败\n\n请检查网络连接或 Supabase 存储桶权限（需开启 anon 可写）。');
     }
@@ -469,6 +484,32 @@ const DataLoader = {
       return await this.pushAllToCloud();
     } catch (e) {
       console.error('出库单独推送失败:', e);
+      return false;
+    }
+  },
+
+  // 🟢 v227.77：仅增量推送「临时出库」表到云端（独立 bundle key 'tempOutbound'，
+  //   不与中心库房出库单列表的 'outbound' 互相覆盖）。临时出库和正式出库各走各的云端数据包。
+  async pushTempOutboundToCloud() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+    try {
+      const rows = await db.tempOutbound.toArray();
+      const existing = await SyncManager.pullData().catch(() => null);
+      if (existing && existing.tables) {
+        const bundle = {
+          ...existing,
+          version: DB_VERSION,
+          savedAt: new Date().toISOString(),
+          tables: { ...existing.tables, tempOutbound: rows }
+        };
+        const ok = await SyncManager.pushData(bundle);
+        if (ok) console.log(`✅ [临时出库] 已单独同步 tempOutbound 表到云端（${rows.length} 条）`);
+        return ok;
+      }
+      console.warn('[data-loader] 云端拉取失败，改为推送本地全量以避免残缺覆盖');
+      return await this.pushAllToCloud();
+    } catch (e) {
+      console.error('临时出库单独推送失败:', e);
       return false;
     }
   },
@@ -525,7 +566,7 @@ const DataLoader = {
       let baseBundle = await this._pullBaseWithTimeout(8000);
       if (baseBundle && baseBundle.tables && this._isBundleComplete(baseBundle)) {
         // 🟢 v209 AUDIT-304：清空 + 垫底写入同事务（中途失败整体回滚，不残留半截基准）
-        await db.transaction('rw', this.TABLES.concat(['outbound', 'meta']), async () => {
+        await db.transaction('rw', this.TABLES.concat(['meta']), async () => {
           await DataStore.clearAll();
           await this.seedFromBase(baseBundle);
         });
@@ -549,6 +590,7 @@ const DataLoader = {
     // 🔴 重入保护（S2）：防止"重新导入"/"恢复内置"/"导入替换"并发调用导致重复清空+导入
     if (this._importing) { console.warn('[data-loader] 已有导入进行中，忽略重复调用'); return false; }
     this._importing = true;
+    DataStore.invalidateAll();   // 🟢 v227.52 P0：导入前清空会话表缓存，杜绝"导入中读取到旧/半截快照"的边缘情况
     try {
       // 🔴 失效存货编码缓存（M3）：重新导入后，旧映射已失效，否则新数据下编码错乱
       this._stockNameSpecCodeMap = null;
@@ -572,7 +614,7 @@ const DataLoader = {
     // 🟢 v209 AUDIT-304：清空 + 导入放入同一事务，原子提交。
     // 中途刷新/崩溃 → 事务回滚 → 本地恢复到「导入前」状态，不再出现「全库清空」半截数据。
     // 事务范围含全部 11 张表（clearAll 会清 outbound/meta，必须纳入，否则 Dexie 报事务越界）。
-    const ALL_TABLES = ['suppliers','orders','inbound','stock','inventoryAlerts','orderChecks','pricing','lowTurnover','breach','outbound','meta'];
+    const ALL_TABLES = ['suppliers','orders','inbound','stock','inventoryAlerts','orderChecks','pricing','lowTurnover','breach','outbound','tempOutbound','meta'];
     const tasks = [
       { name: '供应商', fn: () => this.loadSuppliers(workbook) },
       { name: '订单', fn: () => this.loadOrders(workbook) },
@@ -605,12 +647,22 @@ const DataLoader = {
 
     await DataStore.markDataImported();
 
-    // 导入成功后推送云端（若已连接）。pushAllToCloud 内部已校验完整性，残缺时不推送。
+    // 🟢 AUDIT-004：导入成功后推送云端（若已连接）。pushAllToCloud 内部已校验完整性，残缺时不推送。
+    //   原先失败仅 console.warn → 本地已存、云端未同步却无感知；现显式提示用户。
     if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
       try {
-        await this.pushAllToCloud();
+        const pushed = await this.pushAllToCloud();
+        if (pushed !== true && pushed !== 'conflict') {
+          // conflict 已弹窗；此处 false 多为云端写入失败（导入后核心表应有数据，空表跳过极少见）
+          if (typeof Toast !== 'undefined') {
+            Toast.warn('数据已保存到本地，但云端同步失败，稍后可在「云端同步 → 上传工作数据」手动重试');
+          } else {
+            console.warn('云端推送失败（本地数据已导入），建议手动重试');
+          }
+        }
       } catch (e) {
-        console.warn('云端推送失败（本地数据已导入）:', e);
+        if (typeof Toast !== 'undefined') Toast.error('云端同步失败：' + (e && e.message ? e.message : e));
+        else console.warn('云端推送失败（本地数据已导入）:', e);
       }
     }
 
@@ -701,11 +753,11 @@ const DataLoader = {
             : '● 云端未连接 — 仅导入到本地。如需同步到云端，请先在「⚙ 云配置」中连接。'
           }
         </div>
-        <div class="btn-group" style="border-top:none;margin-top:6px;padding-top:0;display:flex;gap:10px;justify-content:center;">
-          <button onclick="DataLoader.reimportFromBase()" class="btn-secondary" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">🔄 重新导入基准</button>
-          <button onclick="DataLoader.restorePrevWork()" class="btn-secondary" title="将云端上一份工作数据恢复为当前使用数据" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">♻️ 恢复上一份</button>
-          <button onclick="DataLoader.restoreFromCloudWork()" class="btn-secondary" title="直接从云端最新工作数据（data.json）恢复本地，绕过基准污染" style="flex:1;max-width:155px;padding:9px 0;font-size:12.5px;">☁️ 云端恢复</button>
-          <button onclick="DataLoader.reimportFromFile()" id="reimportUploadBtn" class="btn-primary" title="${btnTitle}" style="flex:1;max-width:150px;padding:9px 0;font-size:12.5px;">${btnIcon} ${btnText}</button>
+        <div class="btn-group" style="border-top:none;margin-top:6px;padding-top:0;display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
+          <button onclick="DataLoader.reimportFromBase()" class="btn--ghost" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">🔄 重新导入基准</button>
+          <button onclick="DataLoader.restorePrevWork()" class="btn--ghost" title="将云端上一份工作数据恢复为当前使用数据" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">♻️ 恢复上一份</button>
+          <button onclick="DataLoader.restoreFromCloudWork()" class="btn--ghost" title="直接从云端最新工作数据（data.json）恢复本地，绕过基准污染" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">☁️ 云端恢复</button>
+          <button onclick="DataLoader.reimportFromFile()" id="reimportUploadBtn" class="btn--primary" title="${btnTitle}" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">${btnIcon} ${btnText}</button>
         </div>
       </div>
     `;
@@ -724,13 +776,38 @@ const DataLoader = {
     try {
       showLoading('正在从云端拉取工作数据...', { variant:'capsule' });
       const bundle = await SyncManager.pullData();
-      if (!bundle || !bundle.tables || !this._isBundleComplete(bundle)) {
+      if (!bundle || !bundle.tables) {
+        hideLoading();
+        WBModal.alert('云端暂无工作数据（data.json 不存在）。\n请先在别的设备把数据「同步到云端」，或改用「📤 上传 Excel 导入」。');
+        return false;
+      }
+      if (!this._isBundleComplete(bundle)) {
         hideLoading();
         WBModal.alert('云端工作数据缺失或不完整，无法恢复。\n请改用「📤 上传 Excel 导入」或「🔄 重新导入基准」。');
         return false;
       }
+      // v227.2.1：分级提示——核心表全部存在但部分为空时，给出友好提示而非弹错误
+      const stats = this._bundleStats(bundle);
       const supplierCnt = (bundle.tables.suppliers || []).length;
-      if (!await WBModal.confirm('⚠ 此操作将「清空本地全部工作数据」，并用云端最新工作数据（' + supplierCnt + ' 家供应商）完全替换。\n\n确定要继续吗？', { title: '⚠ 危险操作' })) {
+      // 🟢 v227.2.1：云端核心表全部为空 + 本地已有数据时，阻断"清空本地→变空"误操作
+      if (stats.populated === 0) {
+        hideLoading();
+        try {
+          const localSupplierCount = await db.suppliers.count();
+          if (localSupplierCount > 0) {
+            WBModal.alert('云端核心表全部为空（无任何工作数据），恢复无意义。\n请先在别的设备「📤 上传 Excel 导入」或同步数据到云端后，再恢复。');
+            return false;
+          }
+        } catch (e) { /* 本地查询失败时继续走 confirm */ }
+      }
+      const hint = stats.emptyTables.length > 0
+        ? `\n\n📋 说明：云端 ${stats.populated}/${stats.total} 张核心表有数据，` +
+          `空表：${stats.emptyTables.join('、')}（属正常，可正常使用）。`
+        : '';
+      if (!await WBModal.confirm(
+        `⚠ 此操作将「清空本地全部工作数据」，并用云端最新工作数据（${supplierCnt} 家供应商）完全替换。${hint}\n\n确定要继续吗？`,
+        { title: '⚠ 危险操作' }
+      )) {
         hideLoading();
         return false;
       }
@@ -772,7 +849,7 @@ const DataLoader = {
         if (cloudOnline) {
           WBModal.alert('数据导入成功，并已同步到云端。');
         } else {
-          WBModal.alert('数据已导入到本地。\n\n⚠ 当前云端未连接，本次未上传云端。如需把本次数据分享给同事，请在「⚙ 云配置」连接云端后，点击云端工作条上的「↥ 上传」按钮。');
+          WBModal.alert('数据已导入到本地。\n当前云端未连接，本次未上传。连接云端后点工作条「↥ 上传」即可分享给同事。');
         }
         // 刷新当前视图
         if (typeof App !== 'undefined' && App.currentModule) {
@@ -808,12 +885,12 @@ const DataLoader = {
         return false;
       }
       // 🟢 v209 AUDIT-304：清空 + 基准写入同事务（中途失败整体回滚）
-      await db.transaction('rw', this.TABLES.concat(['outbound', 'meta']), async () => {
+      await db.transaction('rw', this.TABLES.concat(['meta']), async () => {
         await DataStore.clearAll();
         await this.seedFromBase(bundle);
       });
       hideLoading();
-      WBModal.alert('✅ 已用云端基准数据替换本地工作数据（共 ' + supplierCnt + ' 家供应商）。\n\n本地原有数据已被覆盖，如需恢复可重新导入 Excel 或上传工作数据。');
+      WBModal.alert('✅ 已用云端基准数据替换本地工作数据（共 ' + supplierCnt + ' 家供应商）。\n本地原有数据已被覆盖，如需恢复可重新导入 Excel 或上传工作数据。');
       if (typeof App !== 'undefined' && App.currentModule) {
         App.go(App.currentModule);
       }
@@ -891,8 +968,16 @@ const DataLoader = {
       headers.forEach((h, idx) => {
         if (h) {
           const val = row[idx];
-          // 统一用 recoverExcelDate 处理日期（修复少一天/差43秒问题）
-          obj[h] = this.recoverExcelDate(val);
+          // 🟢 v227.19 修复：原写 `obj[h] = this.recoverExcelDate(val)` 会把所有列值送进日期识别器，
+          //   导致像 22172 这种落在 20000~80000 的数字被识别成 Excel 序列号 → 转成日期字符串 →
+          //   下游 parseFloat 拿到年号「1960」，含税单价/不含税单价等纯数字列全部错位。
+          //   修复：通用赋值只处理已是 Date 对象的情况；兜底序列号识别留到具体 loader 中显式调用，
+          //   不在 parseSheet 通用赋值里越权转换。
+          if (val instanceof Date) {
+            obj[h] = this.recoverExcelDate(val);
+          } else {
+            obj[h] = val;
+          }
         }
       });
 
@@ -1163,13 +1248,20 @@ const DataLoader = {
   async loadOrderChecks(workbook) {
     showLoading('正在导入订货数据...', { variant:'fluid' });
     const rows = this.parseSheet(workbook, '订货', 2);
+    // 🟢 v227.20：订货表的现存量列名带日期前缀（如「2026-09-04现存量」），随文件变化，
+    //   写死 r['2026-08-03现存量'] 会读不到 → 现存量全为 0。改用与库存预警一致的 stockKey 智能匹配。
+    const _ocKeys = Object.keys(rows[0] || {});
+    const _ocStockKey = _ocKeys.find(k => {
+      const ck = String(k).replace(/\n/g, '').replace(/[\u200B-\u200D\uFEFF\u00A0\u3000]/g, '').replace(/\s+/g, ' ');
+      return ck.includes('现存量') && !ck.includes('预警') && !ck.includes('最低');
+    }) || '2026-09-04现存量';
     const clean = rows.map(r => ({
       存货编码: r['存货编码'] ? String(r['存货编码']) : '',
       存货名称: r['存货名称'] || '',
       规格型号: r['规格型号'] ? String(r['规格型号']) : '',
       主计量: r['主计量'] || '',
       数量: this.parseNum(r['数量']),
-      现存量: this.parseNum(r['2026-08-03现存量'] || r['现存量']),
+      现存量: this.parseNum(r[_ocStockKey] || r['现存量'] || r['现存数量']),
       在途订单: this.parseNum(r['在途订单']),
       所上或库房: String(r['所上或库房'] || ''),
       工程项目: String(r['工程项目'] || ''),
@@ -1199,7 +1291,9 @@ const DataLoader = {
       币种: r['币种'] || '',
       含税单价: this.parseNum(r['含税单价']),
       税率: this.parseNum(r['税率']),
-      单价: this.parseNum(r['单价']),
+      // 🟢 v227.18：源表头列为「不含税单价」(不是「单价」)；之前写成 r['单价'] 永远拿不到，
+      //   导致工作台「不含税单价」列一直为 ¥0.00；与「含税单价」列对账时也错位。
+      单价: this.parseNum(r['不含税单价']),
       类型: r['类型'] || ''
     })).filter(r => r.供应商 && r.存货名称);
 
@@ -1373,9 +1467,21 @@ const DataLoader = {
       if (rows === undefined) continue;
       if (!Array.isArray(rows)) return { ok: false, reason: `${name} 非数组` };
     }
-    if (bundle.savedAt !== undefined && bundle.savedAt !== null &&
-        (typeof bundle.savedAt !== 'number' || !isFinite(bundle.savedAt))) {
-      return { ok: false, reason: 'savedAt 非法' };
+    // 🟢 v225：savedAt 全链路统一为 ISO 字符串（写入端用 new Date().toISOString()；
+    //   乐观锁 pushData 用字符串相等比较；_setCloudBase 也原样存）。
+    //   旧校验误判"必须是 number"，导致只要云端有 bundle 就 100% 失败，恢复功能完全走不通。
+    //   这里改成：要么是有限数字（毫秒时间戳），要么是合法 ISO 字符串（能被 Date.parse 解析）。
+    if (bundle.savedAt !== undefined && bundle.savedAt !== null && bundle.savedAt !== '') {
+      if (typeof bundle.savedAt === 'number') {
+        if (!isFinite(bundle.savedAt)) return { ok: false, reason: 'savedAt 非法' };
+      } else if (typeof bundle.savedAt === 'string') {
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/.test(bundle.savedAt)
+            || isNaN(Date.parse(bundle.savedAt))) {
+          return { ok: false, reason: 'savedAt 非法' };
+        }
+      } else {
+        return { ok: false, reason: 'savedAt 非法' };
+      }
     }
     return { ok: true };
   },

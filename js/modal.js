@@ -4,7 +4,8 @@
  * 用法：
  *   WBModal.alert('提示文案', { title: '提示', type: 'info' })   // 单按钮
  *   WBModal.confirm('确定要删除吗？', { title: '确认' })            // 双按钮，返回 Promise<boolean>
- *   WBModal.prompt('请输入名称', { title: '新建', default: '' })    // 输入框 + 双按钮，返回 Promise<string|null>
+ *   WBModal.choice('请选择', { title:'账号', buttons:[{text:'取消',value:null},{text:'',value:'x',primary:true}] }) // 多按钮，返回 Promise<value>
+ *   WBModal.choiceList('请选择', { title:'账号', items:[{text:'A',value:'a'},{text:'B',value:'b'},{text:'当前',value:'c',disabled:true}] }) // 列表选择，返回 Promise<value>（适合 >2 选项）
  *   WBModal.notify('保存成功', 'success')                          // 右下角吐司，2.5s 自动消失
  * 行为细节：
  *   - 任意弹窗打开期间，其他弹窗（旧的）被强制关闭，避免叠加
@@ -54,8 +55,8 @@
   function buildDialog({ title, body, buttons, accent }) {
     const wrap = document.createElement('div');
     wrap.className = 'modal';
-    wrap.style.width = '440px';
-    wrap.style.maxWidth = '94vw';
+    // 🟢 v227.49：去掉 inline width:'auto'（会覆盖 CSS 的 .modal{width:min(440px,...)}），
+    //   让 CSS 主导宽度，单/双按钮弹窗均 ≈440px（移动端仍自适应 100vw-24px）。
     wrap.style.borderTop = `3px solid ${accent}`;
 
     // header
@@ -75,7 +76,8 @@
     // body
     const bodyEl = document.createElement('div');
     bodyEl.className = 'modal-body';
-    bodyEl.style.padding = '20px 22px';
+    // 🟢 v227.45：弹窗 body 内边距收紧，更紧凑适合移动端
+    bodyEl.style.padding = '16px 18px';
     bodyEl.style.fontSize = '13.5px';
     bodyEl.style.lineHeight = '1.6';
     bodyEl.style.color = 'var(--text-main)';
@@ -88,18 +90,30 @@
     // footer
     const footer = document.createElement('div');
     footer.className = 'modal-footer';
-    footer.style.padding = '12px 22px 16px';
+    footer.style.padding = '12px 16px 14px';
     footer.style.display = 'flex';
-    footer.style.gap = '10px';
+    footer.style.gap = '8px';
     footer.style.justifyContent = 'flex-end';
     footer.style.borderTop = '1px solid var(--panel-border)';
+    // 🟢 v227.45：多于 1 个按钮时让按钮均分宽度，移动端不溢出
+    if (buttons.length > 1) {
+      footer.style.flexWrap = 'wrap';
+    }
     buttons.forEach((b, i) => {
       const btn = document.createElement('button');
-      btn.className = b.primary ? 'btn-primary' : 'btn-secondary';
+      btn.className = b.primary ? 'btn--primary' : 'btn--ghost';
       btn.textContent = b.text;
-      btn.style.minWidth = '72px';
-      btn.style.height = '34px';
-      btn.style.fontSize = '13px';
+      // 🟢 v227.54：统一按钮系统（.btn）。基础盒模型由 CSS !important 兜底，
+      // 这里仅保留历史内联兜底（被 .btn 覆盖），不再手动设尺寸/圆角/字体。
+      btn.style.flex = '1';
+      btn.style.borderRadius = '10px';
+      btn.style.fontFamily = "'PingFang SC','Microsoft YaHei','黑体',sans-serif";
+      if (buttons.length === 1) {
+        btn.style.minWidth = '120px';
+      } else {
+        btn.style.flex = '1 1 0';
+        btn.style.minWidth = '0';
+      }
       btn.addEventListener('click', () => closeDialog(b.value));
       footer.appendChild(btn);
     });
@@ -214,12 +228,78 @@
       open({
         type: 'question',
         title: opts.title || '确认',
-        body: message,
+        body: opts.body || message,
         buttons: [
           { text: opts.cancelText || '取消', value: false, primary: false },
           { text: opts.okText || '确定', value: true, primary: true }
         ],
         resolve: (v) => { resolve(v === true); }
+      });
+    });
+  }
+
+  // 🟢 v227.46：列表选择弹窗 —— body 是 HTMLElement（内含若干列表项），
+  //   footer 只放「取消」按钮。列表项 click → 关闭弹窗并 resolve(item.value)。
+  //   与 choice 的区别：choice 强制每个候选都做成 footer 按钮，不适合选项多的场景。
+  function choiceList(message, opts) {
+    opts = opts || {};
+    return new Promise((resolve) => {
+      let resolved = false;
+      const items = Array.isArray(opts.items) ? opts.items : [];
+      const list = document.createElement('div');
+      list.className = 'modal-list';
+      list.style.cssText = 'display:flex;flex-direction:column;gap:6px;max-height:50vh;overflow-y:auto;';
+      items.forEach((it, i) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'modal-list-item';
+        row.dataset.value = String(it.value);
+        row.dataset.index = String(i);
+        if (it.disabled) {
+          row.disabled = true;
+          row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;width:100%;padding:10px 12px;border:1px solid var(--panel-border);border-radius:8px;background:var(--panel-bg);color:var(--text-secondary);font-size:13.5px;cursor:not-allowed;opacity:0.85;';
+        } else {
+          row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;width:100%;padding:10px 12px;border:1px solid var(--panel-border);border-radius:8px;background:var(--panel-bg);color:var(--text-main);font-size:13.5px;cursor:pointer;text-align:left;transition:all 0.15s;';
+          row.addEventListener('mouseenter', () => { row.style.background = 'rgba(122,156,165,0.10)'; });
+          row.addEventListener('mouseleave', () => { row.style.background = 'var(--panel-bg)'; });
+        }
+        const label = document.createElement('span');
+        label.textContent = it.text;
+        row.appendChild(label);
+        if (it.hint) {
+          const hint = document.createElement('span');
+          hint.style.cssText = 'font-size:11.5px;color:var(--text-secondary);margin-left:8px;';
+          hint.textContent = it.hint;
+          row.appendChild(hint);
+        }
+        row.addEventListener('click', () => {
+          if (resolved) return;
+          resolved = true;
+          resolve(it.value);
+          closeDialog(null);
+        });
+        list.appendChild(row);
+      });
+      const box = document.createElement('div');
+      box.style.cssText = 'text-align:left;line-height:1.6;';
+      if (message) {
+        if (message instanceof HTMLElement) {
+          // 调用方传入的描述节点（已含样式）—— 整体插入
+          box.appendChild(message);
+        } else {
+          const intro = document.createElement('div');
+          intro.style.cssText = 'font-size:13px;color:var(--text-secondary);margin-bottom:10px;';
+          intro.textContent = String(message);
+          box.appendChild(intro);
+        }
+      }
+      box.appendChild(list);
+      open({
+        type: opts.type || 'question',
+        title: opts.title || '请选择',
+        body: box,
+        buttons: [{ text: opts.cancelText || '取消', value: null, primary: false }],
+        resolve: (v) => { if (!resolved) { resolved = true; resolve(null); } }
       });
     });
   }
@@ -260,6 +340,26 @@
           else submitValue = null;
           resolve(submitValue);
         }
+      });
+    });
+  }
+
+  // 🟢 v227.43：多选项弹窗（2~3 个自定义按钮，返回被点击按钮的 value）
+  //   例：WBModal.choice('是否退出？', { title:'退出登录', buttons:[
+  //        { text:'取消', value:null }, { text:'切换账号', value:'switch' }, { text:'确认退出', value:'logout', primary:true }
+  //      ]}).then(v => { ... })
+  function choice(message, opts) {
+    opts = opts || {};
+    const buttons = (opts.buttons && opts.buttons.length)
+      ? opts.buttons
+      : [{ text: '取消', value: null, primary: false }];
+    return new Promise((resolve) => {
+      open({
+        type: opts.type || 'question',
+        title: opts.title || '请选择',
+        body: opts.body || message,
+        buttons: buttons,
+        resolve: (v) => { resolve(v === undefined ? null : v); }
       });
     });
   }
@@ -311,5 +411,5 @@
     setTimeout(dismiss, ms);
   }
 
-  window.WBModal = { alert, confirm, prompt, notify, close: () => closeDialog(null) };
+  window.WBModal = { alert, confirm, prompt, choice, choiceList, notify, close: () => closeDialog(null) };
 })();

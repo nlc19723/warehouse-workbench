@@ -13,29 +13,36 @@ const InventoryAlertModule = {
     const myToken = token;
     const content = document.getElementById('contentArea');
     content.innerHTML = `
-      <div class="filter-bar">
-        <input type="text" id="alertKw" placeholder="搜索物料名称、编码..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')InventoryAlertModule.applyFilter()">
-        <select id="alertCategory">
-          <option value="">全部分类</option>
-          <option value="A" ${this.currentFilter.category === 'A' ? 'selected' : ''}>A类</option>
-          <option value="B" ${this.currentFilter.category === 'B' ? 'selected' : ''}>B类</option>
-          <option value="C" ${this.currentFilter.category === 'C' ? 'selected' : ''}>C类</option>
-          <option value="不使用类" ${this.currentFilter.category === '不使用类' ? 'selected' : ''}>不使用类</option>
-        </select>
-        <select id="alertStatus" onchange="InventoryAlertModule.applyFilter()">
-          <option value="yes" ${this.currentFilter.status === 'yes' ? 'selected' : ''}>需补货</option>
-          <option value="no" ${this.currentFilter.status === 'no' ? 'selected' : ''}>正常</option>
-          <option value="" ${this.currentFilter.status === '' ? 'selected' : ''}>全部状态</option>
-        </select>
-        <button class="search-glass" onclick="InventoryAlertModule.applyFilter()">筛选</button>
-        <button class="secondary" onclick="InventoryAlertModule.resetFilter()">重置</button>
-        <button class="secondary" onclick="InventoryAlertModule.exportData()">📥 导出</button>
+      <div class="filter-bar filter-bar-m">
+        <input type="text" id="alertKw" class="fb-search" placeholder="搜索物料名称、编码..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')InventoryAlertModule.applyFilter()">
+        <div class="fb-row fb-row--fields">
+          <div class="fb-field"><select id="alertCategory">
+            <option value="">全部分类</option>
+            <option value="A" ${this.currentFilter.category === 'A' ? 'selected' : ''}>A类</option>
+            <option value="B" ${this.currentFilter.category === 'B' ? 'selected' : ''}>B类</option>
+            <option value="C" ${this.currentFilter.category === 'C' ? 'selected' : ''}>C类</option>
+            <option value="不使用类" ${this.currentFilter.category === '不使用类' ? 'selected' : ''}>不使用类</option>
+          </select></div>
+          <div class="fb-field"><select id="alertStatus" onchange="InventoryAlertModule.applyFilter()">
+            <option value="yes" ${this.currentFilter.status === 'yes' ? 'selected' : ''}>需补货</option>
+            <option value="no" ${this.currentFilter.status === 'no' ? 'selected' : ''}>正常</option>
+            <option value="" ${this.currentFilter.status === '' ? 'selected' : ''}>全部状态</option>
+          </select></div>
+        </div>
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="InventoryAlertModule.applyFilter()">筛选</button>
+          <button class="btn--ghost" onclick="InventoryAlertModule.resetFilter()">重置</button>
+          <button class="btn--ghost" onclick="InventoryAlertModule.exportData()">📥 导出</button>
+        </div>
       </div>
 
       <div id="alertSummary"></div>
       <div id="alertTableArea"></div>
       <div id="alertPagination" class="pagination-bar" style="justify-content:center;gap:8px;"></div>
     `;
+
+    // 🟢 v227.58：移动端筛选栏下拉框按内部最长选项字符长度动态等分（文本框两行等长）
+    if (window.FilterLayout) FilterLayout.balanceAll();
 
     await this.loadData(myToken);
   },

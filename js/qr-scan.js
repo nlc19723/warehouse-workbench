@@ -259,6 +259,22 @@
     lastHit = { code, t: now };
     if (!code) { rafId = requestAnimationFrame(tick); return; }
 
+    // 🟢 v215 扫码盘点：盘点模式下识别后「定位到盘点表格对应行」，不跳转档案页。
+    // 先取值再 close —— close() 会把 scanMode 复位。
+    const mode = scanMode;
+    if (mode === 'stocktake') {
+      close();
+      try {
+        if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.focusRowByCode === 'function') {
+          StocktakeModule.focusRowByCode(code);
+        }
+      } catch (e) {
+        console.warn('[qr-scan] 盘点定位失败(已忽略):', e);
+      }
+      return;
+    }
+
+    // 以下为普通模式原逻辑（行为保持：校验编码 → App.openEntity 跳档案页）
     setTip('识别成功，正在校验...');
     try {
       const stocks = await DataStore.getStock();
@@ -277,6 +293,7 @@
 
   function close() {
     active = false;
+    scanMode = null;   // 模式一次性：关闭即复位，下次 open() 不带 mode → 普通模式（行为保持）
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     if (stream) {
       stream.getTracks().forEach(t => { try { t.stop(); } catch (_) {
@@ -289,7 +306,14 @@
     lastBarTry = 0;
   }
 
-  async function open() {
+  // 🟢 v215 扫码盘点：模式开关。
+  //   null        = 普通模式（识别后跳存货档案 —— 与历史行为完全一致）
+  //   'stocktake' = 盘点模式（识别后定位到盘点表格对应行，不跳转）
+  let scanMode = null;
+
+  async function open(mode) {
+    // 不传 mode / 非 'stocktake' → 普通模式，行为保持
+    scanMode = (mode === 'stocktake') ? 'stocktake' : null;
     if (active) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       WBModal.alert('当前环境不支持摄像头扫码。\n请使用 HTTPS 访问工作台，或在手机浏览器中打开。');

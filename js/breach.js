@@ -13,11 +13,13 @@ const BreachModule = {
     const myToken = token;
     const content = document.getElementById('contentArea');
     content.innerHTML = `
-      <div class="filter-bar">
-        <input type="text" id="breachKw" placeholder="搜索供应商名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')BreachModule.applyFilter()">
-        <button class="search-glass" onclick="BreachModule.applyFilter()">🔍 搜索</button>
-        <button class="secondary" onclick="BreachModule.resetFilter()">重置</button>
-        <button class="secondary" onclick="BreachModule.exportData()">📥 导出</button>
+      <div class="filter-bar filter-bar-m" data-mod="breach">
+        <input type="text" id="breachKw" class="fb-search" placeholder="搜索供应商名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')BreachModule.applyFilter()">
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="BreachModule.applyFilter()">🔍 搜索</button>
+          <button class="btn--ghost" onclick="BreachModule.resetFilter()">重置</button>
+          <button class="btn--ghost" onclick="BreachModule.exportData()">📥 导出</button>
+        </div>
       </div>
 
       <!-- 统计卡片（2x2田字格） + 规则面板（并排） -->
@@ -41,8 +43,9 @@ const BreachModule = {
       records = records.filter(r => r.公司名称 && r.公司名称.toLowerCase().includes(kw));
     }
 
-    const totalAmount = records.reduce((s, r) => s + (parseFloat(r.扣款金额) || 0), 0);
-    const totalDelay = records.reduce((s, r) => s + (parseFloat(r.延迟天数) || 0), 0);
+    // 🟢 AUDIT-003：扣款总额改用 sumMoney（以分整数累加），消除浮点求和漂移；延迟天数为整数，math.round 求和防尾巴
+    const totalAmount = TableUtils.sumMoney(records, r => r.扣款金额);
+    const totalDelay = records.reduce((s, r) => s + Math.round(parseFloat(r.延迟天数) || 0), 0);
     const companySet = new Set(records.map(r => r.公司名称).filter(Boolean));
 
     if (rt !== undefined && rt !== App._goToken) return;

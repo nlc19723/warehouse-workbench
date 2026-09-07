@@ -3,6 +3,10 @@
 // ============================================
 
 const DB_NAME = 'WarehouseWorkbench';
+// ⚠️ DB_VERSION 是「旧库清理阈值」，不是当前 schema 版本号（当前 schema 见文件末尾 db.version(8)）。
+//    cleanOldDB() 的删除条件是 version < DB_VERSION - 1（即 <6，仅清理 v1–v5 这些索引爆炸的旧库）。
+//    【切勿把这里改成 8】一旦改成 8，条件变为 version < 7，会把 v6 用户的库当作旧库删除 → 数据全丢。
+//    保持 7：v6/v7 用户的库一律走 Dexie 平滑升级（含 7→8 新增盘点表），数据完整保留。
 const DB_VERSION = 7;  // v7: 订单索引由死字段 存货编码（订单从不存该字段）改为真实持久化字段 存货编号（M5 洁癖）。Dexie 平滑升级、不丢数据
 
 // 先删除旧版本数据库（v1/v2 有大量索引导致写入卡死）
@@ -122,6 +126,40 @@ db.version(7).stores({
   meta: 'key'
 });
 
+// v8 schema（当前版本）：新增「盘点记录」独立表 stocktake_records（v215）
+//   · 该表刻意不进云同步的 10 表 bundle（DataLoader.TABLES）与 clearAll()，
+//     → 盘点记录既不会被推送覆盖，也不会在「重新导入」时被误清空。
+//   · recId = crypto.randomUUID() 全局唯一，作为跨设备追加合并的去重键。
+//   · 未给 inbound 增加「入库日期」索引：实测全表扫描 24405 行 <100ms 已足够；
+//     且 db.js:42 注释载明索引是导入性能瓶颈（18→3 索引带来 3分钟→10秒），
+//     为不影响现有导入速度，此处保持 3 索引不变。
+db.version(8).stores({
+  suppliers: '++id, 供应商, 类型',
+  orders: '++id, 订单编号, 供应商, 存货编号',
+  inbound: '++id, 入库单号, 存货编码, 供应商',
+  stock: '++id, 存货编码, 存货名称',
+  inventoryAlerts: '++id, 补货值, 存货编码',
+  orderChecks: '++id, 存货编码',
+  pricing: '++id, 供应商, 存货编码',
+  lowTurnover: '++id, 存货编码',
+  breach: '++id, 公司名称',
+  outbound: '++id, 出库单号, 存货编码, 出库时间',
+  // 盘点记录（v215 新增）：recId 唯一去重；按存货编码/盘点人/日期/类别查询
+  stocktake_records: '++id, recId, 存货编码, 盘点人, 盘点日期, 盘点类别',
+  meta: 'key'
+});
+
+// v9 schema（v227.77 新增）：临时出库独立 store（与「中心库房出库单列表」物理隔离）
+//   · 老版 outbound（中心库房出库单列表）继续保留，OutboundListModule 照常读它；
+//   · 新版 OutboundModule（侧边栏改名为「临时出库」）全部走 tempOutbound：
+//     录入/翻页/搜索/删除 都不再触碰 outbound 表；
+//   · 索引与 outbound 保持一致（出库单号/存货编码/出库时间），保证 getAllOrderNos/搜索/翻页
+//     等代码 0 改动即可迁移。
+db.version(9).stores({
+  // 🟢 v227.77：临时出库（侧边栏「临时出库」模块专用）
+  tempOutbound: '++id, 出库单号, 存货编码, 出库时间'
+});
+
 // 不在定义时自动打开——由 App.init() 中 cleanOldDB() 之后手动调用 db.open()
 // 这样可以确保旧版本数据库先被清理
 
@@ -181,19 +219,32 @@ const DataStore = {
   // ─── 替换内置工作簿存储：v111 已删除「导入替换内置工作簿」UI 入口，相关 save/clear/get 方法一并移除（O2）──
 
   // 清空所有数据（重新导入时使用）
+  // 🟢 AUDIT-002：原实现为顺序 12 条独立 clear()，中途某张表抛错会导致「半清库」（部分已清、部分未清）。
+  //   现用 Dexie 事务包裹全部 11 张表，要么全部清空、要么全部回滚；失败显式抛出，让重导流程感知而非静默继续。
   async clearAll() {
-    await db.suppliers.clear();
-    await db.orders.clear();
-    await db.inbound.clear();
-    await db.stock.clear();
-    await db.inventoryAlerts.clear();
-    await db.orderChecks.clear();
-    await db.pricing.clear();
-    await db.lowTurnover.clear();
-    await db.breach.clear();
-    await db.outbound.clear();
-    await db.meta.delete('dataImported');
-    this.invalidateAll();
+    try {
+      await db.transaction('rw',
+        db.suppliers, db.orders, db.inbound, db.stock, db.inventoryAlerts,
+        db.orderChecks, db.pricing, db.lowTurnover, db.breach, db.outbound, db.meta,
+        async () => {
+          await db.suppliers.clear();
+          await db.orders.clear();
+          await db.inbound.clear();
+          await db.stock.clear();
+          await db.inventoryAlerts.clear();
+          await db.orderChecks.clear();
+          await db.pricing.clear();
+          await db.lowTurnover.clear();
+          await db.breach.clear();
+          await db.outbound.clear();
+          await db.meta.delete('dataImported');
+        });
+      this.invalidateAll();
+    } catch (e) {
+      // 事务失败（如存储配额/并发写入）：异常上浮，避免「半清库」后继续导入造成数据口径不一致。
+      console.error('[clearAll] 事务清空失败（已回滚）：', e);
+      throw e;
+    }
   },
 
   // ===== 设置数据层（云端 settings.json，用户长期偏好 / 非导入数据）=====
@@ -213,6 +264,12 @@ const DataStore = {
     const rows = await this.getRows('outbound');
     return SyncManager.setSetting('outbound_list', rows);
   },
+  // 🟢 v227.77：临时出库（侧边栏「临时出库」模块）独立云端同步 key
+  async syncTemporaryOutboundToSettings() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+    const rows = await this.getRows('tempOutbound');
+    return SyncManager.setSetting('temp_outbound_list', rows);
+  },
   // 启动恢复：用云端设置里的出库列表覆盖本地（若有且更新）
   async restoreOutboundFromSettings() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
@@ -231,6 +288,22 @@ const DataStore = {
     } catch (e) { console.warn('出库恢复失败:', e); }
     return false;
   },
+  // 🟢 v227.77：临时出库（独立 store 独立云端 key 'temp_outbound_list'）
+  async restoreTemporaryOutboundFromSettings() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+    try {
+      const rows = await SyncManager.getSetting('temp_outbound_list');
+      if (Array.isArray(rows) && rows.length) {
+        await this.write('tempOutbound', async () => {
+          await db.tempOutbound.clear();
+          await db.tempOutbound.bulkPut(rows);
+        });
+        console.log(`[设置] 已从云端恢复临时出库 ${rows.length} 条`);
+        return true;
+      }
+    } catch (e) { console.warn('临时出库恢复失败:', e); }
+    return false;
+  },
   // 搜索历史：从 v163 localStorage 一次性迁移到云端设置
   async migrateSearchHistoryToCloud() {
     try {
@@ -246,16 +319,17 @@ const DataStore = {
   },
 
   // ===== 供应商管理 =====
+  // 🟢 v227.52 P0：改走 getRows() 内存缓存，避免每次从 IndexedDB 全量序列化（24k 行级开销）
   async getSuppliers(filter = {}) {
-    let query = db.suppliers.toCollection();
-    if (filter.类型) query = query.filter(s => s.类型 === filter.类型);
-    if (filter.招采部门) query = query.filter(s => s.招采部门 === filter.招采部门);
+    let list = await this.getRows('suppliers');
+    if (filter.类型) list = list.filter(s => s.类型 === filter.类型);
+    if (filter.招采部门) list = list.filter(s => s.招采部门 === filter.招采部门);
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(s => (s.供应商 && s.供应商.toLowerCase().includes(kw)) ||
-                                 (s.类型 && s.类型.toLowerCase().includes(kw)));
+      list = list.filter(s => (s.供应商 && s.供应商.toLowerCase().includes(kw)) ||
+                              (s.类型 && s.类型.toLowerCase().includes(kw)));
     }
-    return query.toArray();
+    return list;
   },
 
   async getSupplierTypes() {
@@ -268,32 +342,31 @@ const DataStore = {
   },
 
   // ===== 订单列表 =====
+  // 🟢 v227.52 P0：走 getRows() 缓存 + 内存分页（slice），消除每页两次全表扫描
   async getOrders(filter = {}, page = 1, pageSize = 50) {
-    let query = db.orders.toCollection();
-    if (filter.供应商) query = query.filter(o => o.供应商 === filter.供应商);
-    if (filter.项目名称) query = query.filter(o => o.项目名称 === filter.项目名称);
-    if (filter.审批状态) query = query.filter(o => o.审批状态 === filter.审批状态);
+    let list = await this.getRows('orders');
+    if (filter.供应商) list = list.filter(o => o.供应商 === filter.供应商);
+    if (filter.项目名称) list = list.filter(o => o.项目名称 === filter.项目名称);
+    if (filter.审批状态) list = list.filter(o => o.审批状态 === filter.审批状态);
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(o => (o.订单编号 && String(o.订单编号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                                 (o.供应商 && o.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                                 (o.存货名称 && o.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                                 (o.项目名称 && o.项目名称.replace(/\s+/g, '').toLowerCase().includes(kw)));
+      list = list.filter(o => (o.订单编号 && String(o.订单编号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                              (o.供应商 && o.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                              (o.存货名称 && o.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                              (o.项目名称 && o.项目名称.replace(/\s+/g, '').toLowerCase().includes(kw)));
     }
     if (filter.startDate || filter.endDate) {
-      query = query.filter(o => {
+      list = list.filter(o => {
         if (!o.日期) return false;
         if (filter.startDate && o.日期 < filter.startDate) return false;
         if (filter.endDate && o.日期 > filter.endDate) return false;
         return true;
       });
     }
-    const total = await query.count();
-    if (pageSize === 'all') {
-      const items = await query.toArray();
-      return { items, total, page: 1, pageSize: 'all', totalPages: 1 };
-    }
-    const items = await query.offset((page - 1) * pageSize).limit(pageSize).toArray();
+    const total = list.length;
+    if (pageSize === 'all') return { items: list, total, page: 1, pageSize: 'all', totalPages: 1 };
+    const start = (page - 1) * pageSize;
+    const items = list.slice(start, start + pageSize);
     return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   },
 
@@ -308,58 +381,59 @@ const DataStore = {
   },
 
   // ===== 入库列表 =====
+  // 🟢 v227.52 P0：走 getRows() 缓存 + 内存分页（slice）
   async getInbound(filter = {}, page = 1, pageSize = 50) {
-    let query = db.inbound.toCollection();
-    if (filter.供应商) query = query.filter(i => i.供应商 === filter.供应商);
-    if (filter.项目名称) query = query.filter(i => i.项目名称 === filter.项目名称);
-    if (filter.仓库) query = query.filter(i => i.仓库 === filter.仓库);
+    let list = await this.getRows('inbound');
+    if (filter.供应商) list = list.filter(i => i.供应商 === filter.供应商);
+    if (filter.项目名称) list = list.filter(i => i.项目名称 === filter.项目名称);
+    if (filter.仓库) list = list.filter(i => i.仓库 === filter.仓库);
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(i => (i.入库单号 && String(i.入库单号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                                 (i.供应商 && i.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                                 (i.存货名称 && i.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw)));
+      list = list.filter(i => (i.入库单号 && String(i.入库单号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                              (i.供应商 && i.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                              (i.存货名称 && i.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw)));
     }
     if (filter.startDate || filter.endDate) {
-      query = query.filter(i => {
+      list = list.filter(i => {
         if (!i.入库日期) return false;
         if (filter.startDate && i.入库日期 < filter.startDate) return false;
         if (filter.endDate && i.入库日期 > filter.endDate) return false;
         return true;
       });
     }
-    const total = await query.count();
-    if (pageSize === 'all') {
-      const items = await query.toArray();
-      return { items, total, page: 1, pageSize: 'all', totalPages: 1 };
-    }
-    const items = await query.offset((page - 1) * pageSize).limit(pageSize).toArray();
+    const total = list.length;
+    if (pageSize === 'all') return { items: list, total, page: 1, pageSize: 'all', totalPages: 1 };
+    const start = (page - 1) * pageSize;
+    const items = list.slice(start, start + pageSize);
     return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   },
 
   // ===== 现存量 =====
+  // 🟢 v227.52 P0：走 getRows() 缓存
   async getStock(filter = {}) {
-    let query = db.stock.toCollection();
+    let list = await this.getRows('stock');
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(s => (s.存货编码 && s.存货编码.toLowerCase().includes(kw)) ||
-                                 (s.存货名称 && s.存货名称.toLowerCase().includes(kw)) ||
-                                 (s.规格型号 && s.规格型号.toLowerCase().includes(kw)));
+      list = list.filter(s => (s.存货编码 && s.存货编码.toLowerCase().includes(kw)) ||
+                              (s.存货名称 && s.存货名称.toLowerCase().includes(kw)) ||
+                              (s.规格型号 && s.规格型号.toLowerCase().includes(kw)));
     }
-    return query.toArray();
+    return list;
   },
 
   // ===== 库存预警 =====
+  // 🟢 v227.52 P0：走 getRows() 缓存
   async getInventoryAlerts(filter = {}) {
-    let query = db.inventoryAlerts.toCollection();
+    let list = await this.getRows('inventoryAlerts');
     if (filter.补货值 !== undefined) {
-      query = query.filter(a => (filter.补货值 ? (a.补货值 && a.补货值 > 0) : (!a.补货值 || a.补货值 <= 0)));
+      list = list.filter(a => (filter.补货值 ? (a.补货值 && a.补货值 > 0) : (!a.补货值 || a.补货值 <= 0)));
     }
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(a => (a.存货名称 && a.存货名称.toLowerCase().includes(kw)) ||
-                                 (a.存货编码 && a.存货编码.toLowerCase().includes(kw)));
+      list = list.filter(a => (a.存货名称 && a.存货名称.toLowerCase().includes(kw)) ||
+                              (a.存货编码 && a.存货编码.toLowerCase().includes(kw)));
     }
-    return query.toArray();
+    return list;
   },
 
   async getAlertStats() {
@@ -372,16 +446,17 @@ const DataStore = {
   // ===== 订货核对 =====
 
   // ===== 合同价格 =====
+  // 🟢 v227.52 P0：走 getRows() 缓存
   async getPricing(filter = {}) {
-    let query = db.pricing.toCollection();
-    if (filter.供应商) query = query.filter(p => p.供应商 === filter.供应商);
-    if (filter.类型) query = query.filter(p => p.类型 === filter.类型);
+    let list = await this.getRows('pricing');
+    if (filter.供应商) list = list.filter(p => p.供应商 === filter.供应商);
+    if (filter.类型) list = list.filter(p => p.类型 === filter.类型);
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(p => (p.存货名称 && p.存货名称.toLowerCase().includes(kw)) ||
-                                 (p.供应商 && p.供应商.toLowerCase().includes(kw)));
+      list = list.filter(p => (p.存货名称 && p.存货名称.toLowerCase().includes(kw)) ||
+                              (p.供应商 && p.供应商.toLowerCase().includes(kw)));
     }
-    return query.toArray();
+    return list;
   },
 
   async getPricingTypes() {
@@ -390,52 +465,53 @@ const DataStore = {
   },
 
   // ===== 低周转 =====
+  // 🟢 v227.52 P0：走 getRows() 缓存
   async getLowTurnover(filter = {}) {
-    let query = db.lowTurnover.toCollection();
+    let list = await this.getRows('lowTurnover');
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(l => (l.存货名称 && l.存货名称.toLowerCase().includes(kw)));
+      list = list.filter(l => (l.存货名称 && l.存货名称.toLowerCase().includes(kw)));
     }
-    return query.toArray();
+    return list;
   },
 
   // ===== 违约台账 =====
+  // 🟢 v227.52 P0：走 getRows() 缓存
   async getBreachRecords(filter = {}) {
-    let query = db.breach.toCollection();
-    if (filter.公司名称) query = query.filter(b => b.公司名称 === filter.公司名称);
+    let list = await this.getRows('breach');
+    if (filter.公司名称) list = list.filter(b => b.公司名称 === filter.公司名称);
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(b => (b.公司名称 && b.公司名称.toLowerCase().includes(kw)));
+      list = list.filter(b => (b.公司名称 && b.公司名称.toLowerCase().includes(kw)));
     }
-    return query.toArray();
+    return list;
   },
 
   // ===== 出库管理 =====
+  // 🟢 v227.52 P0：走 getRows() 缓存 + 内存分页（slice）
   async getOutbound(filter = {}, page = 1, pageSize = 20) {
-    let query = db.outbound.toCollection();
-    if (filter.出库单号) query = query.filter(o => o.出库单号 === filter.出库单号);
-    if (filter.项目名称) query = query.filter(o => o.项目名称 === filter.项目名称);
+    let list = await this.getRows('outbound');
+    if (filter.出库单号) list = list.filter(o => o.出库单号 === filter.出库单号);
+    if (filter.项目名称) list = list.filter(o => o.项目名称 === filter.项目名称);
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      query = query.filter(o => (o.出库单号 && o.出库单号.toLowerCase().includes(kw)) ||
-                                 (o.存货编码 && o.存货编码.toLowerCase().includes(kw)) ||
-                                 (o.存货名称 && o.存货名称.toLowerCase().includes(kw)) ||
-                                 (o.领用人员 && o.领用人员.toLowerCase().includes(kw)));
+      list = list.filter(o => (o.出库单号 && o.出库单号.toLowerCase().includes(kw)) ||
+                              (o.存货编码 && o.存货编码.toLowerCase().includes(kw)) ||
+                              (o.存货名称 && o.存货名称.toLowerCase().includes(kw)) ||
+                              (o.项目名称 && o.项目名称.toLowerCase().includes(kw)));
     }
     if (filter.startDate || filter.endDate) {
-      query = query.filter(o => {
+      list = list.filter(o => {
         if (!o.出库时间) return false;
         if (filter.startDate && o.出库时间 < filter.startDate) return false;
         if (filter.endDate && o.出库时间 > filter.endDate) return false;
         return true;
       });
     }
-    const total = await query.count();
-    if (pageSize === 'all') {
-      const items = await query.toArray();
-      return { items, total, page: 1, pageSize: 'all', totalPages: 1 };
-    }
-    const items = await query.offset((page - 1) * pageSize).limit(pageSize).toArray();
+    const total = list.length;
+    if (pageSize === 'all') return { items: list, total, page: 1, pageSize: 'all', totalPages: 1 };
+    const start = (page - 1) * pageSize;
+    const items = list.slice(start, start + pageSize);
     return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   },
 
@@ -491,7 +567,7 @@ const DataStore = {
     const needRestockQty = needRestock.reduce((sum, a) => sum + (parseFloat(a.在途订单) || 0), 0);
 
     const ordersAll = await this.getRows('orders');
-    const totalOrderAmount = ordersAll.reduce((sum, o) => sum + (parseFloat(o.原币价税合计) || 0), 0);
+    const totalOrderAmount = TableUtils.sumMoney(ordersAll, '原币价税合计'); // 🟢 AUDIT-003 整数分聚合
 
     const pendingInbound = ordersAll.filter(o => parseFloat(o.未入库量) > 0).length;
 
@@ -525,9 +601,10 @@ const DataStore = {
 
     // 年度供货总金额（当年入库记录的 原币价税合计 求和）
     const y = now.getFullYear();
-    const yearInboundAmount = (await this.getRows('inbound'))
-      .filter(i => i.入库日期 && new Date(i.入库日期).getFullYear() === y)
-      .reduce((sum, i) => sum + (parseFloat(i.原币价税合计) || 0), 0);
+    const yearInboundAmount = TableUtils.sumMoney(
+      (await this.getRows('inbound')).filter(i => i.入库日期 && new Date(i.入库日期).getFullYear() === y),
+      '原币价税合计'
+    ); // 🟢 AUDIT-003 整数分聚合
 
     return {
       supplierCount: suppliers,
@@ -606,7 +683,7 @@ const DataStore = {
           if (oname && (oname + '|' + ospec).replace(/\s+/g, '') === nameKey) return true;
         }
         return false;
-      }).toArray();
+      }).limit(31).toArray();
       // 🟢 v201 + O8：编码/规格双路均未命中时，按「存货名称」精确兜底（编码或规格缺失场景仍能关联）
       //   🐛 修复：兜底**必须要求订单的「存货编号」为空**——否则会把"有编号 + 名称相同但规格不同"
       //         的不同物料（如同名不同规格的"三通 100" / "三通 80"）误关到本档案。
@@ -620,7 +697,7 @@ const DataStore = {
             const onum  = o.存货编号 == null ? '' : String(o.存货编号).trim();
             // v201 修复：必须有"名称完全相等" + "存货编号为空" 才兜底
             return oname && oname === n && !onum;
-          }).toArray();
+          }).limit(31).toArray();
         }
       }
       return matched.slice(0, 30);
@@ -702,5 +779,206 @@ const DataStore = {
       totals: { stock: stockRows.length, supplier: supplierRows.length, order: ordersRows.length },
       _stockRows: stockRows, _supplierRows: supplierRows
     };
+  },
+
+  // ===== 盘点记录数据层（v215 新增 · 独立表）=====
+  // 说明：stocktake_records 刻意不进 DataLoader.TABLES（云同步 10 表），也不在 clearAll() 清空清单内，
+  //      因此「重新导入数据」不会误删盘点记录、云端整包覆盖也不会污染它。
+  //      读取走 getRows 表缓存，写入一律经 write() 统一入口以保证缓存失效。
+
+  // 读取全部盘点记录（带缓存）
+  async getStocktakeRecords() {
+    return (await this.getRows('stocktake_records')) || [];
+  },
+
+  // 批量追加盘点记录（返回写入条数）
+  async addStocktakeRecords(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return 0;
+    await this.write('stocktake_records', () => db.stocktake_records.bulkAdd(rows));
+    return rows.length;
+  },
+
+  // 删除单条（按主键 id）
+  async deleteStocktakeRecord(id) {
+    await this.write('stocktake_records', () => db.stocktake_records.delete(id));
+  },
+
+  // v218：放弃盘点 —— 删除指定批次下某盘点人的全部记录（含草稿/补0/实盘），返回删除条数
+  async deleteStocktakeRecordsBySheetAndCounter(sheetId, counter) {
+    const rows = (await this.getStocktakeRecords()).filter(r =>
+      r.sheetId === sheetId && String(r.盘点人 || '').trim() === String(counter).trim());
+    const ids = rows.map(r => r.id).filter(x => x != null);
+    // 一次性 bulkDelete（经 write 包装，避免逐条 delete 在 Dexie 循环里漏删）
+    if (ids.length) await this.write('stocktake_records', () => db.stocktake_records.bulkDelete(ids));
+    return ids.length;
+  },
+
+  // 局部更新单条（用于「作废/取消作废/修正」；盘点记录是追加型，正常流程不改已存记录）
+  async updateStocktakeRecord(id, patch) {
+    await this.write('stocktake_records', () => db.stocktake_records.update(id, patch));
+  },
+
+  // 清空全部盘点记录（仅供调试/重置，业务层慎用）
+  async clearStocktakeRecords() {
+    await this.write('stocktake_records', () => db.stocktake_records.clear());
+  },
+
+  // 条件查询（内存过滤：盘点记录量级远小于入库表 24405 行，无需额外索引）
+  async queryStocktakeRecords(filter = {}) {
+    let rows = await this.getStocktakeRecords();
+    const eq = (v, t) => String(v == null ? '' : v).trim() === String(t);
+    if (filter.存货编码) rows = rows.filter(r => eq(r.存货编码, filter.存货编码));
+    if (filter.盘点人) rows = rows.filter(r => eq(r.盘点人, filter.盘点人));
+    if (filter.盘点类别) rows = rows.filter(r => r.盘点类别 === filter.盘点类别);
+    if (filter.sheetId) rows = rows.filter(r => r.sheetId === filter.sheetId);
+    if (filter.voided !== undefined) rows = rows.filter(r => !!r.voided === !!filter.voided);
+    return rows;
+  },
+
+  // ===== v217 盘点任务分派 / 批次汇总（localStorage 封装，绝不碰 Dexie/DB_VERSION）=====
+  _lsGet(key, def) { try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(def)); } catch (e) { return def; } },
+  _lsSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {} },
+
+  // —— 任务分派 ——
+  // 🟢 v225.2 墓碑机制：任务由「管理员设备」产生，靠云端 settings 通道同步到「盘点人设备」。
+  //   删除必须可传播 —— 否则管理员取消分派后，盘点人设备上的任务永远消不掉（僵尸任务，
+  //   pull 只遍历 remote 的 key，本地多出来的那份没人管，用户会看到已被取消的任务还能进）。
+  //   故删除不物理删，改为写墓碑 {deleted:true, updatedAt}，随 raw 一起上云。
+  //   对外 getStocktakeTasks() 只返回活任务；同步通道一律走 _tasksRaw()（含墓碑）。
+  _tasksRaw() {
+    const raw = this._lsGet('wb_stocktake_tasks', {});
+    return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  },
+  getStocktakeTasks() {
+    const raw = this._tasksRaw();
+    const out = {};
+    Object.keys(raw).forEach(k => {
+      const t = raw[k];
+      if (!t || typeof t !== 'object') return;
+      if (t.deleted) return;          // 墓碑：已删除，对外不可见
+      if (!t.taskId) return;
+      out[k] = t;
+    });
+    return out;
+  },
+  async saveStocktakeTask(task) {
+    const all = this._tasksRaw();
+    all[task.taskId] = task;
+    this._lsSet('wb_stocktake_tasks', all);
+    // 云端：复用 settings 通道（与 keepers 同模式；不碰 stocktake.json 的 tasks，避免与结束时的 taskPatch 冲突）
+    // v225.2：推 raw（含墓碑），否则本机的删除事实会被抹掉，其他设备上的僵尸任务原地复活。
+    await this._pushStocktakeTasksToCloud();
+    return task;
+  },
+  // skipPush=true 供批量删除使用（先逐个写墓碑，最后统一推一次，避免 N 次网络写）
+  async deleteStocktakeTask(taskId, opts) {
+    const all = this._tasksRaw();
+    if (!all[taskId]) return;
+    all[taskId] = { taskId: taskId, deleted: true, updatedAt: new Date().toISOString() };
+    this._lsSet('wb_stocktake_tasks', all);
+    if (!(opts && opts.skipPush)) await this._pushStocktakeTasksToCloud();
+  },
+  // 统一的任务上云出口（供 save/delete/作废批次/取消分派复用，保证推的一定是含墓碑的 raw）
+  async _pushStocktakeTasksToCloud() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+      // 🟢 v227.16：离线时入队，联网后由 StocktakeModule._flushCloudQueue 补推（仓库弱网常态）
+      try { this._enqueueCloud('stocktakeTasks', this._tasksRaw()); } catch (e) {}
+      return false;
+    }
+    if (typeof SyncManager.setSetting !== 'function') return false;
+    // 🟢 v225.2：settings 通道是整包覆盖（见 sync.js AUDIT-303），任一台设备写入都会把
+    //   其他设备刚写入的任务整包抹掉 —— 「这边分派那边却看不到」的相悖状态根源之一。
+    //   故先拉一次云端合并到本地，再整包推「并集」，写上去的一定是全量而非本机子集。
+    //   pull 不调 push（无递归）；合并以 updatedAt 较新者胜，本机刚写的墓碑不会被云端旧活任务误复活。
+    try { await this.pullStocktakeTasksFromCloud(); } catch (e) {}
+    try { await SyncManager.setSetting('stocktakeTasks', this._tasksRaw()); return true; }
+    catch (e) { try { this._enqueueCloud('stocktakeTasks', this._tasksRaw()); } catch (_) {} return false; }
+  },
+  // 🟢 v227.16：仓库离线容错 —— 跨设备 key-value 推送本地待推队列（与 StocktakeModule 共用 key）
+  _enqueueCloud(key, value) {
+    try {
+      const q = JSON.parse(localStorage.getItem('wb_stocktake_cloud_q') || '[]') || [];
+      const i = q.findIndex(x => x.key === key);
+      const item = { key, value, ts: Date.now() };
+      if (i >= 0) q[i] = item; else q.push(item);
+      localStorage.setItem('wb_stocktake_cloud_q', JSON.stringify(q));
+    } catch (e) { /* 忽略 */ }
+  },
+  getTasksBySheet(sheetId) {
+    const all = this.getStocktakeTasks();
+    return Object.keys(all).map(k => all[k]).filter(t => t.sheetId === sheetId);
+  },
+  getMyOpenTasks(counter) {
+    const c = String(counter || '').trim();
+    const all = this.getStocktakeTasks();
+    return Object.keys(all).map(k => all[k]).filter(t => t && !t.deleted && String(t.counter || '').trim() === c && t.status === 'open');
+  },
+
+  // 从云端 settings 通道拉取他人分派的任务并合并到本地
+  // 合并而非覆盖：本地已有的任务以 updatedAt 较新者胜，避免回退刚改的状态（审查 #6 同款风险）
+  // 🟢 v225.2：remote 的墓碑会覆盖本地活任务（管理员取消分派 → 盘点人设备同步撤销）；
+  //   反向 remote 有更新的活任务时本地墓碑被清（取消后重新分派同一区间 → 正常复活）。
+  async pullStocktakeTasksFromCloud() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return 0;
+    if (typeof SyncManager.getSetting !== 'function') return 0;
+    let remote = null;
+    try { remote = await SyncManager.getSetting('stocktakeTasks'); } catch (e) { return 0; }
+    if (!remote || typeof remote !== 'object' || Array.isArray(remote)) return 0;
+    const all = this._tasksRaw();
+    let changed = 0;
+    const ts = (x) => { const d = Date.parse(x && x.updatedAt); return isNaN(d) ? 0 : d; };
+    Object.keys(remote).forEach(id => {
+      const r = remote[id];
+      if (!r || typeof r !== 'object' || !r.taskId || id !== r.taskId) return;
+      const old = all[id];
+      if (!old) { all[id] = r; changed++; return; }
+      if (ts(r) > ts(old)) {
+        const merged = Object.assign({}, old, r);
+        // remote 未带 deleted 字段 = 活任务 → 清掉本地墓碑，允许重新分派后复活
+        if (!('deleted' in r)) delete merged.deleted;
+        all[id] = merged; changed++;
+      }
+    });
+    if (changed) this._lsSet('wb_stocktake_tasks', all);
+    this._gcTaskTombstones();
+    return changed;
+  },
+  // 墓碑 GC：30 天前的删除标记物理清除，避免 localStorage 无限膨胀
+  _gcTaskTombstones() {
+    try {
+      const all = this._tasksRaw();
+      const now = Date.now(), TTL = 30 * 86400000;
+      let changed = false;
+      Object.keys(all).forEach(id => {
+        const t = all[id];
+        if (!t || !t.deleted) return;
+        const d = Date.parse(t.updatedAt);
+        if (isNaN(d) || (now - d > TTL)) { delete all[id]; changed = true; }
+      });
+      if (changed) this._lsSet('wb_stocktake_tasks', all);
+    } catch (e) {}
+  },
+
+  // —— 批次汇总快照 ——
+  getStocktakeBatches() { return this._lsGet('wb_stocktake_batches', {}); },
+  getStocktakeBatch(sheetId) { return this.getStocktakeBatches()[sheetId] || null; },
+  addStocktakeBatch(batch) {
+    const all = this.getStocktakeBatches();
+    all[batch.sheetId] = batch;
+    this._lsSet('wb_stocktake_batches', all);
+    return batch;
+  },
+
+  // v218：放弃盘点 —— 删除某批次的汇总快照（该批次已无其他盘点人记录时调用）
+  deleteStocktakeBatch(sheetId) {
+    const all = this.getStocktakeBatches();
+    delete all[sheetId];
+    this._lsSet('wb_stocktake_batches', all);
+  },
+
+  // —— 按批次查记录（供汇总聚合，不动 12 列字段）=====
+  async getStocktakeRecordsBySheet(sheetId) {
+    const rows = await this.getStocktakeRecords();
+    return (rows || []).filter(r => r.sheetId === sheetId);
   }
 };

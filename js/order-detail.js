@@ -33,7 +33,7 @@ window.OrderDetailModule = {
       content.innerHTML = `<div class="empty-state" style="padding:56px 20px;text-align:center;">
         <div class="empty-icon">📋</div>
         <div style="font-size:15px;margin-top:10px;color:var(--text-secondary);">未指定订单编号</div>
-        <button class="btn-secondary" onclick="App.back()">← 返回</button></div>`;
+        <button class="btn--ghost" onclick="App.back()">← 返回</button></div>`;
       return;
     }
 
@@ -129,7 +129,7 @@ window.OrderDetailModule = {
         if (stockKey) {
           const bar = document.createElement('div');
           bar.style.cssText = 'margin-top:14px;';
-          bar.innerHTML = `<button class="btn-secondary" onclick="App.openEntity('stock','${escAttr(String(stockKey))}')">📦 查看关联存货档案（${esc(main.存货名称)}）</button>`;
+          bar.innerHTML = `<button class="btn--ghost" onclick="App.openEntity('stock','${escAttr(String(stockKey))}')">📦 查看关联存货档案（${esc(main.存货名称)}）</button>`;
           content.appendChild(bar);
         }
       }

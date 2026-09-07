@@ -26,7 +26,7 @@ window.SupplierDetailModule = {
       content.innerHTML = `<div class="empty-state" style="padding:56px 20px;text-align:center;">
         <div class="empty-icon">🏭</div>
         <div style="font-size:15px;margin-top:10px;color:var(--text-secondary);">未指定供应商</div>
-        <button class="btn-secondary" onclick="App.back()">← 返回</button></div>`;
+        <button class="btn--ghost" onclick="App.back()">← 返回</button></div>`;
       return;
     }
 

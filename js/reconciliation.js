@@ -42,18 +42,24 @@ const ReconciliationModule = {
     if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
 
     content.innerHTML = `
-      <div class="filter-bar">
-        <select id="recSupplier">
+      <div class="filter-bar filter-bar-m" data-mod="rec">
+        <div class="fb-row fb-row--fields">
+          <div class="fb-field"><select id="recSupplier">
           <option value="">选择供应商</option>
           ${this.suppliers.map(s => `<option value="${escAttr(s)}" ${supplier === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
-        </select>
-        <input type="text" id="recStartDate" value="${escAttr(startDate)}" class="dp-input" placeholder="起始日期" readonly>
-        <span style="color:var(--text-secondary);">至</span>
-        <input type="text" id="recEndDate" value="${escAttr(endDate)}" class="dp-input" placeholder="结束日期" readonly>
-        <button class="glass-btn-3d" onclick="ReconciliationModule.shiftPrevMonth()" title="把两个日期的月份都 -1 并自动查询">📅 上个月</button>
-        <button class="glass-btn-3d" onclick="ReconciliationModule.shiftNextMonth()" title="把两个日期的月份都 +1 并自动查询">📅 下个月</button>
-        <button class="search-glass" onclick="ReconciliationModule.applyFilter()">查询</button>
-        <button class="secondary" onclick="ReconciliationModule.exportData()">📥 导出</button>
+        </select></div>
+        </div>
+        <div class="fb-row fb-row--date">
+          <div class="fb-field"><input type="text" id="recStartDate" value="${escAttr(startDate)}" class="filter-date dp-input" placeholder="起始日期" readonly></div>
+          <span class="fb-sep">至</span>
+          <div class="fb-field"><input type="text" id="recEndDate" value="${escAttr(endDate)}" class="filter-date dp-input" placeholder="结束日期" readonly></div>
+        </div>
+        <div class="fb-row fb-row--buttons">
+          <button class="glass-btn-3d" onclick="ReconciliationModule.shiftPrevMonth()" title="把两个日期的月份都 -1 并自动查询">📅 上个月</button>
+          <button class="glass-btn-3d" onclick="ReconciliationModule.shiftNextMonth()" title="把两个日期的月份都 +1 并自动查询">📅 下个月</button>
+          <button class="btn--primary" onclick="ReconciliationModule.applyFilter()">查询</button>
+          <button class="btn--ghost" onclick="ReconciliationModule.exportData()">📥 导出</button>
+        </div>
       </div>
 
       <div id="recSummary"></div>
@@ -70,6 +76,9 @@ const ReconciliationModule = {
       DatePicker.mount('recStartDate');
       DatePicker.mount('recEndDate');
     }
+
+    // 🟢 v227.74：移动端筛选栏字段行配平（≤768px 按最长选项动态分配 flex-grow）
+    if (window.FilterLayout) FilterLayout.balanceAll();
 
     await this.applyFilter(myToken);
   },
@@ -292,7 +301,7 @@ const ReconciliationModule = {
         const d = new Date(i.入库日期);
         return d.getFullYear() === m.year && (d.getMonth() + 1) === m.month;
       });
-      return Math.round(matched.reduce((s, i) => s + (parseFloat(i.原币价税合计) || 0), 0) * 100) / 100;
+      return TableUtils.sumMoney(matched, '原币价税合计'); // 🟢 AUDIT-003 整数分聚合（等价 Math.round(...*100)/100，但避免逐项漂移）
     });
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
