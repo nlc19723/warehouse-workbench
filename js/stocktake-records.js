@@ -163,6 +163,7 @@ const StocktakeRecordModule = {
         : `<span style="${color}font-weight:600;">${this._num(r.差异量)}</span>`;
       const rid = escAttr(r.recId);
       const checked = this.selected.has(r.recId) ? 'checked' : '';
+      // 🟢 v227.93 P4：操作列按钮溢出修复 —— 改为纵向 flex（窄屏自适应），按钮 padding 收紧，避免横向撑出可视区
       return `<tr${this.selected.has(r.recId) ? ' style="background:rgba(220,38,38,.05);"' : ''}>
         <td style="text-align:center;"><input type="checkbox" class="stRecChk" data-rid="${rid}" ${checked}
           onchange="StocktakeRecordModule.toggleOne(this)"></td>
@@ -179,7 +180,7 @@ const StocktakeRecordModule = {
         <td>${esc(r.开始日期 || '')}</td>
         <td>${esc(r.结束日期 || '')}</td>
         <td>${esc(r.备注 || '')}</td>
-        <td style="white-space:nowrap;">${r.voided
+        <td class="stRec-opcell">${r.voided
           ? `<button class="btn--ghost" onclick="StocktakeRecordModule.unvoid('${escAttr(r.recId)}')">恢复</button>`
           : `<button class="btn--ghost" onclick="StocktakeRecordModule.voidRecord('${escAttr(r.recId)}')">作废</button>
              <button class="btn--ghost" onclick="StocktakeRecordModule.editRecord('${escAttr(r.recId)}')">修正</button>`}
@@ -197,7 +198,8 @@ const StocktakeRecordModule = {
                 onchange="StocktakeRecordModule.toggleAll(this)" title="全选/取消全选"></th>
               <th>盘点号</th><th>存货编码</th><th>存货名称</th><th>规格型号</th><th>现存量</th>
               <th>盘点数量</th><th>差异量</th><th>盘点日期</th><th>盘点人</th>
-              <th>盘点类别</th><th>开始日期</th><th>结束日期</th><th>备注</th><th>操作</th>
+              <th>盘点类别</th><th>开始日期</th><th>结束日期</th><th>备注</th>
+              <th class="stRec-opcell">操作</th>
             </tr>
           </thead>
           <tbody>${body}</tbody>

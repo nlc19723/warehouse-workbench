@@ -96,7 +96,10 @@ const StocktakeModule = {
       // 🟢 v227：有「新」分派给自己的季度任务 → 进模块即弹窗提示（同一任务只提示一次）
       this._notifyNewTasks();
       // 🟢 v227：有未结束的盘点 → 进模块即提醒必须点【盘点结束】（v226 需求5 的承诺）。
-      this._notifyUnfinished();
+      // 🟢 v227.93 P3-3：若本次进入是"对往期盘点继续修改"（_editHistoricalDaily 路径），跳过此提示——
+      //   修改行为本身会把当前批次标为未结束（_markOpenSession），若再弹未结束提示即自我打脸。
+      if (!this._isEditingHistorical) this._notifyUnfinished();
+      this._isEditingHistorical = false;
     }
   },
 
@@ -657,8 +660,12 @@ const StocktakeModule = {
   /**
    * 🟢 v227.3：点击【修改】—— 进入往期日常盘点号，载入历史记录并切到可编辑填表。
    *   复用 _viewClosedDaily 的取数路径，但 sheet 设为可写状态（保留已盘数据可改）。
+   * 🟢 v227.93 P3-3：进入前打 _isEditingHistorical 标记，让根 render() 跳过"未结束盘点"提示（修改行为本身
+   *   会写新的 OPEN_SESSION 标记，若再弹未结束提示即自我打脸）。
    */
   async _editHistoricalDaily() {
+    // 🟢 v227.93 P3-3：标记本次 render 是"修改往期"路径（render 是异步的，标记提前到调用前）
+    this._isEditingHistorical = true;
     const list = this._dailyList || [];
     const info = list[this._dailyListIdx || 0];
     if (!info || (info.count || 0) === 0) { this.toast('当前盘点号暂无历史记录'); return; }

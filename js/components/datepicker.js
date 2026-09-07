@@ -195,9 +195,11 @@ const DatePicker = (() => {
     }
 
     function bindDay() {
-      pop.querySelectorAll('.dp-btn').forEach(b => b.addEventListener('click', () => {
+      pop.querySelectorAll('.dp-btn').forEach(b => b.addEventListener('click', (e) => {
+        e.stopPropagation(); // 防止 document mousedown 监听误关弹窗
         const a = b.dataset.act;
-        // 加减月份：保持当前 day，超出目标月最大天数时自动夹紧（避免 1/31 → 2/31 溢出成 3/3）
+        // 加减月份：仅切视图，**不**修改 input.value、不触发 change（避免业务侧 applyFilter 重渲把 input 替换掉导致弹窗消失）。
+        //   只有点具体日期 / 今天 / 清除 才算"确认"，那时才写值并 close。
         if (a === 'pm' || a === 'nm') {
           const anchor = selected || view; // 优先用已选日（用户视角）
           const newMonth = a === 'pm' ? anchor.getMonth() - 1 : anchor.getMonth() + 1;
@@ -207,25 +209,25 @@ const DatePicker = (() => {
           const finalDay = Math.min(anchor.getDate(), lastDayOfTarget);
           selected = new Date(targetYear, targetMonth0, finalDay);
           view = new Date(selected);
-          // 同步 input.value 并触发 change（让业务筛选/校验照常工作）
-          input.value = toISO(selected);
-          input.dispatchEvent(new Event('change', { bubbles: true }));
         }
         renderDay();
       }));
-      pop.querySelector('.dp-title').addEventListener('click', () => { renderMonthYear(); });
-      pop.querySelectorAll('.dp-day[data-d]').forEach(d => d.addEventListener('click', () => {
+      pop.querySelector('.dp-title').addEventListener('click', (e) => { e.stopPropagation(); renderMonthYear(); });
+      pop.querySelectorAll('.dp-day[data-d]').forEach(d => d.addEventListener('click', (e) => {
+        e.stopPropagation();
         selected = new Date(view.getFullYear(), view.getMonth(), +d.dataset.d);
         input.value = toISO(selected);
         input.dispatchEvent(new Event('change', { bubbles: true }));
         close();
       }));
-      pop.querySelector('[data-act="clear"]').addEventListener('click', () => {
+      pop.querySelector('[data-act="clear"]').addEventListener('click', (e) => {
+        e.stopPropagation();
         input.value = ''; selected = null;
         input.dispatchEvent(new Event('change', { bubbles: true }));
         close();
       });
-      pop.querySelector('[data-act="today"]').addEventListener('click', () => {
+      pop.querySelector('[data-act="today"]').addEventListener('click', (e) => {
+        e.stopPropagation();
         selected = new Date(); view = new Date(selected);
         input.value = toISO(selected);
         input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -234,15 +236,17 @@ const DatePicker = (() => {
     }
 
     function bindMonthYear() {
-      pop.querySelectorAll('.dp-year').forEach(el => el.addEventListener('click', () => {
+      pop.querySelectorAll('.dp-year').forEach(el => el.addEventListener('click', (e) => {
+        e.stopPropagation();
         view.setFullYear(+el.dataset.y);
         renderMonthYear();
       }));
-      pop.querySelectorAll('.dp-month').forEach(el => el.addEventListener('click', () => {
+      pop.querySelectorAll('.dp-month').forEach(el => el.addEventListener('click', (e) => {
+        e.stopPropagation();
         view.setMonth(+el.dataset.mi);
         renderDay();
       }));
-      pop.querySelector('[data-act="back"]')?.addEventListener('click', () => { renderDay(); });
+      pop.querySelector('[data-act="back"]')?.addEventListener('click', (e) => { e.stopPropagation(); renderDay(); });
     }
 
     function open() { place(); renderDay(); pop.style.display = 'block'; input.classList.add('open'); }

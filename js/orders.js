@@ -41,7 +41,7 @@ const OrdersModule = {
     if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
 
     content.innerHTML = `
-      <div class="filter-bar" style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;padding:0;align-items:flex-start;">
+      <div class="filter-bar filter-bar-m" style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;padding:0;align-items:stretch;">
         <div class="filter-row filter-row-main" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
           <input type="text" id="orderKw" class="filter-search-short" placeholder="搜索订单编号、供应商、存货名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')OrdersModule.applyFilter()">
           <div class="filter-row-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:4px;">
@@ -49,25 +49,25 @@ const OrdersModule = {
             <span class="filter-sep">至</span>
             <input type="text" id="orderEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="OrdersModule.onDateChange()" readonly>
           </div>
-          <div class="filter-row-buttons" style="display:flex;gap:6px;">
+          <div class="filter-row-selects" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
+            <select id="orderSupplier" title="按供应商筛选" style="min-width:120px;flex:1 1 140px;max-width:220px;">
+              <option value="">全部供应商</option>
+              ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+            </select>
+            <select id="orderProject" title="按项目筛选" style="min-width:120px;flex:1 1 140px;max-width:300px;">
+              <option value="">全部项目</option>
+              ${projects.map(p => `<option value="${escAttr(p)}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+            </select>
+            <select id="orderStatus" title="按审批状态筛选" style="min-width:110px;flex:0 0 auto;">
+              <option value="">全部状态</option>
+              ${statuses.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.审批状态 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="filter-row-buttons" style="display:flex;gap:6px;margin-left:auto;">
             <button class="btn--primary" onclick="OrdersModule.applyFilter()">筛选</button>
             <button class="btn--ghost" onclick="OrdersModule.resetFilter()">重置</button>
             <button class="btn--ghost" onclick="OrdersModule.exportData()">📥 导出</button>
           </div>
-        </div>
-        <div class="filter-row filter-row-selects fb-row--fields" style="display:flex;gap:10px;margin:0;padding:0;">
-          <select id="orderSupplier" title="按供应商筛选" style="max-width:200px;">
-            <option value="">全部供应商</option>
-            ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
-          </select>
-          <select id="orderProject" title="按项目筛选" style="max-width:300px;">
-            <option value="">全部项目</option>
-            ${projects.map(p => `<option value="${escAttr(p)}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
-          </select>
-          <select id="orderStatus" title="按审批状态筛选">
-            <option value="">全部状态</option>
-            ${statuses.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.审批状态 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
-          </select>
         </div>
       </div>
 
