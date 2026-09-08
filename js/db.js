@@ -225,7 +225,8 @@ const DataStore = {
     try {
       await db.transaction('rw',
         db.suppliers, db.orders, db.inbound, db.stock, db.inventoryAlerts,
-        db.orderChecks, db.pricing, db.lowTurnover, db.breach, db.outbound, db.meta,
+        db.orderChecks, db.pricing, db.lowTurnover, db.breach, db.outbound,
+        db.tempOutbound, db.meta,
         async () => {
           await db.suppliers.clear();
           await db.orders.clear();
@@ -237,12 +238,32 @@ const DataStore = {
           await db.lowTurnover.clear();
           await db.breach.clear();
           await db.outbound.clear();
+          await db.tempOutbound.clear();
           await db.meta.delete('dataImported');
         });
       this.invalidateAll();
     } catch (e) {
       // 事务失败（如存储配额/并发写入）：异常上浮，避免「半清库」后继续导入造成数据口径不一致。
       console.error('[clearAll] 事务清空失败（已回滚）：', e);
+      throw e;
+    }
+  },
+
+  // 🔵 v227.97：只清空「工作表」（不含 outbound / tempOutbound 这两个设置包表）。
+  //   工作包还原 / 全量推送 / 全量导入 / 导入基准 都改用它，绝不误清用户从 settings 包管理的出库单。
+  //   WORK_TABLES 取自 DataLoader（运行时已加载）；兜底字面量保证 DataLoader 未就绪也能清工作表。
+  async clearWorkTables() {
+    const work = (typeof DataLoader !== 'undefined' && DataLoader.WORK_TABLES)
+      ? DataLoader.WORK_TABLES
+      : ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach'];
+    try {
+      await db.transaction('rw', work.concat(['meta']), async () => {
+        for (const t of work) { if (db[t]) await db[t].clear(); }
+        await db.meta.delete('dataImported');
+      });
+      this.invalidateAll();
+    } catch (e) {
+      console.error('[clearWorkTables] 事务清空失败（已回滚）：', e);
       throw e;
     }
   },
@@ -258,10 +279,31 @@ const DataStore = {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     return SyncManager.setSetting(key, value);
   },
-  // 出库列表：录入/删除后实时同步到设置数据（跨设备长期记忆）
+  // 出库列表：录入/删除后实时同步到「设置数据包」settings.json（出库单只走这一条通道）
   async syncOutboundToSettings() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     const rows = await this.getRows('outbound');
+    if (!Array.isArray(rows) || !rows.length) return false;
+    // 🔵 v227.97：同包内并集保护——先拉云端 outbound_list，按业务键(出库单号|存货编码)合并，
+    //   避免「本地被工作包还原清成少量/空」后，一同步就把云端更多条覆盖掉。
+    //   仅在 settings 这一条通道内合并，不跨包、不写 data.json，杜绝污染。
+    try {
+      const cloud = await SyncManager.getSetting('outbound_list');
+      if (Array.isArray(cloud) && cloud.length) {
+        const seen = new Set();
+        const merged = [];
+        for (const r of cloud.concat(rows)) {
+          const key = (r['出库单号'] || '') + '|' + (r['存货编码'] || '');
+          if (seen.has(key)) continue;
+          seen.add(key);
+          merged.push(r);
+        }
+        if (merged.length > rows.length) {
+          console.log(`[设置] 出库单同步做同包并集保护：本地 ${rows.length} + 云端 ${cloud.length} → 合并 ${merged.length} 条`);
+          return SyncManager.setSetting('outbound_list', merged);
+        }
+      }
+    } catch (e) { console.warn('出库单同包合并探测跳过:', e); }
     return SyncManager.setSetting('outbound_list', rows);
   },
   // 🟢 v227.77：临时出库（侧边栏「临时出库」模块）独立云端同步 key
@@ -270,7 +312,9 @@ const DataStore = {
     const rows = await this.getRows('tempOutbound');
     return SyncManager.setSetting('temp_outbound_list', rows);
   },
-  // 启动恢复：用云端设置里的出库列表覆盖本地（若有且更新）
+  // 启动恢复：用「设置数据包」settings.json 的 outbound_list 覆盖本地（出库单恢复路径 = 上传路径）
+  // 🔵 v227.97：出库单恢复【只走 settings.json】，绝不读工作包 data.json——
+  //   工作包不含出库单，混用会污染/覆盖设置包数据，违背「各包各管、恢复路径对应上传路径」。
   async restoreOutboundFromSettings() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     try {

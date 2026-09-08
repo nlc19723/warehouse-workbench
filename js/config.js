@@ -104,7 +104,7 @@ window.AppConfig = {
     //   本值仅作为脚本加载失败/无 ?v= 时的兜底。
     // 🟢 v201：二维码白框上下边与基础信息白框严格对齐
     // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
-    version: 'v227.96',
+    version: 'v227.97',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）

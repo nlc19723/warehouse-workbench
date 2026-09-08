@@ -25,6 +25,17 @@ const DataLoader = {
   // 注：materialClass / monthlyStats 自 v1 起从未被任何 loader 写入，属死代码，已从同步范围移除
   TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover', 'breach', 'outbound', 'tempOutbound'],
 
+  // 🔵 数据包边界（v227.97 关键约束）：
+  //   · 出库单 outbound / 临时出库 tempOutbound 归「设置数据包」settings.json 管理
+  //     （对应字段 outbound_list / temp_outbound_list），上传与恢复都只走这一条通道。
+  //   · 它们【绝不】进入「工作数据包」data.json，避免出现「一份数据落在两个包」造成污染。
+  //   · 工作包（data.json / base.json）及其还原(loadBundleFromCloud)、推送(pushAllToCloud)
+  //     只操作下方 WORK_TABLES，永不触碰 SETTING_TABLES。
+  SETTING_TABLES: ['outbound', 'tempOutbound'],
+  get WORK_TABLES() {
+    return this.TABLES.filter(t => this.SETTING_TABLES.indexOf(t) < 0);
+  },
+
   // 核心必填表（用于"完整性校验"）：这些表为空会直接导致页面/模块空白，必须非空。
   // breach / outbound / materialClass / monthlyStats 可能合法为空（无违约记录、尚未录入出库单等），
   // 不应作为强制条件，否则会误判"数据不完整"→ 每次刷新都强制重导、反复闪屏。
@@ -87,7 +98,7 @@ const DataLoader = {
       try {
         const baseBundle = await this._pullBaseWithTimeout(8000);
         if (baseBundle && baseBundle.tables && this._isBundleComplete(baseBundle)) {
-          await DataStore.clearAll();
+          await DataStore.clearWorkTables();   // 🔵 v227.97：仅清工作表，保留设置包(outbound)数据
           await new Promise(r => setTimeout(r, 300));
           showLoading('正在以云端基准数据打底...', { variant:'capsule' });
           await this.seedFromBase(baseBundle);
@@ -258,11 +269,16 @@ const DataLoader = {
     //   作为下次推送时的乐观锁基准；否则本机会以为自己站在最新数据上，把他人改动覆盖掉。
     if (bundle.savedAt) this._setCloudBase(bundle.savedAt);
     const tables = bundle.tables || {};
-    const allNames = this.TABLES.concat(['meta']);
+    // 🔵 v227.97：工作包还原只清/写 WORK_TABLES（不含 outbound/tempOutbound），
+    //    绝不触碰设置包表，避免工作包还原把用户从 settings 恢复出来的出库单冲掉（各包各管、互不污染）。
+    const workTables = this.WORK_TABLES;
+    const allNames = workTables.concat(['meta']);
     // 🟢 v209 AUDIT-304：清空 + 写入同事务，中途失败整体回滚（不再「全库清空」半截）
     await db.transaction('rw', allNames, async () => {
-      await DataStore.clearAll();   // 事务内清空，无 setTimeout（避免 Dexie 事务失活）
-      for (const name of this.TABLES) {
+      // 同事务内只清空工作表（不再清全部，保护设置包数据）
+      for (const name of workTables) { if (db[name]) await db[name].clear(); }
+      await db.meta.delete('dataImported');
+      for (const name of workTables) {
         const rows = Array.isArray(tables[name]) ? tables[name] : [];
         if (rows.length) {
           try {
@@ -285,7 +301,8 @@ const DataLoader = {
     if (!baseBundle || !baseBundle.tables) return false;
     const tables = baseBundle.tables || {};
     let wrote = 0;
-    for (const name of this.TABLES) {
+    // 🔵 v227.97：基准也只写 WORK_TABLES，出库单不进基准包（只走 settings）
+    for (const name of this.WORK_TABLES) {
       const rows = Array.isArray(tables[name]) ? tables[name] : [];
       if (rows.length) {
         try {
@@ -312,7 +329,8 @@ const DataLoader = {
     }
     try {
       const tables = {};
-      for (const name of this.TABLES) {
+      // 🔵 v227.97：工作包只收集 WORK_TABLES，出库单(outbound/tempOutbound)不进 data.json
+      for (const name of this.WORK_TABLES) {
         tables[name] = await db[name].toArray();
       }
       // 双版本滚动：把云端现有 bundle 的 tables 降级为 prevWork（上一份）
@@ -428,7 +446,8 @@ const DataLoader = {
     try {
       showLoading('正在打包基准数据并上传到云端...', { variant:'truck' });
       const tables = {};
-      for (const name of this.TABLES) {
+      // 🔵 v227.97：基准包只收 WORK_TABLES，出库单不进 base.json（只走 settings 包）
+      for (const name of this.WORK_TABLES) {
         tables[name] = await db[name].toArray();
       }
       const bundle = {
@@ -455,37 +474,15 @@ const DataLoader = {
     return ok;
   },
 
-  // 仅增量推送「出库」表到云端（不覆盖其他表）
-  // 用于出库单录入/删除后实时同步，分享链接打开即可看到最新出库数据
+  // 🔵 v227.97：出库单「只走设置数据包」settings.json（outbound_list），绝不写工作包 data.json。
+  //   旧的增量写 data.json 实现会与「工作包还原 / 全量推送」冲突造成跨包污染，已废弃重写。
+  //   本函数现统一委托 DataStore.syncOutboundToSettings（同名语义：把本地出库单同步到 settings 包）。
   async pushOutboundToCloud() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
-    try {
-      // 取本地最新 outbound
-      const outboundRows = await db.outbound.toArray();
-
-      // 从云端拉取现有 bundle（保留其他表的数据）
-      const existing = await SyncManager.pullData().catch(() => null);
-      if (existing && existing.tables) {
-        // 云端 bundle 可读：仅增量更新 outbound，保留其余表，节省带宽
-        const bundle = {
-          ...existing,
-          version: DB_VERSION,
-          savedAt: new Date().toISOString(),
-          tables: { ...existing.tables, outbound: outboundRows }
-        };
-        const ok = await SyncManager.pushData(bundle);
-        if (ok) console.log(`✅ [出库] 已单独同步 outbound 表到云端（${outboundRows.length} 条）`);
-        return ok;
-      }
-
-      // 云端拉取失败/不存在：绝不用“仅 outbound”的残缺 bundle 覆盖云端，
-      // 改为推送本地全量（完整），避免污染分享链接导致他人空白。
-      console.warn('[data-loader] 云端拉取失败，改为推送本地全量以避免残缺覆盖');
-      return await this.pushAllToCloud();
-    } catch (e) {
-      console.error('出库单独推送失败:', e);
-      return false;
+    if (typeof DataStore !== 'undefined' && typeof DataStore.syncOutboundToSettings === 'function') {
+      return DataStore.syncOutboundToSettings();
     }
+    return false;
   },
 
   // 🟢 v227.77：仅增量推送「临时出库」表到云端（独立 bundle key 'tempOutbound'，
@@ -565,11 +562,11 @@ const DataLoader = {
       }
       let baseBundle = await this._pullBaseWithTimeout(8000);
       if (baseBundle && baseBundle.tables && this._isBundleComplete(baseBundle)) {
-        // 🟢 v209 AUDIT-304：清空 + 垫底写入同事务（中途失败整体回滚，不残留半截基准）
-        await db.transaction('rw', this.TABLES.concat(['meta']), async () => {
-          await DataStore.clearAll();
-          await this.seedFromBase(baseBundle);
-        });
+          // 🟢 v209 AUDIT-304：清空 + 垫底写入同事务（中途失败整体回滚，不残留半截基准）
+          await db.transaction('rw', this.TABLES.concat(['meta']), async () => {
+            await DataStore.clearWorkTables();   // 🔵 v227.97：仅清工作表，保留设置包(outbound)
+            await this.seedFromBase(baseBundle);
+          });
         hideLoading();
         console.log('[data-loader] 已用云端基准数据垫底');
         return true;
@@ -628,7 +625,9 @@ const DataLoader = {
     ];
     let importErrors = [];
     await db.transaction('rw', ALL_TABLES, async () => {
-      await DataStore.clearAll();   // 事务内清空，无 setTimeout（避免 Dexie 事务在长 macrotask 后失活）
+      // 🔵 v227.97：全量 Excel 导入只清空「工作表」，保留 outbound/tempOutbound（归设置包），避免跨包污染
+      for (const name of this.WORK_TABLES) { if (db[name]) await db[name].clear(); }
+      await db.meta.delete('dataImported');
       for (const task of tasks) {
         try {
           showLoading(`正在导入${task.name}数据...`, { variant:'fluid' });
@@ -721,7 +720,7 @@ const DataLoader = {
     // 根据云端连接状态，动态调整按钮文案与提示（让用户明确按钮会做什么）
     const cloudOnline = (typeof SyncManager !== 'undefined') && !!SyncManager.isOnline;
     const btnIcon  = cloudOnline ? '📤' : '📥';
-    const btnText  = cloudOnline ? '上传并导入' : '仅导入本地';
+    const btnText  = cloudOnline ? '导入数据' : '仅导入本地';
     const btnTitle = cloudOnline
       ? '将本次导入数据同步到云端（覆盖云端工作数据）'
       : '云端未连接，本次仅导入到本地数据库';
@@ -754,10 +753,9 @@ const DataLoader = {
           }
         </div>
         <div class="btn-group" style="border-top:none;margin-top:6px;padding-top:0;display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
-          <button onclick="DataLoader.reimportFromBase()" class="btn--ghost" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">🔄 重新导入基准</button>
-          <button onclick="DataLoader.restorePrevWork()" class="btn--ghost" title="将云端上一份工作数据恢复为当前使用数据" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">♻️ 恢复上一份</button>
-          <button onclick="DataLoader.restoreFromCloudWork()" class="btn--ghost" title="直接从云端最新工作数据（data.json）恢复本地，绕过基准污染" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">☁️ 云端恢复</button>
-          <button onclick="DataLoader.reimportFromFile()" id="reimportUploadBtn" class="btn--primary" title="${btnTitle}" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">${btnIcon} ${btnText}</button>
+          <button onclick="DataLoader.reimportFromBase()" class="btn--ghost" style="flex:0 0 calc(33.333% - 7px);max-width:200px;padding:9px 0;font-size:12.5px;">🔄 导入基准</button>
+          <button onclick="DataLoader.showCloudRestoreChooser()" class="btn--ghost" title="查看云端备份（最新+上一份）并选择恢复哪一份" style="flex:0 0 calc(33.333% - 7px);max-width:200px;padding:9px 0;font-size:12.5px;">☁️ 云端恢复</button>
+          <button onclick="DataLoader.reimportFromFile()" id="reimportUploadBtn" class="btn--primary" title="${btnTitle}" style="flex:0 0 calc(33.333% - 7px);max-width:200px;padding:9px 0;font-size:12.5px;">${btnIcon} ${btnText}</button>
         </div>
       </div>
     `;
@@ -825,6 +823,113 @@ const DataLoader = {
     }
   },
 
+  // 🟢 v227.96：进入工作台「静默自动同步」——等价于「云端恢复（最新）」但不弹危险确认框。
+  // 仅当云端工作包比本机上次同步基线（_cloudBase）更新时才覆盖本地，避免误清本地未上传的改动。
+  // 满足"每次进入即拉取最新云端工作数据"的预期；GitHub 等全新设备（无基线）首次进入即自动拉满。
+  async autoSyncFromCloud() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+    try {
+      const bundle = await SyncManager.pullDataPrivate();
+      if (!bundle || !bundle.tables || !this._isBundleComplete(bundle)) return false;
+      const cloudTs = bundle.savedAt || null;
+      const base = this._cloudBase();
+      // 云端不比本地基线更新 → 不覆盖（保护本机刚推送或尚未上传的改动）
+      if (base && cloudTs && new Date(cloudTs) <= new Date(base)) return false;
+      // 云端核心表全空且本地已有数据 → 跳过，避免把本地清空成空
+      const stats = this._bundleStats ? this._bundleStats(bundle) : null;
+      if (stats && stats.populated === 0) {
+        const localCnt = await db.suppliers.count().catch(() => 0);
+        if (localCnt > 0) return false;
+      }
+      await this.loadBundleFromCloud(bundle); // 事务内清空+还原，静默无确认（内部已推进 _cloudBase）
+      console.log('[autoSync] 已从云端自动同步最新工作数据（savedAt=' + cloudTs + '）');
+      return true;
+    } catch (e) {
+      console.warn('[autoSync] 自动同步失败(已忽略):', e && e.message);
+      return false;
+    }
+  },
+
+  // 🟢 v227.95：☁️ 云端恢复选择器——合并「云端恢复（最新）」与「恢复上一份」为单一入口
+  // 云端 bundle 本就是双版本滚动（tables=最新，prevWork=上一份），此处只做"列表+分发"，
+  // 恢复逻辑复用 restoreFromCloudWork() / restorePrevWork()（均已验证），不重写。
+  async showCloudRestoreChooser() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+      WBModal.alert('请先连接云端后再使用「云端恢复」。\n在「⚙ 云配置」中连接 Supabase 后即可查看并恢复云端备份。');
+      return;
+    }
+    const modalBody = document.getElementById('modalBody');
+    const modalTitle = document.getElementById('modalTitle');
+    if (!modalBody || !modalTitle) return;
+    let bundle = null;
+    try {
+      showLoading('正在拉取云端备份列表...', { variant: 'capsule' });
+      bundle = await SyncManager.pullDataPrivate();
+      hideLoading();
+    } catch (e) {
+      hideLoading();
+      WBModal.alert('拉取云端备份失败：' + (e.message || e));
+      return;
+    }
+    const latest = (bundle && bundle.tables) ? bundle : null;
+    const prev = (bundle && bundle.prevWork && bundle.prevWork.tables) ? bundle.prevWork : null;
+    const fmt = (iso) => iso ? new Date(iso).toLocaleString('zh-CN') : '未知时间';
+    const latestCnt = latest ? (latest.tables.suppliers || []).length : 0;
+    const prevCnt = prev ? (prev.tables.suppliers || []).length : 0;
+    modalTitle.textContent = '☁️ 云端恢复 · 选择备份';
+    // 无可用备份：引导去上传/基准
+    if (!latest && !prev) {
+      modalBody.innerHTML = `
+        <div style="font-size:12.5px;color:var(--text-secondary);line-height:1.6;text-align:center;padding:10px 0;">
+          云端暂无可用备份。<br>请先在其它设备「上传并导入」或「同步到云端」后再恢复。
+        </div>
+        <div class="btn-group" style="border-top:none;margin-top:14px;display:flex;justify-content:center;">
+          <button onclick="DataLoader.reimport()" class="btn--ghost" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">← 返回</button>
+        </div>`;
+      document.getElementById('modal').classList.add('modal-compact');
+      const ov = document.getElementById('modalOverlay'); if (ov) ov.classList.add('show');
+      return;
+    }
+    modalBody.innerHTML = `
+      <p style="font-size:12px;color:var(--text-secondary);margin:0 0 12px;line-height:1.5;">
+        云端保留最近 <b>2 份</b>备份（最新 + 上一份）。新增备份会顶替旧时间那份。<br>点击任意一份，将其恢复为本地当前数据。
+      </p>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div style="border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:12px 14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <span style="font-size:13px;font-weight:600;">🟢 最新备份</span>
+            <span style="font-size:11.5px;color:var(--text-secondary);">${fmt(latest ? latest.savedAt : null)}</span>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-secondary);margin-bottom:10px;">供应商 ${latestCnt} 家</div>
+          <button onclick="DataLoader._cloudRestorePick('latest')" class="btn--primary" style="width:100%;padding:9px 0;font-size:12.5px;">恢复此份</button>
+        </div>
+        ${prev ? `
+        <div style="border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:12px 14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <span style="font-size:13px;font-weight:600;">🟡 上一份</span>
+            <span style="font-size:11.5px;color:var(--text-secondary);">${fmt(prev.savedAt)}</span>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-secondary);margin-bottom:10px;">供应商 ${prevCnt} 家</div>
+          <button onclick="DataLoader._cloudRestorePick('prev')" class="btn--ghost" style="width:100%;padding:9px 0;font-size:12.5px;">恢复此份</button>
+        </div>` : `
+        <div style="border:1px dashed var(--border,#e5e7eb);border-radius:10px;padding:12px 14px;text-align:center;">
+          <span style="font-size:12px;color:var(--text-secondary);">🟡 上一份 · 暂无（需两次及以上备份才生成）</span>
+        </div>`}
+      </div>
+      <div class="btn-group" style="border-top:none;margin-top:14px;display:flex;justify-content:center;">
+        <button onclick="DataLoader.reimport()" class="btn--ghost" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">← 返回</button>
+      </div>`;
+    document.getElementById('modal').classList.add('modal-compact');
+    const ov = document.getElementById('modalOverlay'); if (ov) ov.classList.add('show');
+  },
+
+  // 选择器分发：latest → 云端恢复（最新）；prev → 恢复上一份
+  async _cloudRestorePick(which) {
+    const ov = document.getElementById('modalOverlay'); if (ov) ov.classList.remove('show');
+    if (which === 'latest') return this.restoreFromCloudWork();
+    return this.restorePrevWork();
+  },
+
   // 从上传的文件导入
   async reimportFromFile() {
     const fileInput = document.getElementById('reimportFile');
@@ -886,7 +991,7 @@ const DataLoader = {
       }
       // 🟢 v209 AUDIT-304：清空 + 基准写入同事务（中途失败整体回滚）
       await db.transaction('rw', this.TABLES.concat(['meta']), async () => {
-        await DataStore.clearAll();
+        await DataStore.clearWorkTables();   // 🔵 v227.97：仅清工作表，保留设置包(outbound)
         await this.seedFromBase(bundle);
       });
       hideLoading();
@@ -1462,7 +1567,7 @@ const DataLoader = {
   _validateBundle(bundle) {
     if (typeof bundle !== 'object' || !bundle) return { ok: false, reason: '非对象' };
     if (!bundle.tables || typeof bundle.tables !== 'object') return { ok: false, reason: '缺少 tables' };
-    for (const name of this.TABLES) {
+    for (const name of this.WORK_TABLES) {
       const rows = bundle.tables[name];
       if (rows === undefined) continue;
       if (!Array.isArray(rows)) return { ok: false, reason: `${name} 非数组` };

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="0.45" stop-color="#13294b"/>
+      <stop offset="1" stop-color="#0a2540"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.7" cy="0.25" r="0.7">
+      <stop offset="0" stop-color="#3b82f6" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#3b82f6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rack" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e3a5f" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#0f2138" stop-opacity="0.9"/>
+    </linearGradient>
+  </defs>
+  <rect width="1440" height="900" fill="url(#sky)"/>
+  <rect width="1440" height="900" fill="url(#glow)"/>
+  <!-- 透视地面网格 -->
+  <g stroke="#2b4a73" stroke-width="1.2" opacity="0.5">
+    <line x1="0" y1="640" x2="1440" y2="640"/>
+    <line x1="-200" y1="900" x2="620" y2="640"/>
+    <line x1="320" y1="900" x2="760" y2="640"/>
+    <line x1="820" y1="900" x2="900" y2="640"/>
+    <line x1="1300" y1="900" x2="1100" y2="640"/>
+    <line x1="1640" y1="900" x2="1340" y2="640"/>
+    <line x1="0" y1="760" x2="1440" y2="760"/>
+    <line x1="0" y1="840" x2="1440" y2="840"/>
+  </g>
+  <!-- 仓储货架剪影 -->
+  <g fill="url(#rack)" opacity="0.85">
+    <rect x="120" y="300" width="220" height="340" rx="6"/>
+    <rect x="380" y="260" width="220" height="380" rx="6"/>
+    <rect x="980" y="300" width="220" height="340" rx="6"/>
+    <rect x="1230" y="270" width="150" height="370" rx="6"/>
+  </g>
+  <g fill="#4f7fb5" opacity="0.35">
+    <rect x="140" y="320" width="180" height="14"/>
+    <rect x="140" y="392" width="180" height="14"/>
+    <rect x="140" y="464" width="180" height="14"/>
+    <rect x="400" y="280" width="180" height="14"/>
+    <rect x="400" y="356" width="180" height="14"/>
+    <rect x="400" y="432" width="180" height="14"/>
+    <rect x="1000" y="320" width="180" height="14"/>
+    <rect x="1000" y="392" width="180" height="14"/>
+    <rect x="1000" y="464" width="180" height="14"/>
+  </g>
+  <!-- 柔光点 -->
+  <circle cx="1080" cy="220" r="120" fill="#60a5fa" opacity="0.18"/>
+  <circle cx="240" cy="160" r="90" fill="#818cf8" opacity="0.14"/>
+</svg>

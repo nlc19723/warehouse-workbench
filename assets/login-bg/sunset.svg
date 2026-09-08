@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f97316"/>
+      <stop offset="0.4" stop-color="#fb7185"/>
+      <stop offset="0.75" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fff7ed" stop-opacity="0.95"/>
+      <stop offset="0.6" stop-color="#fde68a" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#fde68a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1440" height="900" fill="url(#sky)"/>
+  <circle cx="720" cy="430" r="260" fill="url(#sun)"/>
+  <circle cx="720" cy="430" r="90" fill="#fffbeb" opacity="0.9"/>
+  <!-- 远处山脊 -->
+  <path d="M0 640 L220 560 L460 620 L720 540 L980 610 L1240 560 L1440 620 L1440 900 L0 900 Z" fill="#312e81" opacity="0.45"/>
+  <path d="M0 720 L260 660 L520 710 L780 650 L1040 710 L1300 660 L1440 700 L1440 900 L0 900 Z" fill="#1e1b4b" opacity="0.6"/>
+  <g fill="#0f172a" opacity="0.5">
+    <rect x="200" y="560" width="10" height="80"/>
+    <rect x="360" y="540" width="10" height="100"/>
+    <rect x="1080" y="550" width="10" height="90"/>
+  </g>
+</svg>

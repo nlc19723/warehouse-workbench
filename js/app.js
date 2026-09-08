@@ -99,6 +99,15 @@ const App = {
     }
     if (typeof DataStore !== 'undefined') {
       try {
+        // 🟢 v227.96：已连云端 → 进入即自动同步最新「工作/设置/盘点」三包（静默、时间戳门控，不弹确认）
+        if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
+          if (typeof DataLoader !== 'undefined' && typeof DataLoader.autoSyncFromCloud === 'function') {
+            await DataLoader.autoSyncFromCloud().catch(e => console.warn('[autoSync] 失败(已忽略):', e && e.message));
+          }
+          if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.pullCloudRecords === 'function') {
+            await StocktakeModule.pullCloudRecords().catch(e => console.warn('[stocktake] 自动同步失败(已忽略):', e && e.message));
+          }
+        }
         await DataStore.migrateSearchHistoryToCloud();
         await DataStore.restoreOutboundFromSettings();
         // 🟢 v227.77：临时出库独立云端数据包，启动时一并恢复
