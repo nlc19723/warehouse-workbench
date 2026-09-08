@@ -10,15 +10,27 @@ const SyncManager = {
   FILE: (typeof AppConfig !== 'undefined' && AppConfig.supabase) ? AppConfig.supabase.file : 'data.json',
   BASE_FILE: (typeof AppConfig !== 'undefined' && AppConfig.supabase) ? AppConfig.supabase.baseFile : 'base.json',
 
-  // 初始化：仅当用户此前手动连接并保存过配置（localStorage.supabase_config）时才自动重连。
-  // ⚠️ 不再因内置的 AppConfig.supabase 而自动"上线"——那份是公开共享配置，若默认连线会让
-  //    "仅导入本地"的数据在刷新后自作主张回写云端，违背"未连接就不碰云端"的预期。
-  //    内置 AppConfig.supabase 仅作为「云配置」对话框的预填默认值，需用户主动点「保存并连接」才生效。
+  // 初始化：①此前手动保存过配置（localStorage.supabase_config）→ 直接用它重连；
+  //         ②🟢 v227.99：无保存配置且用户未主动断开过 → 用「管理员覆盖 > 内置默认」凭证自动连接，
+  //            登录页即显示「云端已同步」，无需再手动到「云端同步」里点保存。
+  //         ③用户点过「断开连接」→ 记 wb_sync_user_disconnected=1，刷新/重启不再自动重连（尊重用户意图）。
   async init() {
     try {
       const saved = localStorage.getItem('supabase_config');
+      let userDisconnected = false;
+      try { userDisconnected = localStorage.getItem('wb_sync_user_disconnected') === '1'; } catch (e) { /* 隐私模式忽略 */ }
       if (saved) {
         this.config = JSON.parse(saved);
+      } else if (!userDisconnected) {
+        // 🟢 v227.99：自动连接（预填凭证来自 getEffectiveSupabase：管理员覆盖优先，否则内置 config.js 公开配置）
+        const eff = (typeof AppConfig !== 'undefined' && typeof AppConfig.getEffectiveSupabase === 'function')
+          ? AppConfig.getEffectiveSupabase() : null;
+        if (eff && eff.url && eff.key) {
+          this.config = { url: eff.url, key: eff.key };
+          try { localStorage.setItem('supabase_config', JSON.stringify(this.config)); } catch (e) { /* 隐私模式忽略 */ }
+        }
+      }
+      if (this.config) {
         // v217：异步真实探测（不阻塞首屏），探测失败即离线，不再误报"已连接"。
         // 🟢 v226-fix：必须 await 连接探测完成，否则紧跟其后的 restoreOutboundFromSettings()
         //   会在 isOnline 仍为 false 时同步 return，导致「已连云端却拉不到出库列表」的竞态
@@ -26,15 +38,24 @@ const SyncManager = {
         await this._connect();
         this._bindNetworkEvents();
       }
-      // 注意：AppConfig.supabase 不在此处自动连接（只作为手动连接对话框的预填值）。
     } catch (e) {
       console.warn('Sync config load failed:', e);
     }
     this.updateUI();
   },
 
-  // 供「云配置」对话框预填：默认**空**（v214 起不再预填内置凭证，需同步密码解锁）
+  // 供「云配置」对话框预填：管理员覆盖凭证 > 内置默认凭证（🟢 v227.98 修复）。
+  //   v214 曾因「需同步密码解锁」而清空预填；v227.37 删除解锁机制后此处漏改，
+  //   导致打开「云端同步」弹窗 URL/Key 全空、用户被迫手敲冗长凭证。
+  //   现改为预填 AppConfig.getEffectiveSupabase()（localStorage 管理员覆盖优先，否则内置 config.js 凭证）。
+  //   预填≠自动上线：仍需用户主动点「保存并连接」才写入 supabase_config 并连接（与 init 注释一致）。
   getDefaultConfig() {
+    if (typeof AppConfig !== 'undefined' && typeof AppConfig.getEffectiveSupabase === 'function') {
+      try {
+        const eff = AppConfig.getEffectiveSupabase();
+        if (eff && eff.url && eff.key) return { url: eff.url, key: eff.key };
+      } catch (e) { /* 解析失败回退空值，由用户手填 */ }
+    }
     return { url: '', key: '' };
   },
 
@@ -162,7 +183,11 @@ const SyncManager = {
     this.isOnline = false;
     // v217：必须清掉内存配置，否则 online 事件会把它重新连上（用户已明确断开）
     this.config = null;
-    try { localStorage.removeItem('supabase_config'); } catch (e) {
+    try {
+      localStorage.removeItem('supabase_config');
+      // 🟢 v227.99：记录「用户主动断开」——下次启动不再被内置凭证自动重连；手动「保存并连接」时清除
+      localStorage.setItem('wb_sync_user_disconnected', '1');
+    } catch (e) {
     /* 隐私模式可能抛错，忽略 */ console.warn('[sync.js:106] 异常(已忽略):', e);
   }
     this.updateUI();
@@ -170,16 +195,23 @@ const SyncManager = {
 
   // 更新同步状态UI
   // 🟢 v227.71：四态——offline / connecting / online / syncing / error；后两态有脉冲反馈
+  // 🟢 v227.99：同步刷新登录页脚注（#loginCloud）——探测完成可能晚于登录页渲染，不能让脚注停留旧状态
   updateUI() {
     const el = document.getElementById('syncStatus');
     const textEl = document.getElementById('syncStatusText');
-    if (!el || !textEl) return;
-    if (this.isOnline) {
-      el.classList.add('online');
-      textEl.textContent = '已同步';
-    } else {
-      el.classList.remove('online');
-      textEl.textContent = '未连接';
+    if (el && textEl) {
+      if (this.isOnline) {
+        el.classList.add('online');
+        textEl.textContent = '已同步';
+      } else {
+        el.classList.remove('online');
+        textEl.textContent = '未连接';
+      }
+    }
+    const lc = document.getElementById('loginCloud');
+    if (lc) {
+      lc.classList.toggle('online', !!this.isOnline);
+      lc.innerHTML = '<span class="dot"></span>' + (this.isOnline ? '云端已同步' : '云端未连接');
     }
   },
 
@@ -269,6 +301,8 @@ const SyncManager = {
     }
     const ok = await this.connect(url, key);
     if (ok) {
+      // 🟢 v227.99：手动连接成功 → 解除「主动断开」标记，恢复开机自动连接
+      try { localStorage.removeItem('wb_sync_user_disconnected'); } catch (e) { /* 忽略 */ }
       this.hideConfigDialog();
       WBModal.alert('连接成功！数据将自动同步到云端。');
       // 🟢 v227.37：管理员保存云端配置后，自动把 URL/Key 上云（settings.cloudConfig），
