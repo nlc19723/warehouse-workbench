@@ -65,7 +65,8 @@ const StocktakeModule = {
       const today = new Date();
       const pad = n => String(n).padStart(2, '0');
       const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-      this.query.startDate = ymd(new Date(today.getTime() - 29 * 86400000));
+      // 🟢 v228.03：开始日期默认【当日】（原为「当日-29天」的近30天区间，与界面直觉不符）
+      this.query.startDate = ymd(today);
       this.query.endDate = ymd(today);
     }
 
@@ -76,6 +77,18 @@ const StocktakeModule = {
     const isReturningFromOtherModule = (lastMod === 'stocktake');
     App._lastStocktakeModule = 'stocktake';
 
+    // 🟢 v228.03：切回盘点时，若现场（sheet / allRows）在离开期间被中途清空（如返回工作台、
+    //   盘点收尾等路径），用离开前的快照补回 —— 保证「离开前在哪，切回还在哪」。
+    //   原实现仅依赖内存残留，一旦被清空就只能回到初始界面。
+    if (isReturningFromOtherModule && !this.sheet && this._viewSnapshot && this._viewSnapshot.sheet) {
+      const snap = this._viewSnapshot;
+      this.sheet = snap.sheet;
+      this.allRows = snap.allRows || [];
+      this.allRowsFull = snap.allRowsFull || [];
+      if (snap.query) this.query = Object.assign({}, this.query, snap.query);
+      if (snap.sheetTouched) this._sheetTouched = snap.sheetTouched;
+    }
+
     // 🟢 v227.35：先即时渲染模块壳（任务栏 + 日常/季度/扫码按钮），不再等云同步（最多 3s）才出现界面，
     //   消除「进入盘点模块要等很久」的体感。任务栏初态不含云端分派任务，同步完成后再刷新。
     if (isReturningFromOtherModule && this.sheet && this.allRows && this.allRows.length) {
@@ -83,6 +96,7 @@ const StocktakeModule = {
       this._sheetTouched = this._sheetTouched || { saved: true, finished: false, abandoned: false };
       content.innerHTML = this._rootHtml();
       this.renderTable();
+      this._restoreScroll();  // 🟢 v228.03：回到离开前的滚动位置
       this._syncAssignedTasks(3000).then(() => this._refreshTaskBar()); // 后台补同步任务栏
       return;
     }
@@ -195,13 +209,14 @@ const StocktakeModule = {
     await this._renderDailySetup();
   },
 
-  /** 日期区间兜底：近 30 天（v227：初始界面无日期控件，此处统一给默认值） */
+  /** 日期区间兜底：默认当日（v227：初始界面无日期控件，此处统一给默认值） */
   _ensureDefaultRange() {
     if (this.query.startDate && this.query.endDate) return;
     const today = new Date();
     const pad = n => String(n).padStart(2, '0');
     const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-    if (!this.query.startDate) this.query.startDate = ymd(new Date(today.getTime() - 29 * 86400000));
+    // 🟢 v228.03：开始日期默认【当日】（原为「当日-29天」）
+    if (!this.query.startDate) this.query.startDate = ymd(today);
     if (!this.query.endDate) this.query.endDate = ymd(today);
   },
 
@@ -4414,5 +4429,34 @@ const StocktakeModule = {
     if (n > 0) this.toast('已恢复上次未完成的 ' + n + ' 条盘点数量');
   },
 
-  onLeave() { /* 不清数据：草稿已在 localStorage，切换模块回来保留现场 */ }
+  // 🟢 v228.03：离开盘点模块时保存现场快照（当前盘点单 / 行数据 / 查询区间 / 滚动位置），
+  //   切回时按快照恢复，做到「离开前在哪，切回还在哪」。
+  //   仅内存快照（不落盘）：刷新页面仍按既定行为回到初始界面。
+  onLeave() {
+    try {
+      const content = document.getElementById('contentArea');
+      this._viewSnapshot = {
+        sheet: this.sheet || null,
+        allRows: Array.isArray(this.allRows) ? this.allRows.slice() : [],
+        allRowsFull: Array.isArray(this.allRowsFull) ? this.allRowsFull.slice() : [],
+        query: Object.assign({}, this.query || {}),
+        scrollTop: content ? content.scrollTop : 0,
+        sheetTouched: this._sheetTouched || null
+      };
+    } catch (e) {
+      console.warn('[stocktake] 保存现场快照失败(已忽略):', e && e.message);
+    }
+  },
+
+  /** 🟢 v228.03：恢复离开前的滚动位置（渲染完成后下一帧执行，等 DOM 高度就位） */
+  _restoreScroll() {
+    const snap = this._viewSnapshot;
+    if (!snap || !snap.scrollTop) return;
+    requestAnimationFrame(() => {
+      try {
+        const content = document.getElementById('contentArea');
+        if (content) content.scrollTop = snap.scrollTop;
+      } catch (e) { /* 忽略 */ }
+    });
+  }
 };

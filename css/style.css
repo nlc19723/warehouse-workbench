@@ -3035,7 +3035,9 @@ button{
 /* ─── 出库列表粘性表头 ─── */
 .ob-list-table-wrapper .data-table thead{
   position: sticky;
-  top: 70px;
+  /* 🟢 v228.03：原 top:70px 使表头悬浮在容器顶下方 70px，滚动时上方空隙会透出数据行
+     （表现为「数据穿过表头」）。改为紧贴容器顶部，表头完整遮住滚过的行。 */
+  top: 0;
   z-index: 10;
 }
 
@@ -3326,6 +3328,10 @@ body.col-resizing{ cursor: col-resize; user-select: none; }
      移除 v134 的 thead static 覆盖，让 .data-table thead{position:sticky;top:0} 生效，
      标题在收起/展开时都固定，数据行纵向滑动。 */
   .table-wrapper .data-table thead, .ob-list-table-wrapper .data-table thead, .oc-entry-table-wrapper .data-table thead, .ob-entry-table-wrapper .data-table thead{ position: sticky !important; top: 0 !important; z-index: 5 !important; }
+  /* 🟢 v228.03：出库列表容器（.ob-list-table-wrapper）桌面端是 overflow:visible，
+     移动端「展开剩余 N 列」后表格总宽超出屏宽却没有滚动容器 → 既不能右滑、也不显示横向滚动条。
+     移动端显式开启横向滚动（iOS 惯性滚动）。 */
+  .ob-list-table-wrapper{ overflow-x: auto !important; overflow-y: visible !important; -webkit-overflow-scrolling: touch; }
 
   /* 🟢 v140：移动端表头改为原生 sticky（见 .data-table thead 全局规则 + 上方 wrapper 的 sticky 覆盖）。
      旧的 mobile-float-thead / mobile-float-firstcol JS 浮层样式已不再使用，移除避免误导。 */

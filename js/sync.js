@@ -86,6 +86,14 @@ const SyncManager = {
       }
       this.isOnline = true;
       this.updateUI();
+      // 🟢 v228.07：自动连接（含启动自动连接）成功后也拉取云端库管员账号并与本地合并（与手动 connect 一致），
+      //   修复「换设备登录管理员后，权限设置里看不到云端已配置的库管员账号」——之前只有手动 connect 才拉取，
+      //   新设备启动走的 _connect() 漏掉了这一步，导致本地 wb_keepers 始终为空。
+      try {
+        if (typeof AppConfig !== 'undefined' && typeof AppConfig.pullKeepersFromCloud === 'function') {
+          AppConfig.pullKeepersFromCloud();
+        }
+      } catch (e) { console.warn('[sync.js] 账号拉取异常(已忽略):', e && e.message); }
       return true;
     } catch (e) {
       console.error('Supabase connect failed:', e);

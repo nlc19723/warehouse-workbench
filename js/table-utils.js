@@ -194,6 +194,12 @@ const TableStickyOverlay = {
   // 🟢 v139：移动端列折叠——表宽超出视口时从右往左隐藏列，留「展开剩余 N 列」按钮，点击还原。
   //   替代旧的移动端固定首列浮层（mobile-float-firstcol）：用户不需要固定首列，正常显示即可。
   installColumnCollapse(wrap, table) {
+    // 🟢 v228.03：豁免标记 —— 带 .no-col-collapse 的表格（如「违约扣款规则」这类静态说明表）
+    //   移动端一律全部显示：不折叠任何列、不挂载「展开剩余 N 列」按钮。
+    if (table && table.classList && table.classList.contains('no-col-collapse')) {
+      this._resetCollapse(wrap, table);
+      return;
+    }
     if (!this.isNarrow()) { this._resetCollapse(wrap, table); return; }
     let btn = wrap._colCollapseBtn;
     if (btn && btn.parentNode) {

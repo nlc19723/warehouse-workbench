@@ -695,6 +695,11 @@ const App = {
     if (overlay) overlay.classList.add('show');
     if (dialog) dialog.classList.add('show');
     this.renderKeeperList();
+    // 🟢 v228.07：打开权限面板时主动拉取云端最新库管员账号并刷新列表，
+    //   兜底「启动自动连接尚未完成 / 本机本地为空」的情况，确保管理员一定看到云端已配置的账号。
+    if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof AppConfig !== 'undefined' && typeof AppConfig.pullKeepersFromCloud === 'function') {
+      AppConfig.pullKeepersFromCloud().then(() => this.renderKeeperList()).catch(e => console.warn('[keepers] 面板拉取失败(已忽略):', e && e.message));
+    }
   },
 
   // 🟢 v227.37：保存云端凭证（同时下发给云端供其他设备拉取）

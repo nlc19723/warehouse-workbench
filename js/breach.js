@@ -73,7 +73,8 @@ const BreachModule = {
         <div class="glass-card-header">
           <span class="glass-card-title"><span class="title-icon">📋</span>违约扣款规则</span>
         </div>
-        <table class="data-table">
+        <!-- 🟢 v228.03：no-col-collapse = 移动端不参与列折叠，两列始终全部显示 -->
+        <table class="data-table no-col-collapse">
           <thead>
             <tr><th>延迟天数</th><th>扣款比例</th></tr>
           </thead>

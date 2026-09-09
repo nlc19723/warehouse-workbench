@@ -674,38 +674,49 @@ const OutboundModule = {
   },
 
   // 翻阅前后出库单（dir: -1=减小单号，1=增大单号）
+  // 🟢 v228.03：新增「未录单号（新单）」虚拟档位 —— 位于列表最前（idx = -1）。
+  //   原实现把新增态的 idx 也算作 -1，导致 ◀ 到第一单后 newIdx=-1 被判「已经是第一单」直接 return，
+  //   于是从「未录单号」切到历史单后就再也切不回来（只能去点【重置】按钮）。
+  //   现改为：idx ∈ [-1, total-1]，-1 = 未录单号（新增态），0..total-1 = 已存单号。
   async navigateOrder(dir) {
     const allNos = await this.getAllOrderNos();
     if (allNos.length === 0) {
       this.showMsg('暂无任何出库单可翻阅', true);
       return;
     }
-    const current = document.getElementById('obOrderNo').value.trim();
-    let idx = allNos.indexOf(current);
-    if (idx === -1) {
-      // 当前单号不在列表中（可能是新建的或手动改的），按方向取最近边界
-      idx = dir > 0 ? -1 : 0;
-    }
+    const curEl = document.getElementById('obOrderNo');
+    const current = (curEl && curEl.value || '').trim();
+    // 新增态判定：单号为空 / 不在已存单号列表中（如生成的待用新单号）
+    const idx = (!current || allNos.indexOf(current) === -1) ? -1 : allNos.indexOf(current);
     const newIdx = idx + dir;
-    // 🟢 v227.24：到边禁用，停止翻阅（同时禁用按钮）
-    if (newIdx < 0)  { this._setObOrderNoBtnsDisabled(0, allNos.length - 1); this.showMsg('已经是第一单了', true); return; }
-    if (newIdx >= allNos.length) { this._setObOrderNoBtnsDisabled(0, allNos.length - 1); this.showMsg('已经是最后一单了', true); return; }
-
+    // 🟢 v228.03：到边只禁用按钮、不弹提示（切换单号不需要提示信息）
+    if (newIdx < -1) { this._setObOrderNoBtnsDisabled(-1, allNos.length); return; }
+    if (newIdx >= allNos.length) { this._setObOrderNoBtnsDisabled(allNos.length - 1, allNos.length); return; }
+    if (newIdx === -1) {
+      // 回到「未录单号」新增态（静默重置，重新生成下一个待用单号）
+      await this.resetForm(true);
+      this._setObOrderNoBtnsDisabled(-1, allNos.length);
+      return;
+    }
     const targetNo = allNos[newIdx];
-    document.getElementById('obSearchNo').value = targetNo;
-    await this.searchOrder();
+    const searchEl = document.getElementById('obSearchNo');
+    if (searchEl) searchEl.value = targetNo;
+    await this.searchOrder(true);   // silent：翻号切换不弹提示
     this._setObOrderNoBtnsDisabled(newIdx, allNos.length);
   },
 
-  /** 🟢 v227.24：根据当前 idx/总数更新出库单号翻号键 disabled */
+  /** 🟢 v227.24：根据当前 idx/总数更新出库单号翻号键 disabled
+   *  🟢 v228.03：idx = -1 表示「未录单号」新增态（列表最前），此时 ◀ 禁用、▶ 可用；
+   *    第一单（idx=0）的 ◀ 必须可用，否则无法退回未录单号。 */
   _setObOrderNoBtnsDisabled(idx, total) {
     const prev = document.getElementById('obPrevBtn');
     const next = document.getElementById('obNextBtn');
-    if (prev) prev.disabled = idx <= 0;
+    if (prev) prev.disabled = idx <= -1;
     if (next) next.disabled = idx >= total - 1;
   },
 
-  async searchOrder() {
+  // 🟢 v228.03：silent=true 时不弹「已加载出库单」提示（翻号切换单号不需要提示信息）
+  async searchOrder(silent) {
     // 🔴 防御（S1）：输入框可能在模块切换后不存在，必须判空，否则 null.value 抛 TypeError
     const el = document.getElementById('obSearchNo');
     if (!el) { console.warn('[出库] searchOrder: 出库单号输入框不存在（可能已切换模块），跳过'); return; }
@@ -736,11 +747,12 @@ const OutboundModule = {
       出库数量: r.出库数量 || ''
     }));
     this.renderDetailRows(detailRows);
-    this.showMsg(`已加载出库单 "${orderNo}"，共 ${records.length} 条明细`);
+    if (!silent) this.showMsg(`已加载出库单 "${orderNo}"，共 ${records.length} 条明细`);
   },
 
   // 重置表单（智能生成下一个单号）
-  async resetForm() {
+  // 🟢 v228.03：silent=true 时不弹「表单已重置」提示（翻号切回「未录单号」时静默）
+  async resetForm(silent) {
     try {
       this.currentOrderNo = '';
       this.editingMode = false;
@@ -755,7 +767,7 @@ const OutboundModule = {
       document.getElementById('obProject').value = '';
       document.getElementById('obReceiver').value = '';
       this.renderDetailRows();
-      this.showMsg(`✅ 表单已重置，新单号：${nextNo}`);
+      if (!silent) this.showMsg(`✅ 表单已重置，新单号：${nextNo}`);
     } catch (err) {
       console.error('重置表单失败:', err);
       this.showMsg('❌ 重置失败: ' + (err.message || err), true);
