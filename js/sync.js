@@ -577,7 +577,43 @@ const SyncManager = {
   //   时，后写者会把先写者的 key 整份抹掉（outbound_list / search_history 等）。
   //   这里加写后回读校验：若 _updatedAt 不是本次写入的时间戳，说明期间被插队，
   //   重新「读-合并-写」重试一次（Supabase Storage 无 CAS，只能靠回读尽力保证）。
-  async setSetting(key, value) {
+  // 🟢 v228.08 性能优化 P1-6：设置写入「串行队列 + 同 key 合并」。
+  //   背景：本函数是「读-改-写 + 回读校验」的整体覆盖写，并发调用会互相把对方的 key 抹掉，
+  //   触发乐观锁重试（控制台常见的「设置写入被其它设备覆盖，重试第 N 次」），
+  //   连续录入出库单时每行都要跑 3~6 次网络往返，既慢又容易冲突失败。
+  //   方案：
+  //     · 同一时刻只允许一个写入真正执行（串行队列），消除并发互踩；
+  //     · 排队期间「相同 key」的新值直接覆盖旧值，合并为一次写入（setSetting 是全量覆盖写，
+  //       最后一次的值即最新全量，因此合并不会丢数据）。
+  //   语义保持：仍返回 Promise<boolean>，调用方 await 到的仍是「本次写入的最终结果」。
+  _settingQueue: Promise.resolve(),
+  _settingPending: null,
+
+  setSetting(key, value) {
+    // ① 已有同 key 项在排队 → 合并它的值，复用同一个 Promise（不新增网络往返）
+    if (this._settingPending && this._settingPending.key === key) {
+      this._settingPending.value = value;
+      return this._settingPending.promise;
+    }
+    // ② 不同 key（或队列空闲）→ 新建排队项，串到队列尾部
+    let resolveFn;
+    const promise = new Promise(res => { resolveFn = res; });
+    const item = { key, value, promise, resolve: resolveFn };
+    this._settingPending = item;
+    this._settingQueue = this._settingQueue.then(async () => {
+      // 执行时取最新值：排队期间可能被后续同 key 调用更新过
+      const k = item.key, v = item.value;
+      if (this._settingPending === item) this._settingPending = null;
+      let r = false;
+      try { r = await this._setSettingNow(k, v); }
+      catch (e) { console.error('[sync] 设置写入队列执行异常:', e); r = false; }
+      item.resolve(r);
+    });
+    return promise;
+  },
+
+  // 原 setSetting 的真实实现（重命名，逻辑一字未改，仅供队列调度调用）
+  async _setSettingNow(key, value) {
     if (!this.isOnline || !this.client) return false;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {

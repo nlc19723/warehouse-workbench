@@ -189,10 +189,9 @@ const InboundModule = {
       return;
     }
 
-    area.innerHTML = `
-      <div class="table-wrapper">
-        <table class="data-table" data-table-key="inbound">
-          <thead>
+    // 🟢 v228.09 性能优化 P1-4：同订单列表，拆出表头与行模板交由 virtualTable。
+    //   行数 >150 时只渲染视口附近的行；默认分页输出与改动前完全一致。
+    const thead = `
             <tr>
               <th>订单编号</th>
               <th>入库日期</th>
@@ -205,10 +204,8 @@ const InboundModule = {
               <th>入库量</th>
               <th>含税单价</th>
               <th>含税金额</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${items.map(i => `
+            </tr>`;
+    const rowHtml = (i) => `
               <tr>
                 <td>${(() => { const v = (i.表体订单号 ?? '').toString().trim(); return v ? TableUtils.link('order', v, v) : ''; })()}</td>
                 <td>${esc(i.入库日期 ?? '')}</td>
@@ -221,12 +218,8 @@ const InboundModule = {
                 <td>${i.数量}</td>
                 <td>${TableUtils.formatMoney(i.原币含税单价)}</td>
                 <td>${TableUtils.formatMoney(i.原币价税合计)}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
+              </tr>`;
+    TableUtils.virtualTable(area, { items, rowHtml, thead, tableAttrs: 'data-table-key="inbound"', threshold: 150 });
 
     this.renderPagination(total, totalPages);
     TableUtils.initSmartSelect('inboundTableArea');
@@ -237,13 +230,21 @@ const InboundModule = {
     TableUtils.renderPagination('inboundPagination', { module: 'InboundModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
   },
 
-  renderTrendChart(allInbound) {
+  // 🟢 v228.08：Chart 改为按需加载 —— 本函数升级为 async，先加载 chart 组件再绘制。
+  //   调用点无需 await：图表异步补上，加载失败仅跳过图表、不影响列表主流程。
+  async renderTrendChart(allInbound) {
     const card = document.getElementById('inboundTrendCard');
     if (!card) return;
     card.style.display = 'block';
 
+
+    // 🟢 v228.08：chart.min.js 不再随首屏预载，首次绘制前动态加载
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[inbound] 图表组件加载失败，已跳过趋势图:', e && e.message); return; }
+    // 在 await 之后再取 canvas：若期间 DOM 被重建，取到的是最新元素，不会因旧引用失效而误跳过
     const canvas = document.getElementById('inboundTrendChart');
     if (!canvas) return;
+    if (typeof Chart === 'undefined') return;
 
     if (this._trendChart) { this._trendChart.destroy(); this._trendChart = null; }
 

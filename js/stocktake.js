@@ -501,7 +501,8 @@ const StocktakeModule = {
       : `<span style="${dcolor}font-weight:600;">${this._num(r.差异量)}</span>`;
     return `<tr data-code="${escAttr(r.存货编码 || '')}">
       <td>${no}</td>
-      <td>${esc(r.存货编码 || '')}</td>
+      <!-- 🟢 v228.13：存货编码打通存货档案（点击跳转） -->
+      <td>${TableUtils.link('stock', r.存货编码 || '', r.存货编码 || '')}</td>
       <td>${esc(r.存货名称 || '')}</td>
       <td>${esc(r.规格型号 || '')}</td>
       <td>${this._num(r.现存量)}</td>
@@ -560,7 +561,8 @@ const StocktakeModule = {
     const body = rows.map(r => `
       <tr data-code="${escAttr(r.存货编码)}">
         <td>${r.no}</td>
-        <td>${esc(r.存货编码)}</td>
+        <!-- 🟢 v228.13：存货编码打通存货档案（点击跳转） -->
+        <td>${TableUtils.link('stock', r.存货编码 || '', r.存货编码 || '')}</td>
         <td>${esc(r.存货名称)}</td>
         <td>${esc(r.规格型号)}</td>
         <td>${this._num(r.现存量)}</td>
@@ -991,7 +993,8 @@ const StocktakeModule = {
         : `<span style="${dcolor}font-weight:600;">${this._num(r.差异量)}</span>`;
       return `<tr>
         <td>${i + 1}</td>
-        <td>${esc(r.存货编码 || '')}</td>
+        <!-- 🟢 v228.13：存货编码打通存货档案（点击跳转） -->
+        <td>${TableUtils.link('stock', r.存货编码 || '', r.存货编码 || '')}</td>
         <td>${esc(r.存货名称 || '')}</td>
         <td>${esc(r.规格型号 || '')}</td>
         <td>${this._num(r.现存量)}</td>
@@ -1914,8 +1917,28 @@ const StocktakeModule = {
     try { return JSON.parse(localStorage.getItem(this.OVERVIEW_KEY) || '{}') || {}; } catch (e) { return {}; }
   },
 
+  // 🟢 AUDIT-228-03（v228.18）：localStorage 写入失败「可见化」工具。
+  //   原实现一律 catch(e){/* 忽略 */}，配额超限 / 隐私模式 / 存储被禁时，
+  //   待补推队列写不进去而调用方浑然不知（UI 仍提示「已存本地待补推」），
+  //   联网后 retryPendingSync 找不到待推 id → 盘点数据永久停留在本地、永不补推云端。
+  //   这里统一：留 console.error + 返回布尔值 + 可选 Toast；成功路径行为不变。
+  _lsWrite(key, value, opt = {}) {
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch (e) {
+      const msg = '[stocktake] 本地存储写入失败（' + key + '）：' + (e && (e.message || e.name || e));
+      console.error(msg);
+      if (opt.toast) {
+        const t = typeof opt.toast === 'string' ? opt.toast : '本地存储写入失败，数据可能无法自动补推到云端';
+        try { this.toast('⚠️ ' + t); } catch (_) {}
+      }
+      return false;
+    }
+  },
+
   _saveOverviews(map) {
-    try { localStorage.setItem(this.OVERVIEW_KEY, JSON.stringify(map || {})); } catch (e) { /* 忽略 */ }
+    return this._lsWrite(this.OVERVIEW_KEY, JSON.stringify(map || {}));
   },
 
   // ===== v227.16：仓库离线容错 —— 跨设备 key-value 推送（批次状态/概览/轮次）本地待推队列 =====
@@ -1929,17 +1952,21 @@ const StocktakeModule = {
     try { return JSON.parse(localStorage.getItem(this.CLOUD_Q) || '[]') || []; } catch (e) { return []; }
   },
   _saveCloudQueue(arr) {
-    try { localStorage.setItem(this.CLOUD_Q, JSON.stringify(arr || [])); } catch (e) { /* 忽略 */ }
+    return this._lsWrite(this.CLOUD_Q, JSON.stringify(arr || []));
   },
   // 入队（同 key 只保留最新一份，避免堆积）
+  // 🟢 AUDIT-228-03：写失败时返回 false，让调用方能据此改提示文案（不再假装入队成功）
   _enqueueCloud(key, value) {
     try {
       const q = this._getCloudQueue();
       const i = q.findIndex(x => x.key === key);
       const item = { key, value, ts: Date.now() };
       if (i >= 0) q[i] = item; else q.push(item);
-      this._saveCloudQueue(q);
-    } catch (e) { /* 忽略 */ }
+      return this._saveCloudQueue(q);
+    } catch (e) {
+      console.error('[stocktake] 云端推送入队失败（' + key + '）：', e && (e.message || e));
+      return false;
+    }
   },
   // 统一推送入口：在线则直推，离线/失败则入队
   async _setCloud(key, value) {
@@ -2304,7 +2331,7 @@ const StocktakeModule = {
     try { return JSON.parse(localStorage.getItem(this.ROUND_CLOSED_KEY) || '{}') || {}; } catch (e) { return {}; }
   },
   _saveRoundClosed(map) {
-    try { localStorage.setItem(this.ROUND_CLOSED_KEY, JSON.stringify(map || {})); } catch (e) { /* 忽略 */ }
+    return this._lsWrite(this.ROUND_CLOSED_KEY, JSON.stringify(map || {}));
   },
   isQuarterRoundClosed(sheetId) {
     if (!sheetId) return false;
@@ -2392,24 +2419,53 @@ const StocktakeModule = {
     const now = new Date().toISOString();
     const stillOpen = batchTasks.filter(t => t.status !== 'closed' || t.replenishAssigned);
     const toSaveTasks = [];
+    // 🟢 AUDIT-228-02（v228.18）：用 Map 记录改动前的原始状态（不污染任务对象本身，
+    //   避免给 Dexie 记录塞入临时字段），写回失败时据此回滚，杜绝「内存已 closed、库里仍 open」。
+    const prevState = new Map();
     for (const t of stillOpen) {
       // 🟢 v227.13 P0-3：强制结束前，先落库该盘点人未结束的草稿进度（共享设备本机草稿可收口）
       try {
         const n = await this._commitCountingForTask(t, batchNo);
         if (n > 0) console.log('[stocktake] 强制结束补录 ' + n + ' 条（' + t.counter + '）');
       } catch (e) { console.warn('[stocktake] 强制结束补录失败(已忽略):', e && e.message); }
+      prevState.set(t, { status: t.status, closedAt: t.closedAt, updatedAt: t.updatedAt });
       t.status = 'closed';
       t.sheetId = t.sheetId || sheetId;
       t.closedAt = now;
       t.updatedAt = now;
       toSaveTasks.push(t);
     }
-    // 一次性写回
+    // 一次性写回 —— 🟢 AUDIT-228-02：原实现内层 catch 忽略单个失败、外层再吞一次，
+    //   结果「内存标 closed 但库里仍是 in_progress」，UI 显示已结束而持久状态未闭合且无任何提示。
+    //   现统计失败数：失败任务回滚内存态并显式报错，成功路径行为完全不变。
+    let saveFailed = 0;
+    const failedTasks = [];
     try {
       for (const t of toSaveTasks) {
-        try { await DataStore.saveStocktakeTask(t); } catch (e) { /* 忽略单个写失败 */ }
+        try { await DataStore.saveStocktakeTask(t); }
+        catch (e) {
+          saveFailed++;
+          failedTasks.push(t);
+          console.error('[stocktake] 任务写回失败：' + t.counter + ' —— ' + (e && (e.message || e)));
+        }
       }
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {
+      saveFailed = toSaveTasks.length;
+      failedTasks.length = 0;
+      toSaveTasks.forEach(t => failedTasks.push(t));
+      console.error('[stocktake] 任务批量写回异常：', e && (e.message || e));
+    }
+    if (saveFailed > 0) {
+      // 回滚内存态，保证 UI 与持久状态一致（否则下次进入会误判为已结束）
+      failedTasks.forEach(t => {
+        const p = prevState.get(t);
+        if (!p) return;
+        t.status = p.status;
+        t.closedAt = p.closedAt;
+        t.updatedAt = p.updatedAt;
+      });
+      this.toast('⚠️ 强制结束：有 ' + saveFailed + ' 个任务写回失败（状态未闭合），请重试或联系管理员');
+    }
 
     // 3) 给每位盘点人发布一份 finished 概览（含 0 项的也补上，否则管理员视图会留「尚未开启」）
     const sd = (batchTasks[0] && batchTasks[0].startDate) || this.query.startDate || '';
@@ -3008,7 +3064,8 @@ const StocktakeModule = {
       const counterCell = hasQty ? esc(this.task.counter || '') : '';
       return `<tr data-code="${escAttr(r.存货编码)}">
         <td>${r.no}</td>
-        <td>${esc(r.存货编码)}</td>
+        <!-- 🟢 v228.13：存货编码打通存货档案（点击跳转） -->
+        <td>${TableUtils.link('stock', r.存货编码 || '', r.存货编码 || '')}</td>
         <td>${esc(r.存货名称)}</td>
         <td>${esc(r.规格型号)}</td>
         <td>${this._num(r.现存量)}</td>
@@ -3067,6 +3124,15 @@ const StocktakeModule = {
       this.updateProgress();
     }
   },
+
+  // ⚠️ AUDIT-228-04（v228.18）复核结论：本盘点主表**不接入** TableUtils.virtualTable。
+  //   原因：它是交互式录入表 —— 每行含「盘点数量」输入框、Enter/↑↓ 键盘导航（_bindKeyboard）、
+  //   逐行草稿保存。虚拟滚动只保留视口内的行，会同时破坏三件事：
+  //     ① 键盘 ↑↓ 跳转（目标行不在 DOM）；
+  //     ② 滚出视口后未保存的输入丢失（草稿机制按 DOM 内 input 取值）；
+  //     ③ 列折叠按钮的 MutationObserver 定位（依赖 table 实际挂载位置）。
+  //   只读展示型大表（存货档案 / 中心出库 / 订单 / 入库）已接入虚拟滚动，本表维持整表渲染。
+  //   —— 若将来要做，需先改为「受控组件 + 值存内存 Map」，届时再启用。
 
   // 🟢 v227.91：移动端将表格列折叠按钮（mobile-col-toggle）从 wrap 父节点搬到
   //   原「清空已填」按钮所在的进度条位置；桌面端不操作（按钮保持隐藏/或原位均无影响）。
@@ -3418,19 +3484,28 @@ const StocktakeModule = {
   _getPending() {
     try { return JSON.parse(localStorage.getItem(this.PENDING_KEY) || '[]'); } catch (e) { return []; }
   },
+  // 🟢 AUDIT-228-03：待补推队列写失败必须可见 —— 否则联网后不会补推，
+  //   而 UI 已提示「已存本地待补推」，用户以为数据安全，实际永久停留在本地。
   _markPending(ids) {
     try {
       const s = new Set(this._getPending());
       (ids || []).forEach(i => s.add(i));
-      localStorage.setItem(this.PENDING_KEY, JSON.stringify(Array.from(s)));
-    } catch (e) { /* 忽略 */ }
+      return this._lsWrite(this.PENDING_KEY, JSON.stringify(Array.from(s)),
+        { toast: '本地待补推队列写入失败，联网后可能无法自动补推，请检查存储空间' });
+    } catch (e) {
+      console.error('[stocktake] 标记待补推失败：', e && (e.message || e));
+      return false;
+    }
   },
   _clearPending(ids) {
     try {
       const s = new Set(this._getPending());
       (ids || []).forEach(i => s.delete(i));
-      localStorage.setItem(this.PENDING_KEY, JSON.stringify(Array.from(s)));
-    } catch (e) { /* 忽略 */ }
+      return this._lsWrite(this.PENDING_KEY, JSON.stringify(Array.from(s)));
+    } catch (e) {
+      console.error('[stocktake] 清理待补推标记失败：', e && (e.message || e));
+      return false;
+    }
   },
 
   // ===== v227：删除墓碑队列（【盘点记录】删除记录时用）=====
@@ -3444,14 +3519,22 @@ const StocktakeModule = {
       const cur = this._getTombs();
       const have = new Set(cur.map(t => t.recId));
       (tombs || []).forEach(t => { if (t && t.recId && !have.has(t.recId)) cur.push(t); });
-      localStorage.setItem(this.TOMB_KEY, JSON.stringify(cur));
-    } catch (e) { /* 忽略 */ }
+      // 🟢 AUDIT-228-03：墓碑写失败 = 删除动作不会扩散到云端，他端会「复活」已删记录
+      return this._lsWrite(this.TOMB_KEY, JSON.stringify(cur),
+        { toast: '删除队列写入失败，其它设备可能仍保留该记录' });
+    } catch (e) {
+      console.error('[stocktake] 写入删除墓碑失败：', e && (e.message || e));
+      return false;
+    }
   },
   _clearTombs(recIds) {
     try {
       const left = this._getTombs().filter(t => (recIds || []).indexOf(t.recId) < 0);
-      localStorage.setItem(this.TOMB_KEY, JSON.stringify(left));
-    } catch (e) { /* 忽略 */ }
+      return this._lsWrite(this.TOMB_KEY, JSON.stringify(left));
+    } catch (e) {
+      console.error('[stocktake] 清理删除墓碑失败：', e && (e.message || e));
+      return false;
+    }
   },
   async _retryTombs() {
     const tombs = this._getTombs();

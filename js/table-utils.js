@@ -193,6 +193,31 @@ const TableStickyOverlay = {
 
   // 🟢 v139：移动端列折叠——表宽超出视口时从右往左隐藏列，留「展开剩余 N 列」按钮，点击还原。
   //   替代旧的移动端固定首列浮层（mobile-float-firstcol）：用户不需要固定首列，正常显示即可。
+  // 🟢 v228.14：收起/展开状态持久化（localStorage，按 tableKey 记忆）。
+  //   背景：状态原先只存在 wrap._colCollapsed 内存属性上，切换模块后 DOM 整体重建 → 回到默认「收起」，
+  //   用户「展开 → 离开 → 回来」会被强制收起。现在按表格 key 落盘，回来保持离开前的状态。
+  //   未手动切换过的表格仍默认收起（保持原有首屏行为，不改动既有体验）。
+  COLLAPSE_STATE_KEY: 'wb_table_col_collapsed',
+  _collapseStateAll() {
+    try { return JSON.parse(localStorage.getItem(this.COLLAPSE_STATE_KEY) || '{}') || {}; }
+    catch (e) { return {}; }
+  },
+  _collapseStateGet(table) {
+    const key = TableUtils._deriveTableKey(table);
+    if (!key) return null;
+    const all = this._collapseStateAll();
+    return Object.prototype.hasOwnProperty.call(all, key) ? !!all[key] : null;
+  },
+  _collapseStateSet(table, val) {
+    const key = TableUtils._deriveTableKey(table);
+    if (!key) return;
+    try {
+      const all = this._collapseStateAll();
+      all[key] = !!val;
+      localStorage.setItem(this.COLLAPSE_STATE_KEY, JSON.stringify(all));
+    } catch (e) { /* 隐私模式 / 配额超限：静默降级为不记忆，不影响功能 */ }
+  },
+
   installColumnCollapse(wrap, table) {
     // 🟢 v228.03：豁免标记 —— 带 .no-col-collapse 的表格（如「违约扣款规则」这类静态说明表）
     //   移动端一律全部显示：不折叠任何列、不挂载「展开剩余 N 列」按钮。
@@ -217,9 +242,14 @@ const TableStickyOverlay = {
     wrap._colCollapseBtn = btn;
     btn.addEventListener('click', () => {
       wrap._colCollapsed = !wrap._colCollapsed;
+      this._collapseStateSet(table, wrap._colCollapsed); // 🟢 v228.14：记住用户选择，跨模块/重渲染保持
       this._applyCollapse(wrap, table);
     });
-    if (wrap._colCollapsed === undefined) wrap._colCollapsed = true; // 默认折叠
+    if (wrap._colCollapsed === undefined) {
+      // 🟢 v228.14：优先用已记忆的状态；从未切换过的表格才默认折叠
+      const saved = this._collapseStateGet(table);
+      wrap._colCollapsed = (saved === null) ? true : saved;
+    }
     this._applyCollapse(wrap, table);
   },
 
@@ -248,6 +278,16 @@ const TableStickyOverlay = {
         ths.forEach((th, i) => { th.style.width = arr[i] || ''; th.style.minWidth = ''; });
       } catch (_) {}
       delete table.dataset.origThWidths;
+    }
+    // 🟢 v228.13：恢复 <colgroup> 原始列宽。
+    //   部分表格（如中心出库列表 .ob-list-table）带 inline table-layout:fixed + <colgroup> 固定列宽，
+    //   在 fixed 布局下 colgroup 宽度优先级高于 th/td，若收起时只改 th/td 会导致 3 列仍是 118/140/108 不均分。
+    if (table.dataset.origColWidths) {
+      try {
+        const arr = JSON.parse(table.dataset.origColWidths);
+        table.querySelectorAll('colgroup col').forEach((c, i) => { c.style.width = arr[i] || ''; });
+      } catch (_) {}
+      delete table.dataset.origColWidths;
     }
     const firstTr = table.querySelector('tbody tr');
     if (firstTr) Array.from(firstTr.children).forEach(td => { td.style.maxWidth = ''; td.style.overflow = ''; });
@@ -331,6 +371,11 @@ const TableStickyOverlay = {
     const MAX_COL = 160;
     const each = Math.min(MAX_COL, Math.floor((wrapW - 2) / N));
     if (wrap.parentElement) wrap.parentElement.classList.add('col-collapse-mode');
+    // 🟢 v228.22 W-5：可见列在 DOM 中未必是「前 N 列」（keep-config 分支按列头文字匹配，
+    //   保留列可能落在任意索引，如现存量保留 存货名称/规格型号/现存数量=索引1/2/5）。
+    //   因此必须先算出「真实可见列索引集合」，后续 colgroup 按索引命中，而不是按位置 i<N 一刀切。
+    const allThs = Array.from(table.querySelectorAll('thead th'));
+    const visIdx = new Set(visThs.map(th => allThs.indexOf(th)).filter(i => i >= 0));
     visThs.forEach(th => {
       th.style.width = each + 'px';
       th.style.minWidth = each + 'px';
@@ -340,8 +385,8 @@ const TableStickyOverlay = {
       th.style.whiteSpace = 'nowrap';
     });
     table.querySelectorAll('tbody tr').forEach(tr => {
-      Array.from(tr.children).forEach(td => {
-        if (!td.classList.contains('col-collapsed')) {
+      Array.from(tr.children).forEach((td, i) => {
+        if (visIdx.has(i)) {
           td.style.width = each + 'px';
           td.style.maxWidth = each + 'px';
           td.style.minWidth = each + 'px';
@@ -353,6 +398,16 @@ const TableStickyOverlay = {
     });
     table.style.width = (each * N) + 'px';
     table.style.minWidth = (each * N) + 'px';
+    // 🟢 v228.13 / v228.22 W-5：同步 <colgroup> 列宽 —— 可见列均分 each px，隐藏列归零。
+    //   按 visIdx（真实可见列索引）命中，而不是按位置 i<N；否则 keep-config 保留的列若不在前 N 列，
+    //   会拿到 col 宽度 0 被截断，而前 N 列的隐藏列却占了等宽（现存量「现存数量」被挤没的根因）。
+    const cols = table.querySelectorAll('colgroup col');
+    if (cols.length) {
+      if (!table.dataset.origColWidths) {
+        table.dataset.origColWidths = JSON.stringify(Array.from(cols).map(c => c.style.width || ''));
+      }
+      cols.forEach((c, i) => { c.style.width = (visIdx.has(i) ? each : 0) + 'px'; });
+    }
   },
 
   _hideColInTable(tableEl, idx, hide) {
@@ -968,14 +1023,19 @@ const TableUtils = {
     const searchInput = popup.querySelector('.efp-search');
     const allCbs = popup.querySelectorAll('.efp-cb');
 
-    searchInput.addEventListener('input', () => {
+    // 🟢 v228.08 性能优化 P1-5：筛选弹窗搜索防抖。
+    //   大表的列值可达数千项，每敲一个字符遍历全部 checkbox 切换 display 会造成输入卡顿。
+    //   150ms 较短，保证列表筛选仍跟手。
+    const applySearch = () => {
       const kw = searchInput.value.toLowerCase().trim();
       allCbs.forEach(cb => {
         const item = cb.closest('.efp-item');
         const text = cb.dataset.val.toLowerCase();
         item.style.display = (!kw || text.includes(kw)) ? '' : 'none';
       });
-    });
+    };
+    const debouncedSearch = this.debounce(applySearch, 150);
+    searchInput.addEventListener('input', debouncedSearch);
 
     popup.querySelector('.efp-select-all').addEventListener('click', () => {
       allCbs.forEach(cb => { cb.checked = true; cb.closest('.efp-item').style.display = ''; });
@@ -1686,12 +1746,12 @@ const TableUtils = {
         <button class="wb-pager-btn wb-last" onclick="${module}.goPage(${secArg}${tp})" ${p === tp ? 'disabled' : ''} aria-label="尾页" title="尾页"></button>
       </span>
       <span style="font-size:12px;color:var(--text-secondary);">
-        每页 <select onchange="${module}.changePageSize(${secArg}this.value === 'all' ? 'all' : parseInt(this.value, 10))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
+        每页 <select aria-label="每页显示条数" onchange="${module}.changePageSize(${secArg}this.value === 'all' ? 'all' : parseInt(this.value, 10))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
           ${optsHtml}
         </select> 条
       </span>
       <span style="font-size:12px;color:var(--text-secondary);">
-        跳至 <input type="number" id="${jumperId}" min="1" max="${tp}" value="${p}"
+        跳至 <input type="number" id="${jumperId}" min="1" max="${tp}" value="${p}" aria-label="跳转到指定页码"
           onkeydown="if(event.key==='Enter')${module}.goPage(${secArg}parseInt(this.value))"
           style="width:44px;height:28px;text-align:center;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-main);font-size:12px;">
         / ${tp} 页
@@ -1758,13 +1818,146 @@ const TableUtils = {
     return `<a class="entity-link" href="javascript:void(0)" title="查看${typeName}档案" onclick="App.openEntity('${t}','${k}')" onmousedown="event.stopPropagation()">${text}</a>`;
   },
 
+  // 🟢 v228.08 性能优化 P1-5：通用防抖（debounce）。
+  //   供各模块搜索输入复用：连续输入只在停止 wait 毫秒后执行一次，避免每敲一个字符
+  //   就触发全表过滤 / 云端同步 / 面板重渲染。
+  //   ⚠️ 仅用于「查询/渲染」类回调，禁止用于数据录入（如数量、备注输入），否则会丢输入。
+  debounce(fn, wait) {
+    let t = null;
+    return function (...args) {
+      if (t) clearTimeout(t);
+      t = setTimeout(() => { t = null; fn.apply(this, args); }, wait);
+    };
+  },
+
+  // 🟢 v228.09 性能优化 P1-4：大表虚拟滚动（只渲染视口附近的行）。
+  //   解决的问题：「每页=全部」时订单/入库要一次渲染 2394 行 ≈ 45,865 个 DOM 节点、3.18MB HTML。
+  //   做法：行数 > threshold 才启用虚拟；上下用占位 <tr> 撑出总高度，页面仍按原方式滚动。
+  //
+  // opts: { items, rowHtml, thead, tableAttrs, threshold, wrapperClass, colgroup }
+  //   items      —— 完整数据数组（导出/排序等仍基于它，与渲染解耦，不受虚拟化影响）
+  //   rowHtml    —— (item) => '<tr>...</tr>'，与模块原行模板一致
+  //   thead      —— '<tr>...</tr>' 表头串
+  //   tableAttrs —— 追加到 <table> 上的属性串（如 data-table-key / style）
+  //   threshold  —— 超过多少行才虚拟化（默认 150；默认分页 20/50 不触发，行为完全不变）
+  //   wrapperClass —— 外层滚动容器 class（默认 'table-wrapper'；
+  //                   🟢 AUDIT-228-04：出库列表用 ob-list-table-wrapper，需保持原样）
+  //   colgroup   —— 完整 <colgroup>...</colgroup> 串（默认空）。
+  //                 🟢 AUDIT-228-04：出库列表依赖 colgroup 固定列宽（v228.13 移动端收起态
+  //                 三列均分即靠 _equalizeCols 同步 colgroup），虚拟滚动下必须保留。
+  // 返回：true=已启用虚拟滚动，false=走原整表渲染。
+  virtualTable(area, opts) {
+    const { items, rowHtml, thead, tableAttrs = '', threshold = 150,
+            wrapperClass = 'table-wrapper', colgroup = '', tableClass = 'data-table' } = opts;
+    const total = (items && items.length) || 0;
+    if (!area) return false;
+
+    // 行数未超阈值：走原有整表渲染，输出结构与改动前完全一致
+    if (total <= threshold) {
+      area.innerHTML =
+        `<div class="${wrapperClass}"><table class="${tableClass}" ${tableAttrs}>${colgroup}` +
+        `<thead>${thead}</thead><tbody>${items.map(rowHtml).join('')}</tbody></table></div>`;
+      return false;
+    }
+
+    const wrapId = 'vt_' + Math.random().toString(36).slice(2, 9);
+    area.innerHTML =
+      `<div class="${wrapperClass}" id="${wrapId}"><table class="${tableClass} vt-table" ${tableAttrs}>${colgroup}` +
+      `<thead>${thead}</thead><tbody class="vt-body"></tbody></table></div>`;
+    const wrap = document.getElementById(wrapId);
+    if (!wrap) return false;
+    const body = wrap.querySelector('.vt-body');
+
+    let rowH = 0, raf = null, destroyed = false;
+    // 查找真正滚动的容器：从 wrap 自身开始（.table-wrapper 常常就是它），再逐级向上
+    function findScroller(el) {
+      let n = el;
+      while (n && n !== document.body && n !== document.documentElement) {
+        const oy = getComputedStyle(n).overflowY;
+        if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight + 4) return n;
+        n = n.parentElement;
+      }
+      return null;
+    }
+    const cell = '<td colspan="99" style="padding:0;border:0;height:auto"></td>';
+
+    const render = () => {
+      // 区域已被移除（切换模块等）→ 自动解绑，避免监听泄漏与无效渲染
+      if (destroyed || !document.body.contains(wrap)) { cleanup(); return; }
+      if (!rowH) {
+        // 首帧先渲染几行，实测真实行高（避免硬编码与实际样式不符导致滚动漂移）
+        body.innerHTML = items.slice(0, 5).map(rowHtml).join('');
+        const first = body.querySelector('tr');
+        rowH = (first && first.offsetHeight) || 38;
+      }
+      // ⚠️ 滚动容器通常是 .table-wrapper 自身（max-height:640px; overflow-y:auto）。
+      //    此时容器位置不动、是内部表格在动，所以必须用「表格相对容器视口」的偏移来算起始行，
+      //    不能用容器自身的视口位置（那样会永远算成第 0 行，滚动后窗口不更新）。
+      const table = wrap.querySelector('table') || wrap;
+      const sc = findScroller(wrap);
+      const scTop = sc ? sc.getBoundingClientRect().top : 0;
+      const vh = sc ? sc.clientHeight : (window.innerHeight || document.documentElement.clientHeight || 800);
+      const buffer = 5;
+      let s = Math.floor((-(table.getBoundingClientRect().top - scTop)) / rowH) - buffer;
+      if (s < 0) s = 0;
+      const visible = Math.ceil(vh / rowH) + buffer * 2;
+      if (s > total - visible) s = Math.max(0, total - visible);
+      const e = Math.min(total, s + visible);
+      body.innerHTML =
+        (s > 0 ? `<tr class="vt-spacer" style="height:${s * rowH}px">${cell}</tr>` : '') +
+        items.slice(s, e).map(rowHtml).join('') +
+        (e < total ? `<tr class="vt-spacer" style="height:${(total - e) * rowH}px">${cell}</tr>` : '');
+    };
+
+    function cleanup() {
+      if (destroyed) return;
+      destroyed = true;
+      window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onScroll);
+      document.removeEventListener('scroll', onScroll, true);
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+    }
+    function onScroll() {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = null; render(); });
+    }
+    // ⚠️ 本应用 html,body 为 overflow:hidden，页面本身不滚动，真正滚动的是内层容器。
+    //    scroll 事件不冒泡，但在【捕获阶段】可被祖先收到 —— 因此在 document 上以 capture 监听，
+    //    任何内层容器（无论初始化时是否已可滚动）的滚动都能捕获到，避免窗口停在前几行不重算。
+    render();
+    document.addEventListener('scroll', onScroll, true);
+    window.addEventListener('scroll', onScroll, { passive: true }); // 兜底：整页滚动场景
+    window.addEventListener('resize', onScroll, { passive: true });
+    area._vtCleanup = cleanup;
+    return true;
+  },
+
   // 统一 Excel 导出（O1 去重）：rows 为空时提示并返回，行为与原各模块一致
-  exportToExcel(rows, filename, sheetName) {
+  // 🟢 v228.08：XLSX 改为按需加载，本函数升级为 async。
+  //   内部已处理「加载提示 + 失败提示」，13 处外部调用点无需改动（不 await 亦可正常下载）。
+  async exportToExcel(rows, filename, sheetName) {
     if (!rows || !rows.length) { WBModal.alert('没有数据'); return; }
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, sheetName || '数据');
-    XLSX.writeFile(wb, filename);
+    // 首次导出需下载 XLSX 组件，给出加载提示，避免点击后无反馈（不牺牲体验）
+    let needHide = false;
+    if (!LazyLib.has('xlsx')) {
+      try {
+        if (typeof showLoading === 'function') { showLoading('正在准备导出组件…'); needHide = true; }
+      } catch (e) { /* 提示失败不影响导出本身 */ }
+    }
+    try {
+      const XLSX = await LazyLib.xlsx();
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, sheetName || '数据');
+      XLSX.writeFile(wb, filename);
+    } catch (err) {
+      console.error('[TableUtils.exportToExcel] 导出失败:', err);
+      try {
+        WBModal.alert('导出失败：' + (err && err.message ? err.message : '组件加载失败，请检查网络后重试'));
+      } catch (e) { /* 弹窗不可用则仅记日志 */ }
+    } finally {
+      if (needHide) { try { if (typeof hideLoading === 'function') hideLoading(); } catch (e) {} }
+    }
   }
 };
 

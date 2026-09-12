@@ -17,7 +17,11 @@ window.EntityLinks = {
       // stock-detail 改用 DataStore.getOrdersForStock() 做反向联动。
       inventoryAlerts: '存货编码',
       pricing: '存货编码',
-      lowTurnover: '存货编码'
+      lowTurnover: '存货编码',
+      // 🟢 v228.20：中心出库列表（db.outbound）—— 存货档案「出库记录」表格的数据来源。
+      //   schema 中 outbound 已建 存货编码 索引（'++id, 出库单号, 存货编码, 出库时间'），
+      //   可由 queryByEntity 直接索引扇出，无需全表扫描。tempOutbound（临时出库）刻意不在此关联。
+      outbound: '存货编码'
     }
   },
   supplier: {

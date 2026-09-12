@@ -19,7 +19,7 @@ const DashboardModule = {
     { id: 'inventoryAlert', icon: '⚠️', label: '库存预警', desc: '补货提醒·在途跟踪', iconBg: 'var(--accent-coral-light)' },
     { id: 'supplier', icon: '🏭', label: '供应商管理', desc: '合同·绩效·评估', iconBg: 'var(--accent-warm-light)' },
     { id: 'orderTrack', icon: '📦', label: '订单跟踪', desc: '进度·履约·异常', iconBg: 'var(--accent-coral-light)' },
-    { id: 'orders', icon: '📝', label: '订单列表', desc: '采购·审批·统计', iconBg: 'var(--status-info-bg)' },
+    { id: 'orders', icon: '📝', label: '订单列表', desc: '采购·审批·统计', iconBg: 'var(--accent-lavender-light)' },
     { id: 'stock', icon: '🏪', label: '现存量', desc: '库存·库位·盘点', iconBg: 'var(--accent-mint-light)' },
     { id: 'inbound', icon: '📥', label: '入库列表', desc: '收货·验收·入库', iconBg: 'var(--accent-mint-light)' },
     { id: 'pricing', icon: '💰', label: '合同价格', desc: '报价·比价·审批', iconBg: 'var(--accent-lavender-light)' },
@@ -429,8 +429,12 @@ const DashboardModule = {
 
   // ===== 甜甜圈图（库存健康度，与另外两个饼图保持一致的视觉与交互） =====
   async renderDonut(stats) {
+    // 🟢 v228.08：chart.min.js 不再随首屏预载，首次绘制前按需加载（失败仅跳过本图）
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[dashboard] 图表组件加载失败，已跳过甜甜圈图:', e && e.message); return; }
     const canvas = document.getElementById('donutCanvas');
     if (!canvas) return;
+    if (typeof Chart === 'undefined' || !canvas.isConnected) return;
     if (this.donutChart) { this.donutChart.destroy(); this.donutChart = null; }
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     const safe = stats.stockCount - stats.needRestockCount;
@@ -594,8 +598,12 @@ const DashboardModule = {
 
   // ===== 月度入库金额 + 订单金额趋势 =====
   async renderMonthlyChart() {
+    // 🟢 v228.08：chart 按需加载（失败仅跳过本图）
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[dashboard] 图表组件加载失败，已跳过月度趋势图:', e && e.message); return; }
     const canvas = document.getElementById('monthlyChart');
     if (!canvas) return;
+    if (typeof Chart === 'undefined' || !canvas.isConnected) return;
     if (this.chart) { this.chart.destroy(); this.chart = null; }
 
     const inbound = await this._getCached('inbound');
@@ -678,8 +686,12 @@ const DashboardModule = {
 
   // ===== TOP10 材料近6月入库量柱状图 =====
   async renderTop10Chart() {
+    // 🟢 v228.08：chart 按需加载（失败仅跳过本图）
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[dashboard] 图表组件加载失败，已跳过 TOP10 图:', e && e.message); return; }
     const canvas = document.getElementById('top10Chart');
     if (!canvas) return;
+    if (typeof Chart === 'undefined' || !canvas.isConnected) return;
     if (this.top10Chart) { this.top10Chart.destroy(); this.top10Chart = null; }
 
     const inbound = await this._getCached('inbound');
@@ -746,8 +758,12 @@ const DashboardModule = {
 
   // ===== 近6月入库量 vs 订货量对比 =====
   async renderCompareChart() {
+    // 🟢 v228.08：chart 按需加载（失败仅跳过本图）
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[dashboard] 图表组件加载失败，已跳过对比图:', e && e.message); return; }
     const canvas = document.getElementById('compareChart');
     if (!canvas) return;
+    if (typeof Chart === 'undefined' || !canvas.isConnected) return;
     if (this.compareChart) { this.compareChart.destroy(); this.compareChart = null; }
 
     const inbound = await this._getCached('inbound');
@@ -833,8 +849,12 @@ const DashboardModule = {
 
   // ===== 供应商合同状态分布饼图 =====
   async renderSupplierContractChart() {
+    // 🟢 v228.08：chart 按需加载（失败仅跳过本图）
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[dashboard] 图表组件加载失败，已跳过期图:', e && e.message); return; }
     const canvas = document.getElementById('supplierContractCanvas');
     if (!canvas) return;
+    if (typeof Chart === 'undefined' || !canvas.isConnected) return;
     if (this.supplierContractChart) { this.supplierContractChart.destroy(); this.supplierContractChart = null; }
 
     const suppliers = await this._getCached('suppliers');
@@ -911,8 +931,12 @@ const DashboardModule = {
 
   // ===== 订单状态分布环形图（待审/已审/在途，按订单编号去重计数；复用 getDashboardStats 统一数据） =====
   async renderOrderStatusChart(stats) {
+    // 🟢 v228.08：chart 按需加载（失败仅跳过本图）
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[dashboard] 图表组件加载失败，已跳过订单状态图:', e && e.message); return; }
     const canvas = document.getElementById('orderStatusCanvas');
     if (!canvas) return;
+    if (typeof Chart === 'undefined' || !canvas.isConnected) return;
     if (this.orderStatusChart) { this.orderStatusChart.destroy(); this.orderStatusChart = null; }
 
     // 直接使用统一计算的 stats 值（已按订单编号去重），不再单独查询数据库

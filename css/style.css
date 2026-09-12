@@ -14,7 +14,9 @@
   --bg-noise: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
 
   /* 卡片 */
-  --card-bg: rgba(255,255,255,0.7);
+  /* 🟢 v228.08 P1-7：模糊半径下调后，提高卡片底色不透明度作补偿，
+     避免背后内容透出影响文字可读性（磨砂感略减，但可读性不降级）。 */
+  --card-bg: rgba(255,255,255,0.82);
   --card-bg-hover: rgba(255,255,255,0.85);
   --card-border: rgba(255,255,255,0.8);
   --card-shadow: 0 4px 24px rgba(31,38,135,0.06);
@@ -62,9 +64,13 @@
   --status-info: #2563EB;
   --status-info-bg: rgba(37,99,235,0.12);
 
-  /* 毛玻璃 */
-  --glass-blur: blur(20px) saturate(180%);
-  --glass-blur-light: blur(10px) saturate(160%);
+  /* 毛玻璃
+     🟢 v228.08 性能优化 P1-7：模糊半径 20px/10px → 8px/6px。
+     backdrop-filter 的 GPU 开销与模糊半径近似平方关系，20~24px 的重磨砂在低端机/移动端
+     滚动与弹窗动画时明显掉帧。降到 8px 后磨砂感基本保留（配合卡片背景不透明度上调作补偿），
+     合成开销大幅下降。 */
+  --glass-blur: blur(8px) saturate(150%);
+  --glass-blur-light: blur(6px) saturate(140%);
 
   /* 滚动条（🟢 v190：加宽到 12px，轨道透明+内边距留白，滑块用冰川蓝半透，hover 加深） */
   --scrollbar-thumb: rgba(91,155,213,0.35);
@@ -105,7 +111,7 @@
   --bg-aurora-4: rgba(168,85,247,0.03);
   --bg-noise: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E");
 
-  --card-bg: rgba(15,23,42,0.6);
+  --card-bg: rgba(15,23,42,0.74);
   --card-bg-hover: rgba(15,23,42,0.8);
   --card-border: rgba(56,189,248,0.25);
   --card-shadow: 0 0 20px rgba(56,189,248,0.06), inset 0 1px 0 rgba(255,255,255,0.03);
@@ -309,8 +315,8 @@ body::after{
   border-radius: 20px;
   border: 1px solid rgba(200,210,220,0.45);
   background: rgba(255,255,255,0.72);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   color: var(--text-main); font-size: 13px; font-weight: 500;
   cursor: pointer; outline: none;
   transition: all 0.25s cubic-bezier(0.25,0.46,0.45,0.94);
@@ -661,11 +667,11 @@ body::after{
 .main-content{
   flex: 1; display: flex; flex-direction: column;
   min-width: 0; height: 100%; overflow: hidden; position: relative;
-  padding-top: calc(var(--header-height) + 16px);
+  padding-top: calc(var(--header-height) + 6px);   /* 🟢 v228.23 S-2：压缩顶栏下方留白，让筛选栏更靠近顶栏 */
 }
 .content-scroll{
   flex: 1; overflow-y: auto; overflow-x: hidden;
-  padding: 16px 20px; -webkit-overflow-scrolling: touch;
+  padding: 12px 20px; -webkit-overflow-scrolling: touch;   /* 🟢 v228.23 S-2：顶部内边距 16→12，进一步贴近顶栏 */
 }
 .content-scroll::-webkit-scrollbar{ width: var(--scrollbar-width); height: var(--scrollbar-width); }
 .content-scroll::-webkit-scrollbar-track{ background: var(--scrollbar-track); }
@@ -732,9 +738,9 @@ body::after{
 /* 保持 kpi-card 兼容旧代码 —— 立体毛玻璃拟态卡片 */
 .kpi-grid{ display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .kpi-card{
-  background: rgba(255,255,255,0.45);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   border: 1px solid rgba(255,255,255,0.65);
   border-radius: 14px;
   box-shadow:
@@ -778,9 +784,9 @@ body::after{
 .contract-stats{ display: flex; gap: 12px; margin: 14px 0; }
 .contract-stats > *{ flex: 0 0 auto; width: 150px; }
 .contract-stat-item{
-  background: rgba(255,255,255,0.45);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   border: 1px solid rgba(255,255,255,0.65);
   border-radius: 14px;
   box-shadow:
@@ -1051,7 +1057,7 @@ body::after{
 /* 🟢 v185：标题行改为冰川蓝渐变胶囊（D' 方案）+ 顶部高光 + 玻璃厚度感 */
 .data-table thead th{
   position: relative;
-  background: linear-gradient(180deg, #9bc4e4 0%, #5e9ad0 45%, #4078ab 100%);
+  background: linear-gradient(180deg, #5e9ad0 0%, #4078ab 50%, #2f5a87 100%);
   color: #ffffff; font-weight: 700; text-align: center !important;
   padding: 11px 14px; white-space: nowrap; font-size: 12.5px;
   text-transform: none; letter-spacing: 0.4px;
@@ -1423,8 +1429,8 @@ body::after{
   background: linear-gradient(135deg, rgba(91, 155, 213, 0.5) 0%, rgba(91, 155, 213, 0.2) 50%, rgba(255, 255, 255, 0.08) 100%);
   color: #1E4A7A;
   border: 1px solid rgba(91, 155, 213, 0.5);
-  backdrop-filter: blur(12px) saturate(150%);
-  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   box-shadow: 0 2px 8px rgba(91, 155, 213, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.5);
   font-weight: 600;
 }
@@ -1757,6 +1763,19 @@ body::after{
 }
 @keyframes spin { to{ transform: rotate(360deg); }}
 .loading-text{ margin-top: 14px; font-size: 13px; color: var(--text-body); font-weight: 500; }
+/* 🟢 v228.22：加载副文案 + 跳过按钮（B-1 修复：打底/同步长时间不结束时的逃生口） */
+.loading-sub{ margin-top: 10px; font-size: 12.5px; color: var(--text-muted); line-height: 1.5; max-width: 280px; text-align: center; }
+.loading-actions{ margin-top: 18px; display: flex; gap: 10px; justify-content: center; }
+.loading-skip-btn{ font-size: 13px; padding: 8px 16px; cursor: pointer; }
+/* 🟢 v228.22 B-3：内置示例数据提示横幅（让用户区分演示数据与真实数据） */
+.demo-data-banner{
+  margin:0 0 12px; padding:10px 14px; border-radius:10px;
+  background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.35);
+  color:#92400e; font-size:12.5px; line-height:1.5;
+}
+.demo-data-banner b{ color:#b45309; }
+[data-theme="dark"] .demo-data-banner{ background:rgba(245,158,11,0.16); color:#fcd34d; border-color:rgba(245,158,11,0.40); }
+[data-theme="dark"] .demo-data-banner b{ color:#fbbf24; }
 
 /* 货车进度条形态 */
 .loading-truck-wrap{ margin-top: 22px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
@@ -1797,6 +1816,14 @@ body::after{
 }
 .empty-state .empty-icon{ font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
 .empty-state .empty-text{ font-size: 14px; }
+
+/* 🟢 v228.09 性能优化 P1-4：虚拟滚动表格（.vt-table 仅在行数超阈值时启用）。
+   统一行高 + 单元格不换行，保证「可视窗口」按行高计算时准确、滚动不漂移。
+   仅影响「每页=全部」这类超多行场景，默认分页不启用、外观完全不变。 */
+.vt-table tbody tr{ height: 38px; }
+.vt-table tbody td{ white-space: nowrap; }
+.vt-table tbody tr.vt-spacer{ height: auto; }
+.vt-table tbody tr.vt-spacer td{ padding: 0; border: 0; }
 .empty-state .empty-hint{ font-size: 12px; margin-top: 6px; opacity: 0.7; }
 @keyframes shimmer { 0%{ background-position: 200% 0; } 100%{ background-position: -200% 0; }}
 
@@ -2090,8 +2117,8 @@ button{
   color: #1E4A7A; font-size: 14px; font-weight: 600;
   cursor: pointer; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: 0 3px 12px rgba(91, 155, 213, 0.25), 0 1px 3px rgba(0,0,0,0.05), inset 0 1px 0 rgba(255, 255, 255, 0.5);
-  backdrop-filter: blur(12px) saturate(150%);
-  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   border: 1px solid rgba(91, 155, 213, 0.45);
 }
 .btn-primary:hover{
@@ -2311,7 +2338,7 @@ button{
   font-weight: 700 !important;
   color: #ffffff !important;
   text-align: center;  /* 🟢 v113：默认居中（无 !important，允许用户对齐偏好 inline 覆盖） */
-  background: linear-gradient(180deg, #9bc4e4 0%, #5e9ad0 45%, #4078ab 100%) !important;
+  background: linear-gradient(180deg, #5e9ad0 0%, #4078ab 50%, #2f5a87 100%) !important;
   letter-spacing: 0.4px;
   text-transform: none !important;
   white-space: nowrap;
@@ -2345,16 +2372,25 @@ button{
 
 /* ===== 实体可点击链接（打通模块关联）===== */
 .entity-link{
-  color: var(--primary, #4a7ce8);
+  color: #1f6fb2;   /* 🟢 v228.22 W-2：原 var(--primary)=#5B9BD5 在白底仅 ≈2.96:1，不达标；改深蓝 #1f6fb2 ≈5.3:1 */
   text-decoration: none;
   cursor: pointer;
-  border-bottom: 1px dashed transparent;
+  border-bottom: 1px dotted rgba(31,111,178,0.45);  /* 非颜色可达性提示：不依赖色觉也能识别「可点击」 */
   transition: color .15s ease, border-color .15s ease;
 }
 .entity-link:hover{
   color: var(--primary-dark, #2f5fb0);
   border-bottom-color: currentColor;
 }
+/* 🟢 v228.23 S-5：低周转表格内可点击编码链接行高仅 15px、密集排列易点错相邻行——
+   增加行高与内边距，放大点击命中区并拉开行间距 */
+.lt-data-table .entity-link{
+  display: inline-block;
+  line-height: 1.7;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.lt-data-table tbody td{ vertical-align: middle; }
 /* 详情页：返回按钮 + 最近浏览面包屑 */
 .detail-back{
   display: inline-flex; align-items: center; gap: 6px;
@@ -2467,17 +2503,18 @@ button{
 .qr-img{ width: 132px; height: 132px; flex: 0 0 auto; background: #fff;
   border-radius: 10px; padding: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
 .qr-img svg{ display: block; width: 100%; height: 100%; }
-.qr-meta{ display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
+.qr-info{ display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; min-width: 160px; }
+.qr-meta{ display: flex; flex-direction: column; gap: 4px; }
 .qr-meta .qr-name{ font-size: 15px; font-weight: 700; color: var(--text-main, #1E293B); }
 .qr-meta .qr-code{ font-size: 13px; color: var(--text-muted, #94A3B8); }
 .qr-meta .qr-spec{ font-size: 13px; color: var(--text-secondary, #64748B); }
-/* 🟢 v227.91：qr-actions 提到 qr-body 内，与 qr-img 平级 ⇒ 按钮排在二维码右边 */
-.qr-actions{ display: flex; gap: 8px; flex: 0 0 auto; flex-wrap: wrap; }
+/* 🟢 v228.12：下载/打印按钮放在名称/规格下方 */
+.qr-actions{ display: flex; gap: 8px; flex-wrap: wrap; }
 .qr-actions .btn--ghost{ font-size: 12px; padding: 6px 12px; height: auto !important; }
-/* 🟢 v227.91：PC 端 qr-body 强制不换行，确保 [二维码 | 名称/规格 | 下载/打印] 三段同行（按钮排在二维码右边） */
+/* PC 端保持二维码与信息列左右排布 */
 @media (min-width: 770px) {
-  .qr-body{ flex-wrap: nowrap !important; }
-  .qr-actions{ flex-wrap: nowrap !important; }
+  .qr-body{ flex-wrap: nowrap !important; align-items: flex-start; }
+  .qr-info{ flex-wrap: nowrap; }
 }
 [data-theme="dark"] .qr-img{ background: #fff; }
 [data-theme="dark"] .qr-body{ background: rgba(30,41,59,0.5); border-color: rgba(51,65,85,0.4); }
@@ -2645,8 +2682,8 @@ button{
     0 4px 12px rgba(0,0,0,0.06),
     0 0 0 1px rgba(255,255,255,0.5) inset,
     0 -2px 6px rgba(200,215,235,0.15) inset;
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px)saturate(180%);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   min-width:280px;max-width:340px;padding:0;font-size:13px;
 }
 .efp-search-row{
@@ -2771,8 +2808,8 @@ button{
   font-weight: 600;
   cursor: pointer;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  backdrop-filter: blur(14px) saturate(160%);
-  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   letter-spacing: 0.3px;
   box-shadow: 0 3px 12px rgba(141, 210, 180, 0.25), 0 1px 3px rgba(0,0,0,0.05), inset 0 1px 0 rgba(255, 255, 255, 0.55);
 }
@@ -2863,8 +2900,8 @@ button{
 .autocomplete-dropdown{
   position: fixed; z-index: 9999;
   background: var(--card-bg);
-  backdrop-filter: blur(16px) saturate(150%);
-  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   border: 1px solid var(--card-border);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.06);
@@ -2954,8 +2991,8 @@ button{
     0 6px 16px rgba(15, 23, 42, 0.08),
     inset 0 1px 0 rgba(255, 255, 255, 0.9),
     inset 0 -1px 0 rgba(15, 23, 42, 0.04);
-  backdrop-filter: blur(12px) saturate(160%);
-  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
   display: inline-flex; align-items: center; justify-content: center; gap: 4px;
 }
@@ -3023,7 +3060,7 @@ button{
 }
 /* 🟢 v185：出库明细卡标题行也跟随 D' 冰川蓝渐变 + 立体 */
 .ob-detail-card .data-table thead th{
-  background: linear-gradient(180deg, #9bc4e4 0%, #5e9ad0 45%, #4078ab 100%) !important;
+  background: linear-gradient(180deg, #5e9ad0 0%, #4078ab 50%, #2f5a87 100%) !important;
   color: #ffffff !important;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -3402,14 +3439,14 @@ body.col-resizing{ cursor: col-resize; user-select: none; }
   /* 🟢 v139：移动端列折叠「展开剩余 N 列」按钮（插在表格上方） */
   .mobile-col-toggle{
     display: inline-flex; align-items: center; gap: 4px;
-    margin: 0 0 8px; padding: 7px 14px;
+    margin: 0 0 8px; padding: 8px 16px; min-height: 36px;   /* 🟢 v228.23 S-4：高度 29→36px，达舒适触控阈值 */
     font-size: 13px; font-weight: 600; line-height: 1;
     color: #1E4A7A; cursor: pointer;
     background: linear-gradient(135deg, rgba(91, 155, 213, 0.5) 0%, rgba(91, 155, 213, 0.2) 50%, rgba(255, 255, 255, 0.08) 100%);
     border: 1px solid rgba(91, 155, 213, 0.5);
     border-radius: 999px;
-    backdrop-filter: blur(12px) saturate(150%);
-    -webkit-backdrop-filter: blur(12px) saturate(150%);
+    backdrop-filter: blur(8px) saturate(150%);
+    -webkit-backdrop-filter: blur(8px) saturate(150%);
     box-shadow: 0 2px 8px rgba(91, 155, 213, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.5);
     -webkit-tap-highlight-color: transparent;
   }
@@ -3605,6 +3642,12 @@ body.col-resizing{ cursor: col-resize; user-select: none; }
   display:flex;align-items:center;gap:10px;flex-wrap:nowrap;
 }
 .ob-field-row .ob-field-label{ flex:0 0 auto; }
+/* 🟢 v228.22 B-2：出库单信息卡片改弹性换行（原为 4 列定宽 grid，窄屏下第 4 个字段「领用人员」会越出视口）。
+   改为 flex-wrap + 各字段 flex:1 1 220px，空间不足时自动折到下一行，且容器 overflow-x:auto 兜底，
+   杜绝任何字段彻底不可达。出库单号单元带 ◀/▶ 按钮需要更宽，给更大 basis。 */
+.ob-header-grid > .ob-field{ flex:1 1 220px; min-width:200px; }
+.ob-header-grid > .ob-field:first-child{ flex:2 1 300px; }
+.ob-header-grid .ob-field-row > input{ width:100%; min-width:120px; }
 /* 🟢 v227.77：把 .ob-field-row 内嵌控件默认 flex 调为 1 1 auto（之前 0 1 auto 在
    出库单信息卡片里导致 ◀/▶/input 紧贴 label、剩余空间不伸展、视觉上「label 与控件上下错位」）。
    出库单号单元内部的 .ob-orderno-row 单独 flex:0 0 auto（保持 input 160px 紧凑宽度）。 */
@@ -3942,8 +3985,8 @@ body.col-resizing{ cursor: col-resize; user-select: none; }
   width: min(420px, 92vw);
   padding: 40px 38px 28px;
   background: rgba(255, 255, 255, .86);
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(8px) saturate(150%);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
   border: 1px solid rgba(255, 255, 255, .9);
   border-radius: 20px;
   box-shadow: 0 30px 70px rgba(15, 23, 42, .28), inset 0 1px 0 rgba(255, 255, 255, .9);
@@ -4438,4 +4481,14 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
     width: auto;
     margin: 0 2px;
   }
+}
+
+/* ===== 🟢 v228.23 S-3：移动端分页按钮触控目标放大到 ≥40px =====
+   置于文件末尾并以 (0,2,1) 的 .pagination-bar .page-btns button 选择器对齐 4222 行同规格规则，
+   确保覆盖基础 .wb-pager-btn(4161) 与 .pagination-bar .page-btns button(4222) 的 30px 定高。 */
+@media (max-width: 768px){
+  .pagination-bar .page-btns button,
+  .pagination-bar .page-btns .wb-pager-btn{ width: 40px; min-width: 40px; height: 40px; border-radius: 11px; font-size: 13px; }
+  .pagination-bar .wb-pager-btn{ width: 40px; height: 40px; }
+  .pagination-bar .page-btns{ gap: 6px; }
 }

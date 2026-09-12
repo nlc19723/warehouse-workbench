@@ -67,14 +67,14 @@ const QueryModule = {
     content.innerHTML = `
       <div class="tab-bar" style="display:flex;align-items:center;gap:4px;">${tabBtns}</div>
       <div class="filter-bar filter-bar-m" style="margin-bottom:14px;">
-        <input type="text" id="querySearch" class="fb-search filter-search-short" autocomplete="off" placeholder="多关键词搜索（空格/逗号分隔）..." value="${this.escapeHtml(this.searchKW)}" onkeydown="if(event.key==='Enter')QueryModule.doSearch()" onfocus="QueryModule.showHistory()">
+        <input type="text" id="querySearch" class="fb-search filter-search-short" autocomplete="off" placeholder="多关键词搜索（空格/逗号分隔）..." value="${this.escapeAttr(this.searchKW)}" onkeydown="if(event.key==='Enter')QueryModule.doSearch()" onfocus="QueryModule.showHistory()">
         <div class="fb-row fb-row--date">
           <div class="fb-field"><input type="text" id="queryStartDate" value="${escAttr(this.startDate)}" class="filter-date dp-input" placeholder="起始日期" title="起始日期" onchange="QueryModule.onDateChange()" readonly></div>
           <span class="fb-sep filter-sep">至</span>
           <div class="fb-field"><input type="text" id="queryEndDate" value="${escAttr(this.endDate)}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="QueryModule.onDateChange()" readonly></div>
         </div>
         <div class="fb-row fb-row--buttons">
-          <button class="btn--primary" onclick="QueryModule.doSearch()">搜索</button>
+          <button class="btn--primary" onclick="QueryModule.doSearch()">🔍 搜索</button>
           <button class="btn--ghost" onclick="QueryModule.clearSearch()">清空</button>
         </div>
       </div>
@@ -100,10 +100,18 @@ const QueryModule = {
     }
   },
 
+  // 🟢 AUDIT-228-01（v228.18）：原实现用 textContent→innerHTML，浏览器对「文本节点」序列化
+  //   只转义 & < >，**不转义 " 与 '**。当本函数被用于 HTML 属性插值（value="${...}" / data-kw="${...}"）
+  //   时，双引号可闭合属性、追加任意事件属性 → 属性逃逸型 XSS（已实测可注入 onfocus 并执行）。
+  //   现改为与全局 esc/escAttr 一致的完整转义表（含引号），文本与属性两种场景都安全。
   escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
+    return String(str == null ? '' : str).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  },
+
+  // 属性插值专用：语义上明确「这个值要进 HTML 属性」，优先走全局 escAttr
+  escapeAttr(str) {
+    return (typeof escAttr === 'function') ? escAttr(str) : this.escapeHtml(str);
   },
 
   switchTab(tabId) {
@@ -336,7 +344,7 @@ const QueryModule = {
     pop.innerHTML = `
       <div class="qh-head"><span>🕘 最近搜索</span><span class="qh-clear" onclick="QueryModule.clearHistory()">清空</span></div>
       <div class="qh-list">
-        ${list.map(k => `<div class="qh-item" data-kw="${this.escapeHtml(k)}"><span class="qh-text">${this.escapeHtml(k)}</span><span class="qh-del" data-kw="${this.escapeHtml(k)}" title="删除">×</span></div>`).join('')}
+        ${list.map(k => `<div class="qh-item" data-kw="${this.escapeAttr(k)}"><span class="qh-text">${this.escapeHtml(k)}</span><span class="qh-del" data-kw="${this.escapeAttr(k)}" title="删除">×</span></div>`).join('')}
       </div>`;
     // 定位到输入框下方
     const r = input.getBoundingClientRect();

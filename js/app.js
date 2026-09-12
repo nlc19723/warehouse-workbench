@@ -177,6 +177,22 @@ const App = {
     this.showLoginView();
   },
 
+  // 🟢 v228.22 B-3：当前显示为「内置示例数据」时，在内容区顶部渲染提示横幅，
+  //   避免用户把演示数据误当成真实数据（来源：自动 Excel / 云端基准垫底，而非用户真实导入）。
+  async _maybeShowDemoBanner(area) {
+    if (!area || typeof DataLoader === 'undefined' || typeof DataLoader.isBuiltinSeeded !== 'function') return;
+    let seeded = false;
+    try { seeded = await DataLoader.isBuiltinSeeded(); } catch (e) { seeded = false; }
+    const badge = area.querySelector('#demoDataBanner');
+    if (!seeded) { if (badge) badge.remove(); return; }
+    if (badge) { badge.style.display = ''; return; }   // 已存在则复用，避免重复插入
+    const bar = document.createElement('div');
+    bar.id = 'demoDataBanner';
+    bar.className = 'demo-data-banner';
+    bar.innerHTML = '⚠️ 当前显示为 <b>内置示例数据</b>，仅供功能预览；上传 Excel 或同步云端后，将自动替换为你的真实数据。';
+    area.insertBefore(bar, area.firstChild);
+  },
+
   // ===== 模块切换状态记忆 =====
   // 保存模块实例的搜索/筛选/分页/tab 等状态；页面刷新后 moduleState 为空，自动重置
   saveModuleState(inst, key) {
@@ -370,8 +386,14 @@ const App = {
         const reader = new FileReader();
         reader.onload = (ev) => {
           const dataUrl = ev.target.result;
-          avatar.innerHTML = `<img src="${dataUrl}" alt="头像">`;
-          localStorage.setItem('sidebarAvatar', dataUrl);
+          // 🟢 AUDIT-228-08（v228.18）：原为 `avatar.innerHTML = \`<img src="${dataUrl}">\`` ——
+          //   字符串拼接进 HTML，依赖 dataUrl 不含引号才安全。改用 DOM API 赋值，
+          //   属性值不经过 HTML 解析器，彻底消除解析歧义（同时对 data: 大图也更快）。
+          const img = document.createElement('img');
+          img.src = dataUrl;
+          img.alt = '头像';
+          avatar.replaceChildren(img);
+          try { localStorage.setItem('sidebarAvatar', dataUrl); } catch (e) { /* 存储失败不影响显示 */ }
         };
         reader.readAsDataURL(file);
       };
@@ -621,7 +643,14 @@ const App = {
     const el = document.getElementById('adminPwdInput');
     const pwd = el ? el.value.trim() : '';
     if (!pwd) { WBModal.alert('请输入管理员密码'); return; }
-    const hash = (typeof sha256Hex === 'function') ? sha256Hex(pwd) : pwd;
+    // 🟢 AUDIT-228-05（v228.18）：原写法在 sha256Hex 缺失时降级为「明文比对」（fail-open），
+    //   一旦脚本加载顺序被改动就静默退回弱校验。改为 fail-closed：哈希不可用时拒绝登录。
+    if (typeof sha256Hex !== 'function') {
+      console.error('[auth] sha256Hex 未就绪，拒绝管理员校验');
+      WBModal.alert('安全模块未就绪，请刷新页面后重试');
+      return;
+    }
+    const hash = sha256Hex(pwd);
     if (hash !== AppConfig.getAdminPwdHash()) {
       WBModal.alert('管理员密码错误');
       return;
@@ -1002,8 +1031,13 @@ const App = {
 
     // 管理员路径：本地哈希校验 + 建立特权会话（不依赖云端）
     if (name === '管理员') {
-      const hash = (typeof sha256Hex === 'function') ? sha256Hex(pwd) : pwd;
-      if (hash !== AppConfig.getAdminPwdHash()) return { ok: false, msg: '管理员密码错误' };
+      // 🟢 AUDIT-228-05（v228.18）：fail-closed —— 哈希函数不可用时拒绝登录，
+      //   而不是退回明文比对（原写法）。
+      if (typeof sha256Hex !== 'function') {
+        console.error('[auth] sha256Hex 未就绪，拒绝管理员登录');
+        return { ok: false, msg: '安全模块未就绪，请刷新页面后重试' };
+      }
+      if (sha256Hex(pwd) !== AppConfig.getAdminPwdHash()) return { ok: false, msg: '管理员密码错误' };
       AppConfig.setAdminSession();
       const cur = AppConfig.getCurrentUser();
       if (!cur || !cur.username) {
@@ -1595,6 +1629,19 @@ const App = {
   },
 
   // ===== 模块切换（v213 优化：去全屏遮罩闪跳 + 轻量进度条 + 平滑淡入）=====
+  // 🟢 v228.23 W-6：为缺少可访问名称的筛选/分页控件补 aria-label。
+  //   各模块筛选控件已带 title（如「按供应商筛选」），但 title 不被屏幕阅读器稳定读作可访问名称；
+  //   这里在每次渲染完成后把 title 回填为 aria-label，一处 centrally 覆盖 40+ 控件，无需逐处改动。
+  backfillA11yLabels(area) {
+    if (!area || typeof area.querySelectorAll !== 'function') return;
+    const sel = 'select, input[type="text"], input[type="number"], input[type="search"], input:not([type]), textarea';
+    area.querySelectorAll(sel).forEach(el => {
+      if (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')) return;
+      const t = (el.getAttribute('title') || '').trim();
+      if (t) el.setAttribute('aria-label', t);
+    });
+  },
+
   async go(moduleName, params) {
     if (!this.modules[moduleName]) return;
     // v217 模块权限拦截：无权限账号禁止进入，并落地到第一个有权限模块
@@ -1699,6 +1746,10 @@ const App = {
       realArea.classList.remove('content-fade');
       void realArea.offsetWidth; // 触发重排以重启动画
       realArea.classList.add('content-fade');
+      // 🟢 v228.22 B-3：若当前显示为内置示例数据，渲染顶部提示横幅（避免与真实数据混淆）
+      this._maybeShowDemoBanner(realArea);
+      // 🟢 v228.23 W-6：渲染完成后回填筛选/分页控件的 aria-label（覆盖 40+ 控件）
+      this.backfillA11yLabels(realArea);
     }
 
     if (moduleName === 'outbound' && typeof OutboundListModule !== 'undefined') {

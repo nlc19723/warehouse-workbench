@@ -8,6 +8,21 @@ window.StocktakeBatchModule = {
     return !!(u && (u.role === 'admin' || u.username === '管理员'));
   },
 
+  // 🟢 v228.08 性能优化 P1-5：关键字搜索防抖。
+  //   原实现 oninput 直接调 loadData()，而 loadData 内含「云端同步 + 全量盘点记录遍历 +
+  //   进行中批次实时计算」，每敲一个字符就跑一遍，输入越长越卡。
+  //   改为：关键字立即写入 filter（保证值不丢），300ms 内无新输入才真正加载。
+  onKeywordInput(v) {
+    this.filter.keyword = v;
+    if (!this._kwDebounced) {
+      this._kwDebounced = (typeof TableUtils !== 'undefined' && TableUtils.debounce)
+        ? TableUtils.debounce(() => this.loadData(), 300)
+        : null;
+    }
+    if (this._kwDebounced) this._kwDebounced();
+    else this.loadData();   // 兜底：工具不可用时保持原行为
+  },
+
   // 进入模块：先写模板（含 #stBatchArea），再 loadData 填充
   async render(token) {
     if (token !== undefined) this._rt = token;
@@ -21,7 +36,7 @@ window.StocktakeBatchModule = {
           <option value="">全部</option><option value="quarter">季度</option>
         </select>
         </label>
-        <input id="stbKw" type="text" placeholder="搜索批次名 / 编码" oninput="StocktakeBatchModule.filter.keyword=this.value;StocktakeBatchModule.loadData();" style="height:32px;border:1px solid var(--border-color);border-radius:8px;padding:0 8px;font-size:13px;">
+        <input id="stbKw" type="text" placeholder="搜索批次名 / 编码" oninput="StocktakeBatchModule.onKeywordInput(this.value)" style="height:32px;border:1px solid var(--border-color);border-radius:8px;padding:0 8px;font-size:13px;">
         <span id="stbCount" style="margin-left:auto;font-size:13px;opacity:.8;"></span>
       </div>
       <div id="stBatchArea"></div>

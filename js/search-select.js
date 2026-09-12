@@ -217,10 +217,19 @@ class SearchSelect {
       si.type = 'text';
       si.placeholder = this.placeholder;
       si.addEventListener('click', (e) => e.stopPropagation());
+      // 🟢 v228.08 性能优化 P1-5：下拉搜索防抖。
+      //   选项可达上千条（如存货编码/名称），每敲一个字符就全量过滤并重建面板 DOM 会卡顿。
+      //   _lastQuery / activeIdx 仍同步更新，键盘 Enter 选择走 _lastQuery 实时过滤，不受影响。
       si.addEventListener('input', () => {
         this._lastQuery = si.value;
         this.activeIdx = 0;
-        this._renderPanel(this._filter(si.value));
+        if (!this._searchDebounced) {
+          this._searchDebounced = (typeof TableUtils !== 'undefined' && TableUtils.debounce)
+            ? TableUtils.debounce(() => this._renderPanel(this._filter(this._lastQuery || '')), 200)
+            : null;
+        }
+        if (this._searchDebounced) this._searchDebounced();
+        else this._renderPanel(this._filter(si.value));   // 兜底：工具不可用时保持原行为
       });
       si.addEventListener('keydown', (e) => {
         if (e.key === 'ArrowDown') { e.preventDefault(); this._move(1); }
@@ -282,7 +291,6 @@ window.enhanceSearchSelect = function (id, opts) {
   window._ssRegistry[id] = ss;
   return ss;
 };
-// 批量升级（传入 [{id, placeholder}]）
-window.enhanceSearchSelects = function (list) {
-  (list || []).forEach(it => window.enhanceSearchSelect(it.id, it.opts));
-};
+// 🗑 AUDIT-228-06（v228.18）：删除死代码 enhanceSearchSelects —— 全仓零引用
+//   （js/ 与 index.html 均无调用），保留只有维护负担。批量升级如需恢复，
+//   可用一行替代：(list||[]).forEach(it => window.enhanceSearchSelect(it.id, it.opts));

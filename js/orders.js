@@ -199,10 +199,10 @@ const OrdersModule = {
       return;
     }
 
-    area.innerHTML = `
-      <div class="table-wrapper">
-        <table class="data-table" data-table-key="orders">
-          <thead>
+    // 🟢 v228.09 性能优化 P1-4：拆出「表头」与「行模板」。
+    //   行数 >150（如「每页=全部」的 2394 行）时由 virtualTable 只渲染视口附近的行，
+    //   DOM 节点从 ~4.6 万降到数百；默认 20/50 条分页仍走整表渲染，输出与改动前完全一致。
+    const thead = `
             <tr>
               <th>订单编号</th>
               <th>日期</th>
@@ -216,10 +216,8 @@ const OrdersModule = {
               <th>含税单价</th>
               <th>含税金额</th>
               <th>状态</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${items.map(o => `
+            </tr>`;
+    const rowHtml = (o) => `
               <tr>
                 <td><strong>${TableUtils.link('order', o.订单编号 ?? '', o.订单编号 ?? '')}</strong></td>
                 <td>${esc(o.日期 ?? '')}</td>
@@ -233,12 +231,8 @@ const OrdersModule = {
                 <td>${TableUtils.formatMoney(o.原币含税单价)}</td>
                 <td>${TableUtils.formatMoney(o.原币价税合计)}</td>
                 <td>${o.审批状态 ? `<span class="tag ${o.审批状态 === '审批通过' ? 'tag-success' : 'tag-neutral'}">${esc(o.审批状态)}</span>` : ''}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
+              </tr>`;
+    TableUtils.virtualTable(area, { items, rowHtml, thead, tableAttrs: 'data-table-key="orders"', threshold: 150 });
 
     this.renderPagination(total, totalPages);
     TableUtils.initSmartSelect('orderTableArea');
@@ -249,13 +243,21 @@ const OrdersModule = {
     TableUtils.renderPagination('orderPagination', { module: 'OrdersModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
   },
 
-  renderTrendChart(allOrders) {
+  // 🟢 v228.08：Chart 改为按需加载 —— 本函数升级为 async，先加载 chart 组件再绘制。
+  //   调用点无需 await：图表异步补上，加载失败仅跳过图表、不影响列表主流程。
+  async renderTrendChart(allOrders) {
     const card = document.getElementById('orderTrendCard');
     if (!card) return;
     card.style.display = 'block';
 
+
+    // 🟢 v228.08：chart.min.js 不再随首屏预载，首次绘制前动态加载
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[orders] 图表组件加载失败，已跳过趋势图:', e && e.message); return; }
+    // 在 await 之后再取 canvas：若期间 DOM 被重建，取到的是最新元素，不会因旧引用失效而误跳过
     const canvas = document.getElementById('orderTrendChart');
     if (!canvas) return;
+    if (typeof Chart === 'undefined') return;
 
     if (this._trendChart) { this._trendChart.destroy(); this._trendChart = null; }
 

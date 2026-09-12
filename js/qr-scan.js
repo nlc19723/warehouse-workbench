@@ -319,6 +319,12 @@
       WBModal.alert('当前环境不支持摄像头扫码。\n请使用 HTTPS 访问工作台，或在手机浏览器中打开。');
       return;
     }
+    // 🟢 v228.08：jsQR 改为按需加载（不再随首屏预载）—— 开摄像头前先把二维码解码器备好。
+    //   加载失败不直接阻断：条形码可走原生 BarcodeDetector / ZXing，下方仍有兜底判断。
+    if (!getQRDecoder()) {
+      try { await LazyLib.jsqr(); }
+      catch (e) { console.warn('[qr-scan] 二维码解码组件加载失败:', e && e.message); }
+    }
     // 二维码走 jsQR；条形码走原生 BarcodeDetector 或 ZXing（两者都没有才提示刷新）
     if (!getQRDecoder() && !getNativeDetector() && !window.ZXing) {
       WBModal.alert('扫码组件尚未加载完成，请刷新页面后重试');

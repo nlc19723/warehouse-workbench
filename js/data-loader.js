@@ -42,12 +42,64 @@ const DataLoader = {
   REQUIRED_TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover'],
 
   // 主入口：检查并导入数据（本地优先，云端异步）
-  async init() {
+  init() {
     // 🔴 重入保护（S2）：防止启动竞态或快速点击下 init 被并发调用，
     // 导致重复清空+导入（数据清空风险）。单飞锁确保同一时刻仅执行一次。
     if (this._initPromise) return this._initPromise;
-    this._initPromise = this._doInit().catch(err => { this._initPromise = null; throw err; });
+    this._aborted = false;
+    this._booting = true;
+    this._done = false;
+    let resolveOuter, rejectOuter;
+    const outer = new Promise((res, rej) => { resolveOuter = res; rejectOuter = rej; });
+    this._forceResolve = resolveOuter;
+    this._initPromise = outer;
+
+    // 🟢 v228.22 B-1：看门狗——防止任意内部步骤（云端拉取 / 基准垫底 / Excel 导入）永久挂起，
+    //   导致加载遮罩永远不消失、用户被锁死在空白页。超时后强制隐藏遮罩并进入空状态引导。
+    if (typeof LoadingHUD !== 'undefined') LoadingHUD._onSkip = () => this._userSkip();
+    this._watchdog = setTimeout(() => {
+      if (this._done) return;
+      console.warn('[data-loader] 启动加载超过 15s 未结束，强制恢复界面（B-1 看门狗）');
+      this._aborted = true;
+      this._finishBoot(false);
+    }, 15000);
+
+    (async () => {
+      try {
+        const r = await this._doInit();
+        this._finishBoot(r);
+      } catch (err) {
+        console.error('[data-loader] init 异常:', err);
+        this._finishBoot(false);
+      }
+    })();
     return this._initPromise;
+  },
+
+  // 🟢 v228.22：统一收尾（正常结束 / 超时 / 用户跳过都走这里），保证看门狗 Timer 与单飞 Promise 正确落定
+  _finishBoot(result) {
+    if (this._done) return;
+    this._done = true;
+    this._booting = false;
+    if (this._watchdog) { clearTimeout(this._watchdog); this._watchdog = null; }
+    if (this._forceResolve) this._forceResolve(result);
+  },
+
+  // 🟢 v228.22 B-1：用户点击「跳过并进入工作台」——立即隐藏遮罩、中止启动加载、进入空状态
+  _userSkip() {
+    if (this._done) return;
+    this._aborted = true;
+    hideLoading();
+    this._finishBoot(false);
+  },
+
+  // 🟢 v228.22 B-3：标记「当前数据为内置示例数据」。仅在自动垫底（Excel / 云端基准）成功时置位；
+  //   用户真实导入 / 云端同步成功时清除。供界面顶部横幅提示「当前为示例数据」，避免与真实数据混淆。
+  async _markBuiltinSeeded() {
+    try { await db.meta.put({ key: 'builtinSeeded', value: true, time: new Date().toISOString() }); } catch (e) { /* 非关键标记，失败不阻断 */ }
+  },
+  async isBuiltinSeeded() {
+    try { const m = await db.meta.get('builtinSeeded'); return !!(m && m.value); } catch (e) { return false; }
   },
 
   async _doInit() {
@@ -58,6 +110,10 @@ const DataLoader = {
     } catch (e) {
     /* ignore */ console.warn('[data-loader.js:47] 异常(已忽略):', e);
   }
+
+    // 🟢 v228.22 B-1：启动加载期间若用户点了「跳过」，本助手函数静默跳过 showLoading，
+    //   避免遮罩在后台任务仍运行时被重新点亮，让用户再次被困。
+    const sl = (t, o) => { if (!this._aborted) showLoading(t, o); };
 
     // 1) 本地已有完整数据 → 立即显示（首屏不阻塞），后台静默从云端拉取并按"云端优先覆盖本地"策略同步
     const imported = await DataStore.isDataImported();
@@ -74,13 +130,14 @@ const DataLoader = {
 
     // 2) 本地无完整数据：已连接云端则先拉云端工作数据；否则直接 Excel 兜底
     if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
-      showLoading('正在从云端同步数据...', { variant:'capsule' });
+      sl('正在从云端同步数据...', { variant:'capsule' });
       try {
         const bundle = await this._pullWithTimeout(8000);
         // 校验云端 bundle 完整性：9 张核心表必须都存在且有数据（避免残缺 bundle 覆盖本地）
         if (bundle && bundle.tables && this._isBundleComplete(bundle)) {
-          showLoading('正在从云端同步最新数据...', { variant:'capsule' });
+          sl('正在从云端同步最新数据...', { variant:'capsule' });
           await this.loadBundleFromCloud(bundle);
+          if (this._aborted) return false;   // 🟢 v228.22：用户已跳过，立即收尾
           const restored = await this._allCoreTablesPopulated();
           hideLoading();
           if (restored) {
@@ -100,11 +157,19 @@ const DataLoader = {
         if (baseBundle && baseBundle.tables && this._isBundleComplete(baseBundle)) {
           await DataStore.clearWorkTables();   // 🔵 v227.97：仅清工作表，保留设置包(outbound)数据
           await new Promise(r => setTimeout(r, 300));
-          showLoading('正在以云端基准数据打底...', { variant:'capsule' });
+          // 🟢 v228.22 B-1：打底提示补「通常 3-5 秒」说明 + 立即可跳过的逃生按钮（8s 后自动亮出）
+          sl('正在以云端基准数据打底...', {
+            variant: 'capsule',
+            sub: '正在同步云端基准数据，通常 3-5 秒完成；若长时间无变化可点下方按钮跳过',
+            skippable: true,
+            timeout: 8000
+          });
           await this.seedFromBase(baseBundle);
+          if (this._aborted) return false;   // 🟢 v228.22：用户已跳过，立即收尾
           hideLoading();
           if (await this._allCoreTablesPopulated()) {
             console.log('本地空库，已用云端基准数据垫底');
+            await this._markBuiltinSeeded();   // 🟢 v228.22 B-3：示例数据标记，供顶部横幅提示
             return true;
           }
           console.warn('[data-loader] 云端基准数据还原后仍缺核心表，改从内置 Excel 导入兜底');
@@ -114,8 +179,11 @@ const DataLoader = {
       }
     }
 
-    // 3) 都没有，读取内置 Excel 兜底
-    return await this.importFromExcel();
+    // 3) 都没有，读取内置 Excel 兜底（用户已跳过则不再尝试，直接进入空状态）
+    if (this._aborted) return false;
+    const seeded = await this.importFromExcel();
+    if (seeded) await this._markBuiltinSeeded();   // 🟢 v228.22 B-3：示例数据标记，供顶部横幅提示
+    return seeded;
   },
 
   // 校验云端 bundle 结构完整性（v227.2.1 放宽）
@@ -319,12 +387,14 @@ const DataLoader = {
   // 打包全量数据并推送到云端（覆盖式），导入/重新导入后自动调用
   // v164+：内置双版本滚动——推送前把云端现有 bundle 的 tables 存为 prevWork（上一份）
   async pushAllToCloud() {
-    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+    this._lastPushReason = null;
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) { this._lastPushReason = 'offline'; return false; }
     // 防御：仅当 9 张核心表全部有数据时才推送，绝不把残缺 bundle 推到云端
     // （防止分享链接变空白）。manualPush / pushOutboundToCloud 兜底都走这里，统一拦截。
     const allPopulated = await this._allCoreTablesPopulated();
     if (!allPopulated) {
       console.warn('[data-loader] 本地存在空表，已跳过云端推送以避免污染分享链接');
+      this._lastPushReason = 'incomplete';
       return false;
     }
     try {
@@ -358,11 +428,11 @@ const DataLoader = {
       if (ok === 'conflict') {
         // 云端已被其它设备改动 → 坚决不覆盖，让用户先拉取再推
         console.warn('[乐观锁] 云端数据已被其它设备更新，本次推送已中止');
+        this._lastPushReason = 'conflict';
         if (typeof WBModal !== 'undefined') {
           try {
             WBModal.alert(
-              '⚠ 云端数据已被其它设备更新，本次推送已中止（避免覆盖他人改动）。\n\n' +
-              '请先点「同步」拉取云端最新数据，确认无误后再推送。',
+              '⚠ 云端数据已被其它设备更新，本次推送已中止，避免覆盖他人改动。\n请先点「同步」拉取最新数据，确认后再推送。',
               { title: '同步冲突' }
             );
           } catch (e) {
@@ -374,10 +444,13 @@ const DataLoader = {
       if (ok) {
         this._setCloudBase(bundle.savedAt);   // 推送成功 → 基准推进到本次
         console.log('已推送到云端（双版本滚动已生效）');
+        return ok;
       }
-      return ok;
+      this._lastPushReason = 'upload';
+      return false;
     } catch (e) {
       console.error('打包推送失败:', e);
+      this._lastPushReason = 'upload';
       return false;
     }
   },
@@ -556,6 +629,7 @@ const DataLoader = {
       if (bundle && bundle.tables && this._isBundleComplete(bundle)) {
         await this.loadBundleFromCloud(bundle);
         await DataStore.markDataImported();
+        try { await db.meta.delete('builtinSeeded'); } catch (e) {}  // 🟢 v228.22 B-3：用户显式同步云端 → 非示例数据
         hideLoading();
         console.log('[data-loader] 已从云端同步工作数据');
         return true;
@@ -566,6 +640,7 @@ const DataLoader = {
           await db.transaction('rw', this.TABLES.concat(['meta']), async () => {
             await DataStore.clearWorkTables();   // 🔵 v227.97：仅清工作表，保留设置包(outbound)
             await this.seedFromBase(baseBundle);
+            try { await db.meta.delete('builtinSeeded'); } catch (e) {}  // 🟢 v228.22 B-3
           });
         hideLoading();
         console.log('[data-loader] 已用云端基准数据垫底');
@@ -588,6 +663,7 @@ const DataLoader = {
     if (this._importing) { console.warn('[data-loader] 已有导入进行中，忽略重复调用'); return false; }
     this._importing = true;
     DataStore.invalidateAll();   // 🟢 v227.52 P0：导入前清空会话表缓存，杜绝"导入中读取到旧/半截快照"的边缘情况
+    try { await db.meta.delete('builtinSeeded'); } catch (e) {}  // 🟢 v228.22 B-3：真实导入即清除示例标记
     try {
       // 🔴 失效存货编码缓存（M3）：重新导入后，旧映射已失效，否则新数据下编码错乱
       this._stockNameSpecCodeMap = null;
@@ -599,6 +675,10 @@ const DataLoader = {
     } catch (err) {
       throw new Error('文件解析失败，请确认是有效的 .xlsx / .xls 文件');
     }
+    // 🟢 v228.08：XLSX 已改为按需加载。Worker 解析不会把 XLSX 暴露给主线程，
+    //   而下方 _estimateRowCount / parseSheet / loadBreach 等会同步调用 XLSX.utils.*，
+    //   故需在此处（进入同步解析流程前）确保主线程 XLSX 已就绪。
+    await LazyLib.xlsx();
 
     // 🟢 v209 AUDIT-204：①中和 Excel 公式注入（以 = + - @ 开头的单元格会被表格软件当公式执行）；
     //                        ②超限防护（文件过大 / 行数过多时提前拒绝，避免主线程长时间卡死）
@@ -651,10 +731,18 @@ const DataLoader = {
     if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
       try {
         const pushed = await this.pushAllToCloud();
-        if (pushed !== true && pushed !== 'conflict') {
-          // conflict 已弹窗；此处 false 多为云端写入失败（导入后核心表应有数据，空表跳过极少见）
+        const reason = this._lastPushReason;
+        // conflict 已在 pushAllToCloud 内弹窗，此处不再重复提示
+        if (reason === 'conflict') {
+          /* 已弹窗，跳过 */
+        } else if (pushed !== true) {
+          // 其余失败按原因给精简提示
           if (typeof Toast !== 'undefined') {
-            Toast.warn('数据已保存到本地，但云端同步失败，稍后可在「云端同步 → 上传工作数据」手动重试');
+            if (reason === 'incomplete') {
+              Toast.warn('已导入本地；Excel 缺少必需表，云端未同步，请补全表头后重传。');
+            } else {
+              Toast.warn('已导入本地，云端同步失败，可稍后在「云端同步 → 上传工作数据」重试。');
+            }
           } else {
             console.warn('云端推送失败（本地数据已导入），建议手动重试');
           }
@@ -674,20 +762,29 @@ const DataLoader = {
 
   // 🟢 AUDIT-308：Web Worker 解析 XLSX。
   //   不支持 Worker / 创建失败 / 解析异常时回退主线程同步解析，保证行为与旧版完全一致。
-  _parseWorkbookAsync(arrayBuffer) {
-    if (typeof Worker === 'undefined' || typeof XLSX === 'undefined') {
+  // 🟢 v228.08 性能优化：XLSX 改为按需加载（LazyLib），不再由 index.html 预载。
+  //   Worker 路径由 Worker 内部 importScripts 自行加载 XLSX，主线程无需持有；
+  //   仅当「不支持 Worker」或「Worker 创建失败」时才在主线程加载 XLSX 兜底。
+  //   ⚠️ 原实现在此处 `typeof XLSX === 'undefined'` 时仍会调用 XLSX.read → 崩溃，
+  //      移除预载后必须改成先 await 加载再用，否则导入功能直接报错。
+  async _parseWorkbookAsync(arrayBuffer) {
+    if (typeof Worker === 'undefined') {
+      // 无 Worker → 主线程兜底：先加载 XLSX 再解析（行为与旧版一致）
+      const XLSX = await LazyLib.xlsx();
       return XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
     }
-    // 解析 XLSX 组件地址（与 index.html 中 lib/xlsx.full.min.js 同源），供 Worker importScripts
+    // 解析 XLSX 组件地址（与 LazyLib 中 lib/xlsx.full.min.js 同源），供 Worker importScripts
     const xlsxUrl = new URL('lib/xlsx.full.min.js', location.href).href;
     return new Promise((resolve, reject) => {
       let worker;
       try {
         worker = new Worker('js/import-worker.js');
       } catch (e) {
-        // Worker 不可用 → 主线程兜底，行为不变
-        try { resolve(XLSX.read(arrayBuffer, { type: 'array', cellDates: true })); }
-        catch (err) { reject(err); }
+        // Worker 不可用 → 主线程兜底：加载 XLSX 后解析，行为不变
+        LazyLib.xlsx().then(function (X) {
+          try { resolve(X.read(arrayBuffer, { type: 'array', cellDates: true })); }
+          catch (err) { reject(err); }
+        }).catch(reject);
         return;
       }
       let settled = false;
@@ -1681,12 +1778,16 @@ window.DataLoader = DataLoader;
 const LoadingHUD = (function () {
   const VARIANTS = ['truck', 'capsule', 'fluid'];
   let capsuleIdx = 0, capsuleTimer = null, fluidRAF = null, fluidState = null, fluidProg = 0;
+  let subTimer = null;   // 🟢 v228.22：打底/同步超时后自动亮出「跳过」按钮的计时器
 
   function els() {
     return {
       overlay: document.getElementById('loadingOverlay'),
       text: document.getElementById('loadingText'),
       spinner: document.getElementById('loadingSpinner'),
+      sub: document.getElementById('loadingSub'),
+      actions: document.getElementById('loadingActions'),
+      skipBtn: document.getElementById('loadingSkipBtn'),
       truckWrap: document.getElementById('loadingTruckWrap'),
       truck: document.getElementById('loadingTruck'),
       seg: document.getElementById('loadingSeg'),
@@ -1710,6 +1811,10 @@ const LoadingHUD = (function () {
     if (fluidRAF) { cancelAnimationFrame(fluidRAF); fluidRAF = null; }
     if (e.caps) e.caps.innerHTML = '';
     if (e.fluidBase) e.fluidBase.style.width = '0%';
+    // 🟢 v228.22：复位副文案 / 跳过按钮 / 超时计时器
+    if (subTimer) { clearTimeout(subTimer); subTimer = null; }
+    if (e.sub) { e.sub.hidden = true; e.sub.textContent = ''; }
+    if (e.actions) e.actions.hidden = true;
   }
 
   function showVariant(e, variant) {
@@ -1793,6 +1898,18 @@ const LoadingHUD = (function () {
     e.overlay.style.display = 'flex';
     if (e.text) e.text.textContent = text || '加载中...';
     reset(e);
+
+    // 🟢 v228.22：副文案 / 跳过按钮（B-1 修复）
+    if (opts && opts.sub) { e.sub.hidden = false; e.sub.textContent = opts.sub; }
+    const revealSkip = () => {
+      if (!e.actions) return;
+      e.actions.hidden = false;
+      if (e.skipBtn) e.skipBtn.onclick = () => { if (typeof LoadingHUD._onSkip === 'function') LoadingHUD._onSkip(); };
+      if (!opts || !opts.sub) { e.sub.hidden = false; e.sub.textContent = '加载较慢，可点下方按钮跳过'; }
+      else if (e.sub && e.sub.textContent.indexOf('加载较慢') === -1) { e.sub.textContent = e.sub.textContent + '（加载较慢时可点下方按钮跳过）'; }
+    };
+    if (opts && opts.skippable) revealSkip();
+    if (opts && opts.timeout) subTimer = setTimeout(revealSkip, opts.timeout);
 
     const explicit = opts && VARIANTS.includes(opts.variant) ? opts.variant : null;
     // 未显式指定形态时: 移动端默认粒子流体, 桌面端保持经典 spinner

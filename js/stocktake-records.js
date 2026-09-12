@@ -88,6 +88,8 @@ const StocktakeRecordModule = {
     if (window.FilterLayout) FilterLayout.balanceAll();
 
     await this.loadData(token);
+    // 🟢 v228.22 W-4：渲染完成后按当前选中数刷新「删除选中」按钮（无选中即禁用，避免误触危险操作）
+    this._updateSelBar();
   },
 
   async loadData(token) {

@@ -52,6 +52,19 @@ const InventoryAlertModule = {
     if (rt !== undefined && rt !== App._goToken) return;
     let alerts = await DataStore.getInventoryAlerts();
 
+    // 🟢 v228.11：通过合同价格表的存货编码关联类型（一码多价时取首个非空类型）
+    try {
+      const pricingRows = await DataStore.getRows('pricing');
+      const typeByCode = new Map();
+      pricingRows.forEach(p => {
+        const code = String(p.存货编码 ?? '').trim();
+        if (code && !typeByCode.has(code)) typeByCode.set(code, p.类型 || '');
+      });
+      alerts.forEach(a => {
+        a.类型 = typeByCode.get(String(a.存货编码 ?? '').trim()) || '';
+      });
+    } catch (e) { console.warn('[inventory-alert] 合同价格类型关联失败:', e); }
+
     // ===== 补货值：直接使用导入时从源数据"是否需补货"(J列)读取的原始数值 =====
     // 不做任何回退计算；若值为空(NaN)则设为0
     alerts.forEach(a => {
@@ -190,6 +203,7 @@ const InventoryAlertModule = {
               <th>状态</th>
               <th>仓库</th>
               <th>项目</th>
+              <th>类型</th>
             </tr>
           </thead>
           <tbody>
@@ -210,6 +224,7 @@ const InventoryAlertModule = {
                   <td>${needRestock ? '<span class="tag tag-danger">需补货</span>' : '<span class="tag tag-success">正常</span>'}</td>
                   <td>${esc(String(a.所上或库房 ?? '').substring(0, 15))}${String(a.所上或库房 ?? '').length > 15 ? '...' : ''}</td>
                   <td>${esc(String(a.工程项目 ?? '').substring(0, 15))}${String(a.工程项目 ?? '').length > 15 ? '...' : ''}</td>
+                  <td>${esc(String(a.类型 ?? '').substring(0, 15))}${String(a.类型 ?? '').length > 15 ? '...' : ''}</td>
                 </tr>
               `;
             }).join('')}

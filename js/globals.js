@@ -47,8 +47,13 @@ window.SearchSelect = SearchSelect;
 window.OrderDetailModule = OrderDetailModule;
 window.StockDetailModule = StockDetailModule;
 window.SupplierDetailModule = SupplierDetailModule;
-window.esc = window.esc;
-window.escAttr = window.escAttr;
+// 🟢 AUDIT-228-07（v228.18）：原为 `window.esc = window.esc;` 自赋值无效语句 ——
+//   它让人误以为「这里初始化了 esc」，实际什么都不做：esc/escAttr 由 config.js（index.html 中
+//   位于 globals.js 之前）定义。一旦脚本加载顺序调整，这两行会把 undefined 原样固定下来，
+//   使全站转义静默失效（且无任何报错）。改为显式断言：顺序出错时立刻暴露。
+if (typeof window.esc !== 'function' || typeof window.escAttr !== 'function') {
+  console.error('[globals] esc / escAttr 未就绪：请确认 config.js 在 globals.js 之前加载');
+}
 
 // 🟢 AUDIT-004：兜底捕获未处理的 Promise 异常 / 运行时错误，避免「静默失败」被吞掉。
 //   背景：全仓大量写/同步/导入路径的 await 无就近 catch（审计约 513 处），异常被静默 reject 后

@@ -99,10 +99,10 @@ const StockModule = {
       ? '<th class="stock-check-th col-checkbox"><input type="checkbox" id="stockSelAll" aria-label="全选当前页"></th>'
       : '';
 
-    area.innerHTML = `
-      <div class="table-wrapper">
-        <table class="data-table">
-          <thead>
+    // 🟢 AUDIT-228-04（v228.18）：整表 innerHTML → TableUtils.virtualTable。
+    //   ≤150 行时输出结构与改动前完全一致；「每页=全部」时只渲染视口附近的行，
+    //   避免一次性生成数千行（二维码 SVG 尤其重）。导出/排序仍基于完整 items，不受影响。
+    const thead = `
             <tr>
               ${checkTh}
               <th>二维码</th>
@@ -111,13 +111,11 @@ const StockModule = {
               <th>存货名称</th>
               <th>规格型号</th>
               <th>现存数量</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${items.map(s => {
-              const code = String(s.存货编码 ?? '').trim();
-              const checked = code && this.selectedCodes.has(code) ? 'checked' : '';
-              return `
+            </tr>`;
+    const rowHtml = (s) => {
+      const code = String(s.存货编码 ?? '').trim();
+      const checked = code && this.selectedCodes.has(code) ? 'checked' : '';
+      return `
               <tr>
                 ${bulk ? `<td class="col-checkbox"><input type="checkbox" class="stock-row-check" data-stock-code="${esc(code)}" ${checked} aria-label="选择 ${esc(code)}"></td>` : ''}
                 <td>${window.QR ? QR.thumb(code, s.存货名称, s.规格型号) : ''}</td>
@@ -127,11 +125,8 @@ const StockModule = {
                 <td>${esc(s.规格型号 ?? '')}</td>
                 <td><strong style="color:${parseFloat(s.现存数量) < 10 ? 'var(--status-danger)' : 'var(--text-main)'};">${TableUtils.formatNum(s.现存数量)}</strong></td>
               </tr>`;
-            }).join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
+    };
+    TableUtils.virtualTable(area, { items, rowHtml, thead, threshold: 150 });
 
     // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
     TableUtils.renderPagination('stockPagination', { module: 'StockModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });

@@ -293,7 +293,11 @@ const DataStore = {
         const seen = new Set();
         const merged = [];
         for (const r of cloud.concat(rows)) {
-          const key = (r['出库单号'] || '') + '|' + (r['存货编码'] || '');
+          // 🟢 v228.15：并集键补齐「出库时间 + 出库数量」。
+          //   旧键只有 出库单号|存货编码 —— 同一张单、同一存货编码分多次出库（数量或日期不同）时，
+          //   这些合法明细会被当成同一条，合并时被静默丢弃（增量导入后更容易踩到）。
+          const key = [r['出库单号'] || '', r['存货编码'] || '', r['出库时间'] || '',
+                       (r['出库数量'] === undefined || r['出库数量'] === null) ? '' : r['出库数量']].join('|');
           if (seen.has(key)) continue;
           seen.add(key);
           merged.push(r);

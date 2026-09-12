@@ -37,7 +37,7 @@ const OutboundModule = {
         <div class="glass-card-header">
           <span class="glass-card-title"><span class="title-icon">📤</span>出库单信息</span>
         </div>
-        <div class="ob-header-grid" style="display:grid;grid-template-columns:auto auto auto auto;gap:12px 24px;padding:16px;">
+        <div class="ob-header-grid" style="display:flex;flex-wrap:wrap;gap:12px 24px;padding:16px;overflow-x:auto;">
           <div class="ob-field ob-field-row">
             <label class="ob-field-label" style="font-size:14px;font-weight:700;color:var(--text-main);white-space:nowrap;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">出库单号</label>
             <div class="ob-orderno-row">
@@ -1086,8 +1086,8 @@ const OutboundListModule = {
         <div class="fb-row fb-row--buttons">
           <button class="btn--primary" onclick="OutboundListModule.applyFilter()">筛选</button>
           <button class="btn--ghost" onclick="OutboundListModule.resetFilter()">重置</button>
-          <button class="btn--ghost" onclick="OutboundListModule.importData()">⬆ 导入</button>
-          <button class="btn--ghost" onclick="OutboundListModule.exportData()">📥 导出Excel</button>
+          <button class="btn--ghost" onclick="OutboundListModule.importData()" title="把本文件明细追加到现有数据之后（不清空）">⬆ 增量导入</button>
+          <button class="btn--ghost" onclick="OutboundListModule.exportData()">📥 导出</button>
         </div>
       </div>
 
@@ -1154,9 +1154,11 @@ const OutboundListModule = {
       return;
     }
 
-    area.innerHTML = `
-      <div class="ob-list-table-wrapper">
-        <table class="data-table ob-list-table" style="table-layout:fixed;">
+    // 🟢 AUDIT-228-04（v228.18）：整表 innerHTML → TableUtils.virtualTable。
+    //   ≤150 行时输出结构与改动前完全一致（含 ob-list-table-wrapper / table-layout:fixed /
+    //   colgroup 列宽），保证 v228.13 的移动端收起态三列均分与 v228.14 的折叠记忆不受影响；
+    //   「每页=全部」时只渲染视口附近的行。导出/排序仍基于完整 items。
+    const colgroup = `
           <colgroup>
             <col style="width:48px;">       <!-- 序号 -->
             <col style="width:130px;">      <!-- 出库单号 -->
@@ -1166,8 +1168,8 @@ const OutboundListModule = {
             <col style="width:118px;">      <!-- 存货名称 = 1 × 存货编码（缩短一半） -->
             <col style="width:140px;">      <!-- 规格型号 -->
             <col style="width:108px;">      <!-- 出库数量 -->
-          </colgroup>
-          <thead>
+          </colgroup>`;
+    const thead = `
             <tr>
               <th class="ob-th-center">序号</th>
               <th class="ob-th-center">出库单号</th>
@@ -1177,13 +1179,13 @@ const OutboundListModule = {
               <th class="ob-th-center">存货名称</th>
               <th class="ob-th-center">规格型号</th>
               <th class="ob-th-center">出库数量</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${items.map((item, idx) => `
+            </tr>`;
+    const rowHtml = (item, idx) => `
               <tr>
                 <td class="ob-td-center">${(this.currentPage - 1) * (this.pageSize === 'all' ? items.length : this.pageSize) + idx + 1}</td>
-                <td class="ob-td-center"><a href="#outbound" onclick="OutboundListModule.goToEntry('${escAttr(item.出库单号 || '')}'); return false;" style="color:var(--primary);text-decoration:none;font-weight:600;">${esc(item.出库单号 ?? '')}</a></td>
+                <!-- 🟢 v228.21：出库单号改为纯文本（与存货档案页「出库记录」表格保持一致，不再跳转）。
+                     保留 monospace 与加粗，仍易辨识；同时去掉 <a> 后长按/拖选不会误触发跳转。 -->
+                <td class="ob-td-center" style="font-family:monospace;font-weight:600;">${esc(item.出库单号 ?? '')}</td>
                 <td style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escAttr(item.项目名称 || '')}">${esc(item.项目名称 ?? '')}</td>
                 <td class="ob-td-center">${esc(item.出库时间 ?? '')}</td>
                 <!-- 🟢 v199：去掉内联 font-size:11.5px，三列字号跟随单元格统一（monospace 保留） -->
@@ -1191,12 +1193,14 @@ const OutboundListModule = {
                 <td class="ob-td-center" title="${escAttr(item.存货名称 || '')}"><strong>${esc(item.存货名称 ?? '')}</strong></td>
                 <td class="ob-td-center">${esc(item.规格型号 ?? '')}</td>
                 <td class="ob-td-center" style="font-weight:600;">${item.出库数量 != null ? parseFloat(item.出库数量).toLocaleString('zh-CN',{maximumFractionDigits:2}) : ''}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
+              </tr>`;
+    TableUtils.virtualTable(area, {
+      items, rowHtml, thead, colgroup,
+      wrapperClass: 'ob-list-table-wrapper',
+      tableClass: 'data-table ob-list-table',
+      tableAttrs: 'style="table-layout:fixed;"',
+      threshold: 150,
+    });
 
     this.renderPagination(total, totalPages);
     TableUtils.initSmartSelect('oblTableArea');
@@ -1204,6 +1208,9 @@ const OutboundListModule = {
   },
 
   // 点击单号跳转到录入页
+  // ⚠️ v228.21：列表页的出库单号已改为纯文本（不再挂链接），本方法当前无调用方。
+  //   刻意保留：它是「按单号跳转录入页」的完整能力（配合 checkPendingLoad 生效），
+  //   删除属于超范围改动；若后续需要恢复可点击单号，直接重启本方法即可。
   goToEntry(orderNo) {
     // 临时存储要加载的单号，再切换到出库录入模块
     // App.go('outbound') 渲染后会自动检测并加载该单（见 app.js go() 内的 checkPendingLoad）
@@ -1274,32 +1281,71 @@ const OutboundListModule = {
     input.click();
   },
 
+  // 🟢 v228.15：增量导入 —— 导入历史（文件指纹）存储键，用于识别「同一文件重复导入」
+  IMPORT_HISTORY_KEY: 'wb_outbound_import_history',
+  IMPORT_HISTORY_MAX: 20,
+
+  /**
+   * 🟢 v228.16：按「出库单号」增量导入。
+   *   · 不做行级判重 —— 同一张出库单 + 同一存货编码 + 数量相同的多行属于合法业务数据
+   *      （同一单分多次出同数量的货），按业务键去重会误删真实记录。
+   *   · 判重单位 = 出库单号：本次文件涉及的单号，若库中已存在，由用户选择
+   *       - 替换：先删这些单号的旧明细，再写入本次全部行 → 幂等，可纠正历史错误数据
+   *       - 跳过：保留旧明细，只写入库中不存在的新单号
+   *   · 删除 + 写入在同一事务内完成，中途失败自动回滚，不会出现「删了没插上」。
+   */
   async _onImportFile(e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-    const ok = await WBModal.confirm(
-      '导入将清空「中心出库列表」当前全部数据，并用本文件内容整体覆盖。确定继续？',
-      { title: '导入确认' }
-    );
-    if (!ok) return;
+
+    // 🟢 v228.17：全流程无确认弹窗 —— 解析 → 查重 → 替换写入一气呵成，结果用 Toast 反馈。
     showLoading('正在读取 Excel…');
     try {
+      // —— ① 解析：读 Excel + 映射字段 ——
       const buf = await file.arrayBuffer();
       // 🟢 v227.78：复用 DataLoader 的 Worker 解析（不支持 Worker 时主线程兜底），与系统导入一致
       const wb = await DataLoader._parseWorkbookAsync(buf);
+      // 🟢 v228.08：XLSX 已改为按需加载 —— 下方 sheet_to_json 为同步调用，
+      //   需先确保主线程 XLSX 已就绪（Worker 解析不向主线程暴露 XLSX）。
+      await LazyLib.xlsx();
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
       if (!rows.length) { Toast.warn('文件中没有可导入的数据行'); return; }
       // 🟢 v227.80：先建存货档案映射（存货名称+规格型号 → 存货编码），源缺编码时补全
       this._stockFilled = 0;
       await this._loadStockCodeMap();
-      const mapped = this._mapImportRows(rows);
+      const res = this._mapImportRows(rows);
+      const mapped = res.rows;
       if (!mapped.length) { Toast.warn('未识别到可导入明细（请确认表头含「出库单号/项目/出库日期」等列）'); return; }
-      // 🟢 v227.80：整表覆盖 —— 清空现有数据 + 批量写入（恢复为覆盖式导入）
+      this._importSkipped = res.skipped;
+
+      // —— ② 查重（按出库单号）→ ③ 先删重复单号旧明细、再写入本次全部行（同一事务）——
+      showLoading('正在导入…');
+      const fp = this._fileFingerprint(mapped);
+      const stat = await this._statDuplicateOrders(mapped);
+      let delCount = 0;
+      let purgedNoCode = 0;   // 🟢 v228.21：本次顺带清掉的「无出库单号」存量脏行数
+      const addCount = mapped.length;
       await DataStore.write('outbound', () => db.transaction('rw', db.outbound, async () => {
-        await db.outbound.clear();
+        // 删「本次文件涉及单号」的全部旧明细（单号有索引，一次 anyOf 批量删）
+        if (stat.codes.length) {
+          delCount = await db.outbound.where('出库单号').anyOf(stat.codes).delete();
+        }
+        // 🟢 v228.21：**无条件**清掉库中所有「无出库单号」的行。
+        //   旧实现只在「本次文件里也含无单号行」时才清理（为了重复导入幂等）；但新规则下
+        //   文件里的无单号行在 _mapImportRows 阶段就被丢弃了，该条件永远不成立 →
+        //   库里既有的脏数据（表尾合计行/错位行）永远清不掉。故改为无条件清理：
+        //   这类行本就无法按单号定位/替换，留着只会污染统计（明细条数、总出库数量）。
+        //   注意：只删「出库单号为空」的行，带单号的正常数据一律不动。
+        const emptyKeys = await db.outbound.filter(r => !String(r.出库单号 || '').trim()).primaryKeys();
+        if (emptyKeys.length) {
+          await db.outbound.bulkDelete(emptyKeys);
+          delCount += emptyKeys.length;
+          purgedNoCode = emptyKeys.length;
+        }
         await db.outbound.bulkAdd(mapped);
       }));
+      this._pushImportHistory(fp, file.name || '', addCount);
       // 🟢 v227.78：同步云端，否则下次启动 restoreOutboundFromSettings 会用旧云端数据覆盖本次导入
       // 🟢 v227.84：失败时给用户明确反馈 —— 之前 .catch 静默吞掉，用户刷新后才发现数据消失
       let syncTip = '';
@@ -1311,8 +1357,24 @@ const OutboundListModule = {
       this.currentFilter = {};
       this.currentPage = 1;
       await this.loadData();
+      const after = await db.outbound.count();
       const filledMsg = this._stockFilled ? `，其中 ${this._stockFilled} 条依据存货档案补全编码` : '';
-      Toast.success(`✅ 导入完成，共 ${mapped.length} 条明细（已整体覆盖${filledMsg}）${syncTip}`);
+      const skipMsg = this._importSkipped ? `，跳过 ${this._importSkipped} 条空行` : '';
+      // 🟢 v228.17：已取消确认弹窗，结果全部通过 Toast 反馈。
+      //   「库中条数 > 本次文件条数」的单号（可能是文件不完整）用 warn 样式 + 加长停留时间报出来，
+      //   避免不弹窗后这类异常被完全静默。
+      const actMsg = stat.dupCodes > 0
+        ? `替换 ${stat.dupCodes} 个重复单号（删除旧明细 ${delCount} 条），写入 ${addCount} 条`
+        : `新增 ${addCount} 条`;
+      const baseMsg = `导入完成：${actMsg}，现有共 ${after} 条${filledMsg}${skipMsg}${syncTip}`;
+      if (stat.shrink.length) {
+        const top = stat.shrink.slice(0, 3).map(s => `${s.code} ${s.old}→${s.now}`).join('、');
+        const more = stat.shrink.length > 3 ? ` 等 ${stat.shrink.length} 个` : '';
+        // 注意：Toast 组件自带图标（成功 ✅ / 警告 ⚠️），消息文本里不要再叠 emoji
+        Toast.warn(`${baseMsg}；注意：以下单号条数减少（${top}${more}），请核对本次文件是否完整`, 9000);
+      } else {
+        Toast.success(baseMsg);
+      }
     } catch (err) {
       console.error('导入失败:', err);
       Toast.error('❌ 导入失败：' + (err && err.message ? err.message : err));
@@ -1321,9 +1383,76 @@ const OutboundListModule = {
     }
   },
 
+  /**
+   * 🟢 v228.16：统计本次文件里「出库单号」与库中已有单号的重合情况。
+   *   返回：本次各单号行数 / 库中各单号已存行数 / 重合单号数 / 待删条数 / 新增条数 / 条数变少的单号
+   *   🟢 v228.21：移除 noCodeCount —— 无单号行已在 _mapImportRows 阶段丢弃，此处不再有该情形。
+   */
+  async _statDuplicateOrders(mapped) {
+    const newByCode = new Map();
+    for (const r of mapped) {
+      const c = String(r.出库单号 || '').trim();
+      if (!c) continue;   // 理论不可达（上游已过滤），防御性跳过
+      newByCode.set(c, (newByCode.get(c) || 0) + 1);
+    }
+    const codes = Array.from(newByCode.keys());
+    const oldByCode = new Map();
+    if (codes.length) {
+      // 出库单号已建索引（schema: '++id, 出库单号, 存货编码, 出库时间'），一次 anyOf 查回全部
+      const existed = await db.outbound.where('出库单号').anyOf(codes).toArray();
+      for (const r of existed) {
+        const c = String(r.出库单号 || '').trim();
+        if (c) oldByCode.set(c, (oldByCode.get(c) || 0) + 1);
+      }
+    }
+    const dupCodes = codes.filter(c => oldByCode.has(c));
+    const delCount = dupCodes.reduce((a, c) => a + (oldByCode.get(c) || 0), 0);
+    const freshCount = codes.filter(c => !oldByCode.has(c)).reduce((a, c) => a + (newByCode.get(c) || 0), 0);
+    // 「库中条数 > 本次文件条数」的单号：替换后会变少，需单独警示（可能是本次文件不完整）
+    const shrink = dupCodes
+      .filter(c => (oldByCode.get(c) || 0) > (newByCode.get(c) || 0))
+      .map(c => ({ code: c, old: oldByCode.get(c), now: newByCode.get(c) }))
+      .sort((a, b) => (b.old - b.now) - (a.old - a.now));
+    return { codes, newByCode, oldByCode, dupCodes: dupCodes.length, delCount, freshCount, shrink };
+  },
+
+  /**
+   * 🟢 v228.15：整份文件的指纹（FNV-1a 32bit + 行数）。
+   *   只用于识别「同一个文件被重复导入」，不参与任何业务判重。
+   */
+  _fileFingerprint(mapped) {
+    const norm = mapped.map(r => [
+      r.出库单号, r.项目名称, r.出库时间, r.存货编码, r.存货名称, r.规格型号, r.出库数量
+    ].map(v => String(v == null ? '' : v).trim()).join('\u0001')).join('\u0002');
+    let h = 0x811c9dc5;
+    for (let i = 0; i < norm.length; i++) {
+      h ^= norm.charCodeAt(i);
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return h.toString(36) + '-' + mapped.length;
+  },
+
+  _readImportHistory() {
+    try { return JSON.parse(localStorage.getItem(this.IMPORT_HISTORY_KEY) || '[]') || []; }
+    catch (e) { return []; }
+  },
+
+  _findImportHistory(fp) {
+    return this._readImportHistory().find(x => x.fp === fp) || null;
+  },
+
+  _pushImportHistory(fp, name, count) {
+    try {
+      const all = this._readImportHistory().filter(x => x.fp !== fp);
+      all.unshift({ fp, name: String(name || '').slice(0, 80), count, time: new Date().toLocaleString('zh-CN', { hour12: false }) });
+      localStorage.setItem(this.IMPORT_HISTORY_KEY, JSON.stringify(all.slice(0, this.IMPORT_HISTORY_MAX)));
+    } catch (e) { /* 存储不可用时仅失去「重复提醒」能力，不影响导入 */ }
+  },
+
   // 源表头 → 工作台列（仅映射当前列表显示的字段，财务等列按"对应工作台表头"原则不导入）
   _mapImportRows(rows) {
     const out = [];
+    let skipped = 0;
     for (const r of rows) {
       // 🟢 v227.78：本地日期格式化。SheetJS 解析 Excel 日期有浮点漂移（00:00:00 → 前一天 23:59:17，
       //   源于 Excel 1900 闰年序列化误差），直接 getDate 会"减一天"。这里 +1 分钟容错再取整到本地日，
@@ -1344,7 +1473,7 @@ const OutboundListModule = {
         存货编码 = this._stockCodeMap.get(key) || '';
         if (存货编码) this._stockFilled = (this._stockFilled || 0) + 1;
       }
-      out.push({
+      const rec = {
         出库单号: (r['出库单号'] ?? '').toString().trim(),
         项目名称: (r['项目'] ?? '').toString().trim(),
         出库时间,
@@ -1352,9 +1481,18 @@ const OutboundListModule = {
         存货名称: (r['存货名称'] ?? '').toString().trim(),
         规格型号: (r['规格型号'] ?? '').toString().trim(),
         出库数量: (qty === '' || qty == null) ? 0 : Number(qty)
-      });
+      };
+      // 🟢 v228.21：**出库单号为空的行一律不导入**。
+      //   背景：中心出库列表以「出库单号」为唯一业务主键 —— 导入按单号替换、库中按单号定位，
+      //   无单号的行既无法被替换、也无法被删除，只会在库里不断累积成脏数据。
+      //   典型来源：表尾合计行（如「4660 | 117,798.45」）、占位空行、源表结构错位。
+      //   旧规则是 OR 条件（单号/编码/名称/数量任一有值就保留），会把这类行放进来，
+      //   且因列数不齐导致整行向左错位（值挤进「出库单号」单元格）。
+      //   现在单号缺失即丢弃，判定收敛为单一前置条件。
+      if (!rec.出库单号) { skipped++; continue; }
+      out.push(rec);
     }
-    return out;
+    return { rows: out, skipped };
   },
 
   // 🟢 v227.80：构建存货档案映射 存货名称+规格型号 → 存货编码（用于源缺编码时补全）

@@ -40,6 +40,7 @@
   "js/import-worker.js",
   "js/inbound.js",
   "js/inventory-alert.js",
+  "js/lazy-lib.js",
   "js/low-turnover.js",
   "js/modal.js",
   "js/order-check.js",
@@ -72,14 +73,9 @@
   "lib/zxing.min.js",
   "manifest.json",
   "releases/app-manifest.json",
-  "releases/audit-smoke-desktop.png",
-  "releases/audit-smoke-mobile.png",
-  "releases/cred-diag.png",
-  "releases/cred-verify.png",
-  "releases/fix-verify-mobile.png",
-  "releases/全局代码审查报告_v227.99.md",
   "service-worker.js",
   "tools/credential-tool.mjs",
+  "tools/gen-critical-css.mjs",
   "tools/gen-source-list.mjs",
   "修复与发布纪律_v227.92.md"
 ]

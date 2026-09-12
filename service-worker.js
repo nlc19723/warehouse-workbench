@@ -6,7 +6,7 @@
 // 🟢 v206：CACHE_NAME 曾长期停留在 v24，导致旧缓存永不失效、用户看不到新版样式。
 // 🟢 v207：P0 修复（XSS 转义 / DataStore 缓存失效 / 核对单事务）。每次发版必须同步 bump。
 //   现改为跟随 CSS 版本号（index.html 里 style.css?v=NNN），发版 bump 时缓存自动整体换新。
-const CACHE_NAME = 'warehouse-workbench-v228.07';
+const CACHE_NAME = 'warehouse-workbench-v228.23';
 
 // 预缓存：应用外壳（离线可打开的最低文件集）
 // 🟢 v227.72：把「登录链路必需」的 JS 也纳入预缓存。
@@ -27,15 +27,26 @@ const PRECACHE = [
   'js/modal.js',
   'js/data-loader.js',
   'js/table-utils.js',
-  'js/query.js'
+  'js/query.js',
+  // 🟢 性能优化 P2-9：按需加载器本身必须预缓存 —— 它是 chart/xlsx/jszip/jsqr 的入口，
+  //   离线冷启动时若拿不到它，所有按需加载能力都会失效（虽已有 504 兜底，但功能不可用）。
+  'js/lazy-lib.js'
 ];
 
 // 第三方库（大文件，Cache-First 加速）
+// 🟢 性能优化 P2-9：按需加载的库（chart / xlsx / jsqr / jszip / zxing）同样走 Cache-First。
+//   它们 URL 均带版本戳（?v=55 / ?v=1），内容不会变，因此首次下载后缓存即可长期复用，
+//   避免用户每次导出 Excel 都重新拉 881KB 的 xlsx、每次扫码都重新拉 257KB 的 jsqr。
+//   注意：这里只是「策略列表」不是预缓存 —— 只有真正被请求过才会进缓存，不占首次安装带宽。
 const LIBS = [
   'lib/dexie.min.js',
+  'lib/supabase.min.js',
   'lib/chart.min.js',
   'lib/xlsx.full.min.js',
-  'lib/supabase.min.js'
+  'lib/jsqr.min.js',
+  'lib/jszip.min.js',
+  'lib/qrcode.min.js',
+  'lib/zxing.min.js'
 ];
 
 // 安装：预缓存应用外壳 + 跳过等待

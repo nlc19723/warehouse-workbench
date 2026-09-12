@@ -275,8 +275,12 @@ const ReconciliationModule = {
 
   // ===== 供应商近6月供货金额趋势图 =====
   async renderSupplierTrendChart(selectedSupplier, inbound) {
+    // 🟢 v228.08：chart.min.js 不再随首屏预载，首次绘制前按需加载（失败仅跳过本图）
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[reconciliation] 图表组件加载失败，已跳过趋势图:', e && e.message); return; }
     const canvas = document.getElementById('recTrendChart');
     if (!canvas) return;
+    if (typeof Chart === 'undefined' || !canvas.isConnected) return;
     if (this.trendChart) { this.trendChart.destroy(); this.trendChart = null; }
 
     const now = new Date();

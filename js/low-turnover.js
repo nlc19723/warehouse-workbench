@@ -87,7 +87,7 @@ const LowTurnoverModule = {
 
     area.innerHTML = `
       <div class="table-wrapper">
-        <table class="data-table">
+        <table class="data-table lt-data-table">
           <thead>
             <tr>
               <th>仓库</th>

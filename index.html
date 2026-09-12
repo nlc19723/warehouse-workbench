@@ -6,18 +6,277 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="库管工作台">
-  <link rel="apple-touch-icon" href="icons/icon-192.png?v=228.07" type="image/png">
-  <link rel="icon" href="icons/icon-192.png?v=228.07" type="image/png">
-  <link rel="manifest" href="manifest.json?v=228.07">
+  <link rel="apple-touch-icon" href="icons/icon-192.png?v=228.23" type="image/png">
+  <link rel="icon" href="icons/icon-192.png?v=228.23" type="image/png">
+  <link rel="manifest" href="manifest.json?v=228.23">
   <meta name="theme-color" content="#357ABD">
+  <!-- 🟢 AUDIT-228-08（v228.18）：CSP 说明 —— 此处**不写** meta CSP，原因有二：
+       ① Content-Security-Policy-Report-Only **不支持通过 <meta> 传递**（浏览器会报
+          "delivered via a <meta> element, which is disallowed"，策略被整条忽略）；
+       ② 本页大量使用内联 onclick 与内联 <style>，强制 CSP 需 'unsafe-inline'，
+          实际拦截价值有限，却容易误伤第三方 SDK。
+       正确做法是在**服务端响应头**配置（静态托管需由网关/CDN 注入）：
+         Content-Security-Policy-Report-Only: default-src 'self'; script-src 'self' 'unsafe-inline' https://beacon.cdn.qq.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: wss:; frame-ancestors 'self'; base-uri 'self'
+       待控制台观察无业务误报后，再切换为 Content-Security-Policy 强制执行。
+       ⚠️ CSP 只是「第二道防线」，第一道仍是所有插值必须经 esc / escAttr。 -->
   <title>库管系统工作台</title>
-  <link rel="stylesheet" href="css/style.css?v=228.07">
+<!-- CRITICAL_CSS_START -->
+<style>
+/* 关键 CSS：首屏内联，由 tools/gen-critical-css.mjs 从 css/style.css 自动生成，请勿手改 */
+:root{
+  /* 背景与光晕 */
+  --bg-primary: #F0F4F8;
+  --bg-aurora-1: rgba(148, 200, 220, 0.18);
+  --bg-aurora-2: rgba(167, 180, 220, 0.15);
+  --bg-aurora-3: rgba(160, 210, 200, 0.15);
+  --bg-aurora-4: rgba(180, 170, 200, 0.10);
+  --bg-noise: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+
+  /* 卡片 */
+  /* 🟢 v228.08 P1-7：模糊半径下调后，提高卡片底色不透明度作补偿，
+     避免背后内容透出影响文字可读性（磨砂感略减，但可读性不降级）。 */
+  --card-bg: rgba(255,255,255,0.82);
+  --card-bg-hover: rgba(255,255,255,0.85);
+  --card-border: rgba(255,255,255,0.8);
+  --card-shadow: 0 4px 24px rgba(31,38,135,0.06);
+  --card-shadow-hover: 0 8px 36px rgba(31,38,135,0.10);
+
+  /* 🟢 v185：标题行改为冰川蓝渐变（D' 方案），变量跟随主调 */
+  --thead-bg: #5e9ad0;
+
+  /* 侧边栏/弹窗（🟢 v186-B：深青+暖橙方案） */
+  --panel-bg: #ffffff;
+  --panel-border: rgba(0,78,102,0.10);
+  --panel-teal: #004E66;
+  --panel-teal-light: #51a3bc;
+  --panel-orange: #ff5f2e;
+
+  /* 文字 */
+  --text-main: #1E293B;
+  --text-body: #64748B;
+  --text-muted: #94A3B8;
+  --text-inverse: #FFFFFF;
+
+  /* 主色调（冰川蓝） */
+  --primary: #5B9BD5;
+  --primary-light: #93C5FD;
+  --primary-deep: #3B82C4;
+  --primary-glow: rgba(91,155,213,0.3);
+
+  /* 强调色 */
+  --accent-mint: #6DBF9F;
+  --accent-mint-light: rgba(109,191,159,0.15);
+  --accent-coral: #D49595;
+  --accent-coral-light: rgba(212,149,149,0.15);
+  --accent-lavender: #A78BFA;
+  --accent-lavender-light: rgba(167,139,250,0.15);
+  --accent-warm: #D4A870;
+  --accent-warm-light: rgba(212,168,112,0.15);
+
+  /* 状态色（🟢 v227.32：提饱和，解决莫兰迪低对比——小字号/移动端看不清的问题；与深色主题对齐） */
+  --status-danger: #E5484D;
+  --status-danger-bg: rgba(229,72,77,0.12);
+  --status-warning: #F59E0B;
+  --status-warning-bg: rgba(245,158,11,0.14);
+  --status-success: #16A34A;
+  --status-success-bg: rgba(22,163,74,0.12);
+  --status-info: #2563EB;
+  --status-info-bg: rgba(37,99,235,0.12);
+
+  /* 毛玻璃
+     🟢 v228.08 性能优化 P1-7：模糊半径 20px/10px → 8px/6px。
+     backdrop-filter 的 GPU 开销与模糊半径近似平方关系，20~24px 的重磨砂在低端机/移动端
+     滚动与弹窗动画时明显掉帧。降到 8px 后磨砂感基本保留（配合卡片背景不透明度上调作补偿），
+     合成开销大幅下降。 */
+  --glass-blur: blur(8px) saturate(150%);
+  --glass-blur-light: blur(6px) saturate(140%);
+
+  /* 滚动条（🟢 v190：加宽到 12px，轨道透明+内边距留白，滑块用冰川蓝半透，hover 加深） */
+  --scrollbar-thumb: rgba(91,155,213,0.35);
+  --scrollbar-thumb-hover: rgba(91,155,213,0.55);
+  --scrollbar-track: transparent;
+  --scrollbar-width: 12px;
+  --scrollbar-thumb-w: 10px;
+
+  /* 🟢 v227.53：侧栏面板/头部/按钮底色（默认浅色态） */
+  --sidebar-panel-bg-top: #ffffff;
+  --sidebar-panel-bg-bottom: #f3f9fb;
+  --sidebar-header-bg-top: #f4fafa;
+  --sidebar-header-bg-bottom: #ffffff;
+  --sidebar-toggle-bg: #f4fafa;
+
+  /* 圆角 */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --radius-xl: 28px;
+
+  /* 布局 */
+  --header-height: 56px;
+  --sidebar-width: 240px;
+  --content-gap: 14px;
+
+  /* 过渡 */
+  --theme-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-theme="dark"]{
+  --bg-primary: #0B1120;
+  --bg-aurora-1: rgba(56,189,248,0.06);
+  --bg-aurora-2: rgba(99,102,241,0.05);
+  --bg-aurora-3: rgba(52,211,153,0.04);
+  --bg-aurora-4: rgba(168,85,247,0.03);
+  --bg-noise: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E");
+
+  --card-bg: rgba(15,23,42,0.74);
+  --card-bg-hover: rgba(15,23,42,0.8);
+  --card-border: rgba(56,189,248,0.25);
+  --card-shadow: 0 0 20px rgba(56,189,248,0.06), inset 0 1px 0 rgba(255,255,255,0.03);
+  --card-shadow-hover: 0 0 32px rgba(56,189,248,0.12), inset 0 1px 0 rgba(255,255,255,0.05);
+
+  --panel-bg: rgba(15,31,42,0.94);
+  --panel-border: rgba(81,163,188,0.20);
+  --panel-teal: #5e9ad0;
+  --panel-teal-light: #6DBF9F;
+  --panel-orange: #ff7a52;
+
+  /* 🟢 v185：暗色标题行改为更深冰川蓝渐变 */
+  --thead-bg: #234c76;
+
+  --text-main: #F8FAFC;
+  --text-body: #94A3B8;
+  --text-muted: #64748B;
+  --text-inverse: #0F172A;
+
+  --primary: #38BDF8;
+  --primary-light: #7DD3FC;
+  --primary-deep: #0EA5E9;
+  --primary-glow: rgba(56,189,248,0.4);
+
+  --accent-mint: #34D399;
+  --accent-mint-light: rgba(52,211,153,0.12);
+  --accent-coral: #FB7185;
+  --accent-coral-light: rgba(251,113,133,0.12);
+  --accent-lavender: #A78BFA;
+  --accent-lavender-light: rgba(167,139,250,0.12);
+  --accent-warm: #FBBF24;
+  --accent-warm-light: rgba(251,191,36,0.12);
+
+  --status-danger: #FB7185;
+  --status-danger-bg: rgba(251,113,133,0.15);
+  --status-warning: #FBBF24;
+  --status-warning-bg: rgba(251,191,36,0.15);
+  --status-success: #34D399;
+  --status-success-bg: rgba(52,211,153,0.15);
+  --status-info: #38BDF8;
+  --status-info-bg: rgba(56,189,248,0.15);
+
+  --scrollbar-thumb: rgba(56,189,248,0.40);
+  --scrollbar-thumb-hover: rgba(56,189,248,0.65);
+  --scrollbar-track: transparent;
+  --scrollbar-width: 12px;
+  --scrollbar-thumb-w: 10px;
+}
+
+*{ margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body{
+  width: 100%; height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+  font-size: 14px;
+  color: var(--text-main);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -webkit-overflow-scrolling: touch;
+  transition: color var(--theme-transition);
+}
+
+body{
+  background: var(--bg-primary);
+  transition: background var(--theme-transition);
+}
+
+.loading-overlay{
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--bg-primary);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 1000; transition: opacity 0.3s;
+}
+.loading-spinner{
+  width: 40px; height: 40px; border: 3px solid rgba(122,156,165,0.12);
+  border-top-color: var(--primary); border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to{ transform: rotate(360deg); }}
+.loading-text{ margin-top: 14px; font-size: 13px; color: var(--text-body); font-weight: 500; }
+
+/* 货车进度条形态 */
+.loading-truck-wrap{ margin-top: 22px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+[hidden]{ display: none !important; }
+.loading-seg{ position: relative; width: min(360px, 70vw); height: 16px;
+  background: rgba(122,156,165,.14); border-radius: 8px; }
+.loading-seg::after{ content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 100%;
+  background: linear-gradient(180deg, var(--primary), var(--accent)); opacity: .0; border-radius: 8px; }
+.truck-gfx{ position: absolute; top: -44px; left: 0; width: 64px; height: 40px; transform: translateX(0);
+  transition: left .22s cubic-bezier(.4,0,.2,1);
+  filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)) drop-shadow(0 0 6px rgba(47,212,196,.22)); }
+.truck-gfx svg{ display: block; width: 64px; height: 40px; }
+.truck-gfx .wheel{ transform-box: fill-box; transform-origin: center; animation: wheelSpin .5s linear infinite; }
+@keyframes wheelSpin { to{ transform: rotate(360deg); }}
+.truck-gfx{ animation: truckBob .5s ease-in-out infinite; }
+@keyframes truckBob { 0%, 100%{ transform: translateX(0) translateY(0); } 50%{ transform: translateX(0) translateY(-1.5px); }}
+.loading-pct{ font-size: 13px; font-weight: 600; letter-spacing: 1px; color: var(--accent); }
+
+/* 胶囊波形态(云端同步) */
+.loading-caps-wrap{ margin-top: 26px; display: flex; flex-direction: column; align-items: center; }
+.loading-caps{ display: flex; align-items: flex-end; gap: 4px; height: 54px; }
+.loading-caps span{ width: 7px; height: 8px; border-radius: 3px; background: rgba(122,156,165,.18);
+  transition: height .28s cubic-bezier(.3,1.4,.5,1), background .2s; }
+.loading-caps span.on{ background: linear-gradient(180deg, var(--accent), var(--primary)); }
+.loading-caps span.head{ background: #7ec8f0; box-shadow: 0 0 8px var(--accent); transform: scaleY(1.5); }
+
+/* 粒子流体形态(数据导入) */
+.loading-fluid-wrap{ margin-top: 28px; display: flex; flex-direction: column; align-items: center; }
+.loading-fluid{ position: relative; width: min(300px, 70vw); height: 16px; border-radius: 8px; overflow: hidden;
+  background: rgba(122,156,165,.12); border: 1px solid rgba(122,156,165,.25); }
+.loading-fluid canvas{ position: absolute; inset: 0; width: 100%; height: 100%; }
+.loading-fluid-base{ position: absolute; left: 0; top: 0; bottom: 0; width: 0%; border-radius: 8px;
+  background: linear-gradient(90deg, rgba(47,212,196,.35), rgba(79,155,232,.35)); transition: width .25s linear; }
+</style>
+<!-- CRITICAL_CSS_END -->
+    <!-- 🟢 v228.09 性能优化 P0-2：首屏关键 CSS 已内联（上方 CRITICAL_CSS 块，8.4KB），
+         全量 style.css(211KB) 改为【非阻塞】加载：preload 拉取 → onload 转 stylesheet。
+         首屏只依赖 8.4KB 内联样式，loading 遮罩即可正确显示；全量样式在遮罩期间并行加载完成。 -->
+    <link rel="preload" href="css/style.css?v=228.23" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="css/style.css?v=228.23"></noscript>
+    <script>
+      // 兜底：极老旧内核可能不触发 preload 的 onload。延迟 3s 检测，仅在样式确实未生效时
+      // 才补一个阻塞式 link —— 延迟是为了避免正常情况下误触发、反而抵消异步收益。
+      setTimeout(function () {
+        var ok = false;
+        for (var i = 0; i < document.styleSheets.length; i++) {
+          if ((document.styleSheets[i].href || '').indexOf('css/style.css') >= 0) { ok = true; break; }
+        }
+        if (!ok) {
+          var l = document.createElement('link');
+          l.rel = 'stylesheet'; l.href = 'css/style.css?v=228.23';
+          document.head.appendChild(l);
+        }
+      }, 3000);
+    </script>
+  <!-- 🟢 v228.08 性能优化 P0-1：首屏只保留「启动必需」的两个库（Dexie 数据层 / Supabase 云端同步）。
+       以下大库改为按需加载（由 js/lazy-lib.js 提供 LazyLib，首次使用时才下载），
+       首屏 JS 下载+解析量从 ~3.1MB 降至 ~0.2MB：
+         · chart.min.js(205KB)  → 仪表盘/趋势图首次绘制时
+         · xlsx.full.min.js(881KB) → 数据导入 / Excel 导出时（Worker 解析另自行 importScripts）
+         · jsqr.min.js(257KB)   → 打开「扫一扫」时
+         · jszip.min.js(98KB)   → 点击「源码」打包下载时
+         · qrcode.min.js(57KB)  → 现存量二维码 / 存货档案二维码（v228.17 恢复加载，见下方 <script>） -->
   <script defer src="lib/dexie.min.js?v=55"></script>
-  <script defer src="lib/chart.min.js?v=55"></script>
-  <script defer src="lib/xlsx.full.min.js?v=55"></script>
-  <script defer src="lib/qrcode.min.js?v=1"></script>
-  <script defer src="lib/jsqr.min.js?v=1"></script>
   <script defer src="lib/supabase.min.js?v=55"></script>
+  <script defer src="js/lazy-lib.js?v=228.23"></script>
 <!-- M4: 改为 defer，避免外部 CDN 慢/不可达时阻塞整页渲染（白屏）。初始化改在 DOMContentLoaded 后执行，确保 defer 的 beacon 脚本已就绪 -->
 <script defer src="https://beacon.cdn.qq.com/sdk/4.5.9/beacon_web.min.js"></script>
 <script>
@@ -216,6 +475,10 @@ document.addEventListener('DOMContentLoaded', function(){
   <div class="loading-overlay" id="loadingOverlay">
     <div class="loading-spinner" id="loadingSpinner"></div>
     <div class="loading-text" id="loadingText">正在初始化...</div>
+    <div class="loading-sub" id="loadingSub" hidden></div>
+    <div class="loading-actions" id="loadingActions" hidden>
+      <button class="btn--ghost loading-skip-btn" id="loadingSkipBtn" type="button">跳过并进入工作台</button>
+    </div>
 
     <!-- 货车进度条形态(variant: 'truck', 传 progress 时启用) -->
     <div class="loading-truck-wrap" id="loadingTruckWrap" hidden>
@@ -305,50 +568,52 @@ document.addEventListener('DOMContentLoaded', function(){
     </div>
   </div>
 
-  <script defer src="lib/jszip.min.js?v=1"></script>
-  <script defer src="js/table-utils.js?v=228.07"></script>
-  <script defer src="js/qr-util.js?v=228.07"></script>
-  <script defer src="js/qr-scan.js?v=228.07"></script>
-  <script defer src="js/search-select.js?v=228.07"></script>
-  <script defer src="js/entity-links.js?v=228.07"></script>
-  <script defer src="js/db.js?v=228.07"></script>
-  <script defer src="js/config.js?v=228.07"></script>
+  <script defer src="js/table-utils.js?v=228.23"></script>
+  <!-- 🟢 v228.17：恢复 qrcode.min.js 预载。二维码列（现存量列表 / 存货档案）依赖全局 qrcode 函数，
+       此前 P0-1 性能优化误将其移除，导致 QR.thumb 全部返回“—”。文件仅 57KB，继续 defer 不阻塞首屏。 -->
+  <script defer src="lib/qrcode.min.js?v=55"></script>
+  <script defer src="js/qr-util.js?v=228.23"></script>
+  <script defer src="js/qr-scan.js?v=228.23"></script>
+  <script defer src="js/search-select.js?v=228.23"></script>
+  <script defer src="js/entity-links.js?v=228.23"></script>
+  <script defer src="js/db.js?v=228.23"></script>
+  <script defer src="js/config.js?v=228.23"></script>
   <!-- 🟢 v200：工作台主题弹窗（替换浏览器原生 alert/confirm/prompt） -->
-  <script defer src="js/modal.js?v=228.07"></script>
-  <script defer src="js/sync.js?v=228.07"></script>
-  <script defer src="js/data-loader.js?v=228.07"></script>
-  <script defer src="js/dashboard.js?v=228.07"></script>
-  <script defer src="js/supplier.js?v=228.07"></script>
-  <script defer src="js/query.js?v=228.07"></script>
-  <script defer src="js/reconciliation.js?v=228.07"></script>
-  <script defer src="js/order-track.js?v=228.07"></script>
-  <script defer src="js/inventory-alert.js?v=228.07"></script>
-  <script defer src="js/order-check.js?v=228.07"></script>
-  <script defer src="js/filter-layout.js?v=228.07"></script>
-  <script defer src="js/components/datepicker.js?v=228.07"></script>
-  <script defer src="js/orders.js?v=228.07"></script>
-  <script defer src="js/inbound.js?v=228.07"></script>
-  <script defer src="js/stock.js?v=228.07"></script>
-  <script defer src="js/pricing.js?v=228.07"></script>
-  <script defer src="js/low-turnover.js?v=228.07"></script>
-  <script defer src="js/breach.js?v=228.07"></script>
-  <script defer src="js/outbound.js?v=228.07"></script>
-  <script defer src="js/stock-detail.js?v=228.07"></script>
-  <script defer src="js/supplier-detail.js?v=228.07"></script>
-  <script defer src="js/order-detail.js?v=228.07"></script>
-  <script defer src="js/stocktake.js?v=228.07"></script>
-  <script defer src="js/stocktake-batch.js?v=228.07"></script>
-  <script defer src="js/stocktake-records.js?v=228.07"></script>
-  <script defer src="js/color-theme.js?v=228.07"></script>
-  <script defer src="js/app.js?v=228.07"></script>
-  <script defer src="js/globals.js?v=228.07"></script>
+  <script defer src="js/modal.js?v=228.23"></script>
+  <script defer src="js/sync.js?v=228.23"></script>
+  <script defer src="js/data-loader.js?v=228.23"></script>
+  <script defer src="js/dashboard.js?v=228.23"></script>
+  <script defer src="js/supplier.js?v=228.23"></script>
+  <script defer src="js/query.js?v=228.23"></script>
+  <script defer src="js/reconciliation.js?v=228.23"></script>
+  <script defer src="js/order-track.js?v=228.23"></script>
+  <script defer src="js/inventory-alert.js?v=228.23"></script>
+  <script defer src="js/order-check.js?v=228.23"></script>
+  <script defer src="js/filter-layout.js?v=228.23"></script>
+  <script defer src="js/components/datepicker.js?v=228.23"></script>
+  <script defer src="js/orders.js?v=228.23"></script>
+  <script defer src="js/inbound.js?v=228.23"></script>
+  <script defer src="js/stock.js?v=228.23"></script>
+  <script defer src="js/pricing.js?v=228.23"></script>
+  <script defer src="js/low-turnover.js?v=228.23"></script>
+  <script defer src="js/breach.js?v=228.23"></script>
+  <script defer src="js/outbound.js?v=228.23"></script>
+  <script defer src="js/stock-detail.js?v=228.23"></script>
+  <script defer src="js/supplier-detail.js?v=228.23"></script>
+  <script defer src="js/order-detail.js?v=228.23"></script>
+  <script defer src="js/stocktake.js?v=228.23"></script>
+  <script defer src="js/stocktake-batch.js?v=228.23"></script>
+  <script defer src="js/stocktake-records.js?v=228.23"></script>
+  <script defer src="js/color-theme.js?v=228.23"></script>
+  <script defer src="js/app.js?v=228.23"></script>
+  <script defer src="js/globals.js?v=228.23"></script>
   <!-- PWA: 注册 Service Worker（支持离线 + 安装为桌面应用） -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
         // 🟢 v227.21：注册 URL 带版本戳 + updateViaCache:'none'，确保每次发版浏览器都重新拉取 SW 脚本，
         //   避免「改了 CACHE_NAME 但旧 ?v= 被 CDN 缓存、SW 永不更新」的卡死。
-        navigator.serviceWorker.register('service-worker.js?v=228.07', { updateViaCache: 'none' }).then(function(reg) {
+        navigator.serviceWorker.register('service-worker.js?v=228.23', { updateViaCache: 'none' }).then(function(reg) {
           console.log('[PWA] Service Worker 注册成功:', reg.scope);
         }).catch(function(err) {
           console.warn('[PWA] Service Worker 注册失败:', err);
@@ -395,10 +660,20 @@ document.addEventListener('DOMContentLoaded', function(){
       });
 
       // 4. 控制台水印（含版本号）
-      const _ver = (window.AppConfig && AppConfig.app && AppConfig.app.version) || 'v???';
-      const banner = '\n%c🔒 库管系统工作台 · ' + _ver + ' · 源码受保护\n%c本应用为内部使用版本。未经授权，禁止复制、分发或反编译源码。\n© Warehouse Workbench · All Rights Reserved\n';
-      console.log(banner, 'color:#3b82f6;font-size:18px;font-weight:bold;padding:4px 0;', 'color:#64748b;font-size:12px;');
-      console.log('%c当前版本：' + _ver + '  ·  如需正式授权或技术支持，请联系管理员。', 'color:#94a3b8;font-size:11px;font-style:italic;');
+      //    🟢 v228.18 附带修复：本脚本是**内联非 defer**脚本，会先于带 defer 的 config.js 执行，
+      //    此处直接读 AppConfig 必然是 undefined，导致水印永远显示「v???」。
+      //    改为等到 DOMContentLoaded（defer 脚本已全部执行完）后再取真实版本号并打印。
+      const _printBanner = function () {
+        const _ver = (window.AppConfig && AppConfig.app && AppConfig.app.version) || 'v???';
+        const banner = '\n%c🔒 库管系统工作台 · ' + _ver + ' · 源码受保护\n%c本应用为内部使用版本。未经授权，禁止复制、分发或反编译源码。\n© Warehouse Workbench · All Rights Reserved\n';
+        console.log(banner, 'color:#3b82f6;font-size:18px;font-weight:bold;padding:4px 0;', 'color:#64748b;font-size:12px;');
+        console.log('%c当前版本：' + _ver + '  ·  如需正式授权或技术支持，请联系管理员。', 'color:#94a3b8;font-size:11px;font-style:italic;');
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', _printBanner);
+      } else {
+        _printBanner();
+      }
     })();
   </script>
 
@@ -568,6 +843,19 @@ document.addEventListener('DOMContentLoaded', function(){
 
       // 动态打包：逐个 fetch 当前线上文件 → JSZip 压缩 → 触发下载
       async function doDynamicDownload() {
+        // 🟢 v228.08：JSZip 改为按需加载（不再由 index.html 预载），首次打包时才动态拉取，
+        //   降低首屏下载/解析量。加载期间显示提示，失败给出明确错误（不牺牲体验）。
+        if (typeof LazyLib !== 'undefined' && !LazyLib.has('jszip')) {
+          try {
+            if (typeof showLoading === 'function') showLoading('正在加载打包组件...', { progress: 0 });
+            await LazyLib.jszip();
+          } catch (err) {
+            if (typeof hideLoading === 'function') hideLoading();
+            error.textContent = '打包组件加载失败，请检查网络后重试';
+            return;
+          }
+        }
+        var JSZip = window.JSZip;   // 局部引用，供下方 new JSZip() 使用
         if (typeof JSZip === 'undefined') {
           error.textContent = 'JSZip 库未加载，请刷新页面后重试';
           return;

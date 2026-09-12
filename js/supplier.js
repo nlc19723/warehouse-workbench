@@ -37,7 +37,7 @@ const SupplierModule = {
         <div class="fb-row fb-row--buttons">
           <button class="btn--primary" onclick="SupplierModule.applyFilter()">筛选</button>
           <button class="btn--ghost" onclick="SupplierModule.resetFilter()">重置</button>
-          <button class="btn--ghost" onclick="SupplierModule.exportData()">📥 导出Excel</button>
+          <button class="btn--ghost" onclick="SupplierModule.exportData()">📥 导出</button>
         </div>
       </div>
 
@@ -404,7 +404,9 @@ const SupplierModule = {
   },
 
   // 渲染趋势图
-  _renderTrendCharts(data) {
+  // 🟢 v228.08：Chart 改为按需加载 —— 本函数升级为 async，先加载 chart 组件再绘制。
+  //   调用点无需 await：图表异步补上，加载失败仅跳过图表、不影响详情主流程。
+  async _renderTrendCharts(data) {
     const chartOpts = (label, color, values) => ({
       type: 'line',
       data: {
@@ -431,6 +433,12 @@ const SupplierModule = {
       }
     });
 
+    // 🟢 v228.08：chart.min.js 不再随首屏预载，首次绘制前动态加载
+    try { await LazyLib.chart(); }
+    catch (e) { console.warn('[supplier] 图表组件加载失败，已跳过趋势图:', e && e.message); return; }
+    if (typeof Chart === 'undefined') return;
+
+    // 在 await 之后取 canvas：若期间用户已关闭详情弹窗，元素不存在则自然跳过
     const orderCanvas = document.getElementById('supDetailOrderChart');
     const inboundCanvas = document.getElementById('supDetailInboundChart');
 

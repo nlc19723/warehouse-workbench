@@ -6,7 +6,7 @@
 //
 // 🟢 v118：订单表通过「存货编号」关联；该档案页额外用 getOrdersForStock 反向联动，
 //   解决 queryByEntity 按存货编码漏查。
-// 🟢 v192：5 个 section 各自分页 + 排序/筛选/智能选区；
+// 🟢 v192 / 🟢 v228.20：6 个 section 各自分页 + 排序/筛选/智能选区；
 //   入库记录 / 关联订单 仅显示最近 3 个月。
 // ============================================================
 
@@ -74,18 +74,20 @@ window.StockDetailModule = {
     const baseGridHtml = `<div class="detail-grid">${base.map(c => `<div class="detail-kv"><span class="k">${c.label}</span><span class="v">${esc(DetailCommon.fmt(main[c.field]))}</span></div>`).join('')}</div>`;
 
     // 🟢 A1：档案页存货二维码（编码纯文本 = 存货编码；离线生成，零存储；新增存货自动有码）
-    // 🟢 v227.91：按钮排在二维码右边 —— qr-actions 提到 qr-body 内，与 qr-img 平级作为 flex 子项
+    // 🟢 v228.12：下载/打印按钮放到名称/规格下方，避免二维码右侧空白
     const qrSvg = window.QR ? QR.svg(code) : '';
     const qrCardHtml = qrSvg ? `<div class="detail-section qr-card">
       <div class="qr-body">
         <div class="qr-img">${qrSvg}</div>
-        <div class="qr-meta">
-          <div class="qr-name">${esc(main.存货名称 || '')}</div>
-          ${main.规格型号 ? `<div class="qr-spec">规格：${esc(main.规格型号)}</div>` : ''}
-        </div>
-        <div class="qr-actions">
-          <button class="btn--ghost" type="button" data-qr-download="${esc(code)}">⬇ 下载 PNG</button>
-          <button class="btn--ghost" type="button" data-qr-print="${esc(code)}">🖨 打印</button>
+        <div class="qr-info">
+          <div class="qr-meta">
+            <div class="qr-name">${esc(main.存货名称 || '')}</div>
+            ${main.规格型号 ? `<div class="qr-spec">规格：${esc(main.规格型号)}</div>` : ''}
+          </div>
+          <div class="qr-actions">
+            <button class="btn--ghost" type="button" data-qr-download="${esc(code)}">⬇ 下载 PNG</button>
+            <button class="btn--ghost" type="button" data-qr-print="${esc(code)}">🖨 打印</button>
+          </div>
         </div>
       </div></div>` : '';
 
@@ -98,22 +100,26 @@ window.StockDetailModule = {
     return qrCardHtml ? combinedRow : baseSection;
   },
 
-  // 🟢 v120/v197/v198/v200：5 个 section 的列定义（与主模块统一）
+  // 🟢 v120/v197/v198/v200/v228.20：6 个 section 的列定义（与主模块统一）
   _buildStockColumns() {
     // 🟢 v200：把「供应商」挪到「入库量」之后
+    // 🟢 v228.11：入库记录增加「项目名称」列，放在供应商左侧
     const inboundCols = [
       { label: '入库单号', field: '入库单号' },
       { label: '入库日期', field: '入库日期' },
       { label: '入库量', field: '数量' },
+      { label: '项目名称', field: '项目名称' },
       { label: '供应商', field: '供应商', render: r => TableUtils.link('supplier', r.供应商, r.供应商) },
       { label: '含税单价', field: '原币含税单价' },
       { label: '含税金额', field: '原币价税合计' }
     ];
     // 🟢 v200：把「供应商」挪到「订单量」之后，与入库表统一为「量 + 供应商」结构
+    // 🟢 v228.11：关联订单增加「项目名称」列，放在供应商左侧
     const orderCols = [
       { label: '订单编号', field: '订单编号', render: r => TableUtils.link('order', r.订单编号, r.订单编号) },
       { label: '日期', field: '日期' },
       { label: '订单量', field: '数量' },
+      { label: '项目名称', field: '项目名称' },
       { label: '供应商', field: '供应商', render: r => TableUtils.link('supplier', r.供应商, r.供应商) },
       { label: '未入库订单量', field: '未入库量' },
       { label: '含税单价', field: '原币含税单价' },
@@ -141,15 +147,31 @@ window.StockDetailModule = {
       { label: '现存数量', field: '现存数量' },
       { label: '暂无法使用量', field: '暂无法使用量' }
     ];
-    return { inboundCols, orderCols, alertCols, priceCols, lowCols };
+    // 🟢 v228.20：出库记录（中心出库列表 db.outbound）。
+    //   列名与顺序刻意与「中心出库列表」表格保持一致，便于两处对照；
+    //   出库单号按用户要求做纯文本展示（不跳转），故直接用 field 走默认 esc 渲染。
+    const outboundCols = [
+      { label: '出库单号', field: '出库单号' },
+      { label: '项目名称', field: '项目名称' },
+      { label: '出库时间', field: '出库时间' },
+      { label: '存货编码', field: '存货编码' },
+      { label: '存货名称', field: '存货名称' },
+      { label: '规格型号', field: '规格型号' },
+      { label: '出库数量', field: '出库数量' }
+    ];
+    return { inboundCols, orderCols, alertCols, priceCols, lowCols, outboundCols };
   },
 
-  // 🟢 v192：5 个 section 各自的分页/排序状态（入库记录/关联订单 应用 3-month 过滤）
+  // 🟢 v192 / 🟢 v228.20：6 个 section 各自的分页/排序状态（入库记录/关联订单/出库记录 应用 3-month 过滤）
   _initStockSections(rel, ordersForStock) {
-    const { inboundCols, orderCols, alertCols, priceCols, lowCols } = this._buildStockColumns();
+    const { inboundCols, orderCols, alertCols, priceCols, lowCols, outboundCols } = this._buildStockColumns();
     this._sections = {
       'stk-inbound': { title: '入库记录（近3个月）', rows: TableUtils.filterRecent3M(rel.inbound, '入库日期'), columns: inboundCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
       'stk-orders':  { title: '关联订单（近3个月）', rows: TableUtils.filterRecent3M(ordersForStock, '日期'), columns: orderCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
+      // 🟢 v228.20：出库记录 —— 数据源为「中心出库列表」db.outbound（经 EntityLinks.stock.tables
+      //   新增 outbound 扇出由 queryByEntity 取回）。按对象 key 顺序渲染，故紧跟在关联订单之后。
+      //   与同页两个 summary-level 表格同样套用近 3 个月过滤，口径一致。
+      'stk-outbound': { title: '出库记录（近3个月）', rows: TableUtils.filterRecent3M(rel.outbound, '出库时间'), columns: outboundCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
       'stk-alert':   { title: '库存预警', rows: rel.inventoryAlerts || [], columns: alertCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
       'stk-pricing': { title: '合同价格', rows: rel.pricing || [], columns: priceCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
       'stk-low':     { title: '低周转材料', rows: rel.lowTurnover || [], columns: lowCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null }

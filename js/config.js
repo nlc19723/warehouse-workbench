@@ -10,6 +10,24 @@
 //   5. 真正私密的密钥请放到服务端代理或 Cloudflare Worker 中转
 // ============================================
 
+// 🟢 AUDIT-228-09（v228.18）：生产环境 console 日志开关。
+//   背景：全仓 47 处 console.log（data-loader.js 独占 36），会把导入/同步过程信息输出到
+//   生产控制台，既轻微影响性能，也把内部流程暴露给任何打开 DevTools 的人。
+//   做法：默认静默 log / debug / info，**保留 warn 与 error**（线上诊断仍可用）；
+//   需要调试时在控制台执行 `localStorage.setItem('wb_debug_log','1')` 并刷新即可恢复。
+//   ⚠️ 必须放在 config.js 最顶部：本文件是 index.html 中第一个业务脚本，早于所有业务日志。
+(function () {
+  var on = false;
+  try { on = localStorage.getItem('wb_debug_log') === '1'; } catch (e) { on = false; }
+  if (on) { window.__WB_DEBUG__ = true; return; }
+  var noop = function () {};
+  if (typeof console !== 'undefined') {
+    console.log = noop;
+    console.debug = noop;
+    console.info = noop;
+  }
+})();
+
 // 🟢 v210 AUDIT-602：时间相关魔法数字抽成命名常量，消除 86400000 / 25569 散落各文件
 //   DAY_MS           —— 一天的毫秒数
 //   EXCEL_EPOCH_DAYS —— Excel 1900 日期系统下 1970-01-01 的序列号（25569）。
@@ -149,7 +167,7 @@ window.AppConfig = {
     //   本值仅作为脚本加载失败/无 ?v= 时的兜底。
     // 🟢 v201：二维码白框上下边与基础信息白框严格对齐
     // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
-    version: 'v228.07',
+    version: 'v228.23',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
