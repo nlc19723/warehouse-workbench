@@ -2095,6 +2095,7 @@ const TableUtils = {
       <span class="page-btns">
         <button class="wb-pager-btn wb-first" onclick="${module}.goPage(${secArg}1)" ${p === 1 ? 'disabled' : ''} aria-label="首页" title="首页"></button>
         <button class="wb-pager-btn wb-prev" onclick="${module}.goPage(${secArg}${p - 1})" ${p === 1 ? 'disabled' : ''} aria-label="上一页" title="上一页"></button>
+        <span class="wb-pager-ind" aria-label="当前页 / 总页数">${p} / ${tp}</span>
         ${nums.map(i => `<button class="${i === p ? 'active' : ''}" onclick="${module}.goPage(${secArg}${i})">${i}</button>`).join('')}
         <button class="wb-pager-btn wb-next" onclick="${module}.goPage(${secArg}${p + 1})" ${p === tp ? 'disabled' : ''} aria-label="下一页" title="下一页"></button>
         <button class="wb-pager-btn wb-last" onclick="${module}.goPage(${secArg}${tp})" ${p === tp ? 'disabled' : ''} aria-label="尾页" title="尾页"></button>
@@ -2111,6 +2112,113 @@ const TableUtils = {
         / ${tp} 页
       </span>
     `;
+    // 🟢 v228.73：渲染后调度移动端表格高度实测适配（含一次性 resize/orientation 监听）
+    this._ensureMobileFit();
+  },
+
+  // ==========================================================================
+  // 🟢 v228.73 方案 C：移动端表格高度实测适配 + 多表格页打标
+  // --------------------------------------------------------------------------
+  // 职责：
+  //   1) 逐 .table-wrapper 实测其在滚动容器内的偏移，把
+  //        maxHeight = 滚动容器可视高 − 表格顶偏移 − 分页条高 − 余量
+  //      经行内 CSS 变量 --wb-fit-h 注入（CSS 端 var(--wb-fit-h, 兜底) 消费），
+  //      使「表格下沿 = 分页条上沿」，数据行不会从吸底分页键后穿过。
+  //   2) 探测「单页多表格」的详情页（可见 wrapper ≥ 2），给滚动容器打 .wb-multi-table：
+  //      CSS 据此把分页条从吸底改为随表静态排列（每表各自一条），并取消吸顶残留。
+  //   3) 桌面端（>768px）清除行内变量与标记，交还 CSS 静态规则。
+  // 设计要点：
+  //   - rect 差值（wrapper.top − 滚动容器.top）随滚动同步平移，结果滚动无关，无需监听 scroll。
+  //   - 注入用 CSS 变量而非行内 max-height：CSS 端 max-height 带 !important（要压过
+  //     3200 行等历史规则），行内样式打不过 !important，变量注入是唯一干净的通道。
+  // ==========================================================================
+  _mobileFitBound: false,
+  _ensureMobileFit() {
+    if (!this._mobileFitBound) {
+      this._mobileFitBound = true;
+      let rz = null;
+      window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => this.fitMobileTables(), 120); });
+      window.addEventListener('orientationchange', () => setTimeout(() => this.fitMobileTables(), 250));
+    }
+    requestAnimationFrame(() => this.fitMobileTables());
+  },
+  fitMobileTables() {
+    const sel = '#contentArea .table-wrapper, #contentArea .ob-list-table-wrapper, #contentArea .oc-entry-table-wrapper, #contentArea .ob-entry-table-wrapper';
+    const wrappers = document.querySelectorAll(sel);
+    if (window.innerWidth > 768) {
+      // 桌面端：清除移动端注入，交还 CSS（640px 上限）
+      wrappers.forEach(w => w.style.removeProperty('--wb-fit-h'));
+      document.querySelectorAll('.wb-multi-table').forEach(s => s.classList.remove('wb-multi-table'));
+      document.querySelectorAll('.wb-table-region').forEach(s => s.classList.remove('wb-table-region'));
+      return;
+    }
+    if (!wrappers.length) return;
+    const visible = Array.prototype.filter.call(wrappers, w => w.offsetParent && w.getBoundingClientRect().height > 0);
+    const isMulti = visible.length >= 2;               // 详情类多 section 页（入库记录+关联订单+…）
+    const scroll = document.querySelector('.content-scroll') || document.getElementById('contentArea');
+    if (scroll) scroll.classList.toggle('wb-multi-table', isMulti);
+    const vh = window.innerHeight;
+    const tabbar = document.getElementById('mobileTabbar');
+    const tabbarH = (tabbar && tabbar.offsetHeight) || 0;
+    // 单表格模块：分页条吸底占 56px，表格须在它上方收住；多表格页：分页条随表静态，不占预算
+    let pagerH = 0;
+    if (!isMulti) {
+      const bar = document.querySelector('#contentArea .pagination-bar');
+      pagerH = (bar && bar.offsetHeight) || 56;
+    }
+    // 🟢 v228.75：区域模式（.wb-table-region）滚动容器集合 —— 见下方 regionMode 分支注释
+    const regionScs = new Set();
+    visible.forEach(w => {
+      const sc = w.closest('.content-scroll') || w.closest('#contentArea') || document.body;
+      const scRect = sc.getBoundingClientRect();
+      // 🔴 v228.75 修复：v228.73 注释声称「wrapper.top − 容器.top 随滚动同步平移、滚动无关」实为错误——
+      //   内部滚动容器（.content-scroll 自身 overflow-y:auto）的 rect 不随内容滚动平移，滚的是内容，
+      //   该差值 = 内容流偏移 − scrollTop，随滚动漂移。后果：滚动状态下（如已滚到底）触发的重适配
+      //   会拿到缩小甚至为负的偏移 → 经典公式误判为「短内容单屏」→ 校准循环把表格削到 160px 保底
+      //   → 布局塌缩又触发重适配恢复 → 来回振荡（实测插桩：scrollTop=854 时 offsetInSc=-17）。
+      //   加回 sc.scrollTop 还原为真正滚动无关的「内容流偏移」（body 滚动场景 scrollTop=0，自然退化正确）。
+      const offsetInSc = (w.getBoundingClientRect().top - scRect.top) + sc.scrollTop;   // 内容流偏移，滚动无关
+      const scAvailH = (sc === document.body) ? vh - tabbarH : sc.clientHeight;
+      // 🟢 v228.75：regionBudget = 「表格区域满屏高」= 可视高 − 分页条 − 余量（不再扣除表格上方内容高）
+      const regionBudget = Math.max(scAvailH - pagerH - 8, 160);
+      let h = regionBudget - offsetInSc;      // 经典单屏适配：表格上方内容少时一屏收住（滚动容器无页滚动）
+      let regionMode = false;
+      if (isMulti) {
+        h = Math.min(h, Math.round(vh * 0.62));   // 多表格页：单表不霸屏
+      } else if (h < regionBudget * 0.6) {
+        // 🟢 v228.75（用户实测截图：订单列表页三连问题）：表格上方内容过长（搜索+筛选+统计卡片+图表
+        //   合计超过可视高 40%）时，经典公式把表格压到 160px 保底 → 只剩 2~3 行；且吸底分页条
+        //   悬浮在图表上、与数据行穿叠。改「区域模式」：
+        //     · 表格区域 = 满屏高（滚到页底时表格完整可见，≥十几行 —— 用户明确要求）；
+        //     · 分页条随表静态排列（CSS .wb-table-region），永远固定在表格区域正下方，
+        //       不再吸附滚动视口底 → 浏览图表/卡片时翻页键不出现，数据行绝不与翻页键穿叠。
+        h = regionBudget;
+        regionMode = true;
+      }
+      h = Math.max(h, 160);                             // 保底可用高度
+      w.style.setProperty('--wb-fit-h', h + 'px');
+      if (regionMode) regionScs.add(sc);
+      // 🔴 校准循环（v228.73 实测补丁）：Chrome 对 position:sticky;bottom:0 的分页条有
+      // 「预置位」行为——只要滚动容器内容溢出 N px，吸底条在 scrollTop=0 时就预先钉在
+      // 「滚到底」位置，向上压住表格底部 N px（用户截图「数据穿过翻页键」的真正机制）。
+      // 任何未被公式计入的高度（容器上下 padding、标题、边框合计误差等）都会体现为
+      // scrollHeight > clientHeight，此处按实测差值回削表格高度，直到内容精确收进一屏，
+      // 分页条回到文档流位（= 表格底齐平），任何滚动位置都不再压表。
+      // 🟢 v228.75：仅经典吸底模式需要校准；区域模式分页条在文档流内、本就不叠加，页滚动是预期行为。
+      if (!isMulti && !regionMode && sc !== document.body) {
+        let guard = 0;
+        while (sc.scrollHeight > sc.clientHeight + 1 && guard++ < 4) {
+          h -= (sc.scrollHeight - sc.clientHeight) + 2;
+          if (h < 160) { h = 160; w.style.setProperty('--wb-fit-h', h + 'px'); break; }
+          w.style.setProperty('--wb-fit-h', h + 'px');
+        }
+      }
+    });
+    // 🟢 v228.75：区域模式打标 / 摘标（筛选收起展开、图表显隐会改变上方内容高 → 模式随之切换）
+    document.querySelectorAll('.wb-table-region').forEach(s => {
+      if (!regionScs.has(s)) s.classList.remove('wb-table-region');
+    });
+    regionScs.forEach(s => s.classList.add('wb-table-region'));
   },
 
   /**

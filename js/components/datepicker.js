@@ -25,7 +25,7 @@ const DatePicker = (() => {
     backdrop-filter: blur(22px) saturate(170%); -webkit-backdrop-filter: blur(22px) saturate(170%);
     border: 1px solid rgba(255,255,255,.6); border-radius: 18px;
     box-shadow: 14px 18px 40px rgba(120,140,180,.40), -8px -8px 24px rgba(255,255,255,.70), inset 0 1px 2px rgba(255,255,255,.8);
-    padding: 16px; width: 268px;
+    padding: 16px; width: 268px; max-width: calc(100vw - 16px);   /* 🟢 v228.75：max-width 兜底极窄屏 */
     font-size: 13px; color: #2b3445;
     animation: dpIn .18s ease-out;
     font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -123,9 +123,28 @@ const DatePicker = (() => {
     input.__dpPop = pop;
 
     function place() {
+      // 🟢 v228.75：移动端防溢出（用户圈红截图：右侧日期框弹出的日历超出屏幕右缘）。
+      //   旧实现直接 left = 输入框左缘，弹窗宽 268px，窄屏上输入框靠右时必然溢出；
+      //   且 place() 在 display:block 之前调用，offsetWidth 实测恒为 0，无法做边界钳制。
+      //   现在：先显示 → 实测弹窗尺寸 → 横向 clamp 进视口（8px 安全边距）；
+      //         纵向默认弹在输入框下方，下方放不下且上方放得下时改弹上方。
+      pop.style.display = 'block';
       const r = input.getBoundingClientRect();
-      pop.style.left = (window.scrollX + r.left) + 'px';
-      pop.style.top = (window.scrollY + r.bottom + 8) + 'px';
+      const pw = pop.offsetWidth || 270;
+      const ph = pop.offsetHeight || 380;
+      const vw = document.documentElement.clientWidth;
+      const winH = window.innerHeight;
+      const M = 8;                                       // 屏幕安全边距
+      const sx = window.scrollX, sy = window.scrollY;
+      let left = sx + r.left;
+      const leftMin = sx + M, leftMax = sx + vw - pw - M;
+      left = Math.min(Math.max(left, leftMin), Math.max(leftMin, leftMax));
+      let top = sy + r.bottom + 8;
+      if (r.bottom + 8 + ph > winH && r.top - 8 - ph > 0) {
+        top = sy + r.top - 8 - ph;                      // 下方放不下 → 上翻
+      }
+      pop.style.left = left + 'px';
+      pop.style.top = top + 'px';
     }
 
     function renderDay() {
@@ -249,7 +268,8 @@ const DatePicker = (() => {
       pop.querySelector('[data-act="back"]')?.addEventListener('click', (e) => { e.stopPropagation(); renderDay(); });
     }
 
-    function open() { place(); renderDay(); pop.style.display = 'block'; input.classList.add('open'); }
+    // 🟢 v228.75：先 renderDay 再显示再 place() —— place 需要实测弹窗尺寸（display:none 时为 0）
+    function open() { renderDay(); pop.style.display = 'block'; place(); input.classList.add('open'); }
     function close() { pop.style.display = 'none'; input.classList.remove('open'); }
 
     // 全部监听挂载同一个 signal，unmountAll 时一次 abort 全解绑

@@ -94,6 +94,10 @@ const StocktakeModule = {
     // v227.5：后台拉取「本次盘点概览」+ 批次结束标记（管理员视图需展示盘点人完成率 → 必须从云端拉最新）
     this._pullQuarterOverviews();
     this._pullRoundClosed();
+    // 🟢 v228.74：进入盘点模块时立即检查管理员的「远程结算」指令（延迟兜底）。
+    //   轮询循环已常驻处理；此处额外挂一个非阻塞延迟回调，确保「刚切回就收到指令」也能即时响应。
+    //   用 setTimeout 等 _pullRoundClosed（异步、未 await）落地后再读，避免读到旧 roundClosed。
+    setTimeout(() => { try { this._handleRemoteSettleAll(); } catch (e) {} }, 1200);
 
     // 🟢 v228.64（P0-2 修复同步黑洞）：常驻守护提前到「进入模块」即启动。
     //   旧版 _startGlobalSync() 全库唯一启动点在 startQuarter() 末尾（用户点了「🗓️ 季度盘点」之后），
@@ -148,8 +152,20 @@ const StocktakeModule = {
     // 🟢 v228.47：contentArea 重建后 stArea 是**新节点**，此前打的视图标记（data-st-view）随之丢失，
     //   而 _refreshQuarterPickerIfShown / _refreshQuarterPickerLight 的守卫正是读这个属性 ——
     //   标记一丢，后续 3s 轮询的轻量重渲全部静默失效（界面停止跟随云端，用户以为"不同步了"）。
-    //   这里按内存中的视图状态补回标记：有盘点现场 → 'sheet'，否则回到季度选择器语义。
-    this._setStocktakeView(this.sheet && this.sheet.sheetType === 'quarter' ? 'sheet' : 'quarter-picker');
+    //   这里按内存中的视图状态补回标记：有盘点现场 → 'sheet'，否则按记忆恢复。
+    // 🟢 v228.74（子视图记忆修复）：旧版对「无现场」一律回落 'quarter-picker'，导致用户停在
+    //   【日常盘点】选择界面时切走模块再回来，被 3s 轮询按标记补渲成季度工作台（用户截图实锤）。
+    //   现按 _lastStView 恢复：日常选择器 → 直接重渲日常界面；其余无现场场景维持季度兜底。
+    if (this.sheet) {
+      // 有未结束现场（日常/季度）：标记为 sheet，防止轮询把季度选择器盖到进行中的盘点上
+      this._setStocktakeView('sheet');
+    } else if (this._lastStView === 'daily-picker') {
+      this._setStocktakeView('daily-picker');
+      // 直接重渲日常盘点选择界面（纯本地取数，不 await —— 不阻塞任务栏同步链路）
+      try { this._renderDailySetup(); } catch (e) { console.warn('[stocktake] 恢复日常盘点界面失败(已忽略):', e && e.message); }
+    } else {
+      this._setStocktakeView('quarter-picker');
+    }
 
     // 🟢 v225.2 / v227.35：进入模块后再后台同步「他人分派给我的任务」（云端 settings 通道）。
     //   带超时、不阻塞首屏；同步完成后刷新任务栏（反映管理员分派给我的任务）。
@@ -248,6 +264,10 @@ const StocktakeModule = {
    */
   _setStocktakeView(view) {
     try {
+      // 🟢 v228.74：同步记忆「最后停留的子视图」，供模块切回时恢复（修复：离开前是日常盘点
+      //   选择界面，切模块回来却落到季度盘点 —— 旧版 render() 对无现场场景硬编码回季度）。
+      //   取值与 data-st-view 一致：'quarter-picker' | 'daily-picker' | 'sheet' | ''
+      this._lastStView = view;
       const area = document.getElementById('stArea');
       if (!area) return;
       if (view) area.setAttribute('data-st-view', view);
@@ -2662,15 +2682,15 @@ const StocktakeModule = {
     // 🟢 v228.69（用户反馈）：本轮结束后不再显示「⛔ xx 已结束（批次号）」文字徽章 ——
     //   「👑 本批次全部任务」标题旁已有 roundBadge 红色「已结束」标识，行内这枚纯文本徽章冗余，
     //   还把「🔄 开下一轮盘点」挤到老远。置空后按钮行自然收敛为「分派任务 + 开下一轮盘点」紧靠并排。
+    // 🟢 v228.74：改名「结束本轮并归档」—— 旧名「结束季度盘点」让人误以为结束整个季度，
+    //   实际只是结束本轮（一轮批次，结束后仍可「开下一轮盘点」）。
     const endBatchBtn = roundClosed
       ? ''
-      : `<button class="btn--danger" onclick="StocktakeModule.endQuarterRound('${escA(sheetId)}')" style="padding:6px 14px;font-size:13px;">结束季度盘点</button>`;
-    // 🟢 v228.35（P5）：紧急结束入口 —— 只锁入口、不结算，处理「有人一直不交、必须马上锁盘」。
-    //   与「结束季度盘点」并排但视觉降级为 ghost，避免误点把正常结算流程绕过去。
-    const emergencyBtn = roundClosed ? ''
-      : `<button class="btn--ghost" onclick="StocktakeModule.emergencyCloseRound('${escA(sheetId)}')" `
-        + `title="紧急锁盘：立即关闭盘点人入口，不归档未提交数据。适合有人长期未提交、必须马上停止盘点的场景" `
-        + `style="padding:6px 14px;font-size:13px;">🚨 紧急结束本轮</button>`;
+      : `<button class="btn--danger" onclick="StocktakeModule.endQuarterRound('${escA(sheetId)}')" style="padding:6px 14px;font-size:13px;">🏁 结束本轮并归档</button>`;
+    // 🟢 v228.74（用户决策）：「🚨 紧急结束本轮」按钮已删除 —— 其"只锁盘不结算"语义与
+    //   「结束本轮并归档」并存时职责混淆，且锁盘后结算入口消失、"开下一轮"会清草稿，
+    //   构成数据丢失陷阱。远程自动结算协议落地后（settleReq），正常结算即可覆盖全部场景。
+    const emergencyBtn = '';
     // 🟢 v227.12：已结束 → 提供「开下一轮」入口（解闸 + 重置任务），解决「结束后再也开不了下一轮」
     const nextRoundBtn = roundClosed
       ? `<button class="btn--primary" onclick="StocktakeModule.startNextRound('${escA(sheetId)}')" style="padding:6px 14px;font-size:13px;">🔄 开下一轮盘点</button>`
@@ -4746,6 +4766,9 @@ const StocktakeModule = {
         }
       }
       try { await this._applyGlobalResetIfAny(); } catch (e) { /* 忽略 */ }
+      // 🟢 v228.74：每轮轮询顺带处理管理员的「远程结算」指令（盘点人端自动上传归档）。
+      //   仅在本机有未结算的 settleReq 时才真正干活，否则幂等 no-op（混合轮询零额外开销）。
+      try { await this._handleRemoteSettleAll(); } catch (e) { /* 忽略 */ }
       // 🟢 v228.54（分叉根治②③）：每轮轮询顺带——
       //   ① 锚点自愈：本机有锚点而云端确实没有时补推（离线开盘/写入失败后联网自动恢复）；
       //   2) 补推积压队列：_flushCloudQueue 原本只在 online 事件/picker 打开时触发，
@@ -4898,39 +4921,137 @@ const StocktakeModule = {
   },
 
   /**
-   * 🟢 v228.35（P5）：紧急/强制结束当前轮次（管理员专用）。
-   *   与 endQuarterRound 的区别：
-   *     · endQuarterRound = 收口结算 —— 补录草稿、为每位盘点人生成 finished 概览、清季会话、开新一轮流程，
-   *       前提是**所有盘点人都已把数据交上来**。适合「盘点正常做完了」。
-   *     · 本方法 = 应急闸门 —— 只做一件事：立刻关闭本轮入口（本地 + 云端），
-   *       不补录、不生成概览、不动轮次号。适合「有人一直没交、管理员必须马上锁盘」。
-   *   为什么必须存在：旧版只有 endQuarterRound 一条路，管理员想立刻锁盘就只能走完整结算，
-   *   而结算会把未提交的盘点人一次性归档（数据可能还不完整）；没有「先锁盘后慢慢处理」的中间态。
-   *   安全性：本方法不写任何盘点记录、不改任务状态，因此不会产生数据副作用；
-   *         解锁方式与结束轮次一致 —— 走「🔄 开下一轮盘点」。
+   * 🟢 v228.74：远程自动结算 —— 等待盘点人手机收到 settleReq 指令并自动落库上传。
+   *   回执 = 分派任务在云端 stocktake.json 的 tasks 里变为 closed。
+   *   每 1.5s 拉一次云端任务表（KB 级），全部关闭或超时即返回；
+   *   超时仍未关闭的交给后续兜底强制收尾（离线/锁屏设备由「延迟结算」在下次打开时自动补传）。
    */
-  async emergencyCloseRound(sheetId) {
-    if (!sheetId) { this.toast('缺少批次信息，无法紧急结束'); return; }
-    if (this.isQuarterRoundClosed(sheetId)) { this.toast('本轮已处于结束状态'); return; }
+  async _waitForSettleReceipts(sheetId, batchTasks, timeoutMs) {
+    const openCount = () => batchTasks.filter(t => t && t.status !== 'closed').length;
+    const startOpen = openCount();
+    if (!startOpen) return { autoClosed: 0, stillOpen: 0 };
+    this.toast('已通知 ' + startOpen + ' 位盘点人的手机自动上传数据，请稍候…');
+    const deadline = Date.now() + (timeoutMs || 15000);
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 1500));
+      try {
+        if (typeof SyncManager === 'undefined' || !SyncManager.isOnline
+            || typeof SyncManager.pullStocktake !== 'function') continue;
+        const cloud = await SyncManager.pullStocktake();
+        const tasks = (cloud && cloud.tasks) || {};
+        batchTasks.forEach(t => {
+          if (!t || t.status === 'closed') return;
+          const ct = tasks[t.taskId];
+          if (ct && ct.status === 'closed') t.status = 'closed';   // 回执：同步到内存，兜底收尾自然跳过
+        });
+        if (openCount() === 0) return { autoClosed: startOpen, stillOpen: 0 };
+      } catch (e) { /* 单轮失败继续等 */ }
+    }
+    return { autoClosed: startOpen - openCount(), stillOpen: openCount() };
+  },
+
+  /**
+   * 🟢 v228.74：盘点人端 —— 收到管理员的结算指令（roundClosed[sheetId].settleReq）后，
+   *   本机自动把已盘数据落库并上传（增量：commit 内部按已盘编码去重，不会重复上传）。
+   *   分三种情况：
+   *     ① 本机正在盘（sheet 开着且同批次）→ flush 草稿后走 finishStocktake(auto) 全流程；
+   *     ② 本机有未提交草稿（保存退出/离线错过指令）→ 草稿直接落库 + 关闭自己的任务作回执；
+   *     ③ 无现场无草稿（已点过「结束本次盘点」）→ 什么都不做（数据早已在云端）。
+   *   幂等：以 settleAt 为回执标记（localStorage），处理过一次不再重复；
+   *         落库失败时不打标记 → 下一轮轮询自动重试。
+   */
+  async _handleRemoteSettle(sheetId) {
     try {
-      // 🟢 修复：紧急结束必须写入结构化对象（与 endQuarterRound 一致），而非裸时间戳字符串。
-      //   旧实现 m[sheetId] = new Date().toISOString() 让云端 round_closed[sheetId] 变成 string，
-      //   而 _pullBatchCommonState / _pullRoundClosed 的合并均用 typeof rc[k]==='object' 守卫，
-      //   字符串会被静默丢弃 → 他端永远收不到「紧急结束」闸门（P5「显示能点、点了没用」）。
-      const c = (typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser)
-        ? ((AppConfig.getCurrentUser() || {}).username || '') : '';
-      const info = { closedBy: c, closedAt: new Date().toISOString(),
-                     batchNo: '', round: this._getRoundNo(sheetId), emergency: true };
-      const m = this._getRoundClosed();
-      m[sheetId] = info;
-      this._saveRoundClosed(m);                      // ① 本地立即生效，盘点人同机标签页 storage 事件即可感知
-      try { await this._setRoundClosedCloud(sheetId, info); } catch (e) { /* 离线入队，联网补推 */ }
-      try { this._broadcastOverviewUpdate({ sheetId, emergency: true, updatedAt: new Date().toISOString() }); } catch (e) {}
-      try { await this._refreshNowAfterAction(); } catch (e) {}   // 🟢 v228.35（P3）：立即刷新，不等轮询
-      this.toast('⛔ 本轮已紧急结束：盘点人入口已关闭，未提交的盘点数据保持原样（不会自动归档）。如需重新开放，请点「开下一轮盘点」。');
-    } catch (e) {
-      console.error('[stocktake] 紧急结束本轮失败:', e);
-      this.toast('紧急结束失败：' + (e.message || e));
+      const rc = (this._getRoundClosed() || {})[sheetId];
+      if (!rc || !rc.settleReq) return false;
+      const ackKey = 'wb_stocktake_settle_ack_' + sheetId;
+      let acked = '';
+      try { acked = localStorage.getItem(ackKey) || ''; } catch (e) {}
+      if (acked && acked === String(rc.settleAt || '')) return false;
+
+      const me = String(((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser)
+        ? ((AppConfig.getCurrentUser() || {}).username || '') : '') || this.task.counter || '').trim();
+
+      // ① 本机正在盘同一批次 → 走完整结束流程（auto 跳过确认弹窗）
+      if (this.sheet && this.sheet.sheetType === 'quarter' && this.sheet.sheetId === sheetId) {
+        try { this.saveDraft(); } catch (e) { /* 忽略 */ }
+        await this.finishStocktake({ auto: true });
+        try { localStorage.setItem(ackKey, String(rc.settleAt || '1')); } catch (e) {}
+        return true;
+      }
+
+      // ②/③：无现场 —— 按草稿/任务决定是否补传
+      const allTasks = DataStore.getStocktakeTasks() || {};
+      const myTask = me ? Object.keys(allTasks).map(k => allTasks[k]).find(t =>
+        t && !t.deleted && t.counter === me && t.sheetType === 'quarter'
+        && (t.batchKey === sheetId || t.sheetId === sheetId)) : null;
+      const draft = me ? this.loadDraft(me, sheetId) : null;
+      const draftN = draft && draft.qty ? Object.keys(draft.qty).length : 0;
+
+      if (myTask && myTask.status !== 'closed') {
+        if (draftN > 0) {
+          // 草稿直接落库（内部按已盘编码去重，成功后清草稿）
+          try {
+            const n = await this._commitCountingForTask(myTask, (draft.sheet && draft.sheet.batchNo) || '');
+            console.log('[stocktake] 远程结算：草稿补录 ' + n + ' 条');
+          } catch (e) { console.warn('[stocktake] 远程结算草稿补录失败(下一轮重试):', e && e.message); return false; }
+        }
+        // 关闭任务作为回执 + 推云端
+        try {
+          myTask.status = 'closed';
+          myTask.sheetId = myTask.sheetId || sheetId;
+          myTask.closedAt = myTask.closedAt || new Date().toISOString();
+          myTask.updatedAt = new Date().toISOString();
+          await DataStore.saveStocktakeTask(myTask);
+          if (typeof SyncManager !== 'undefined' && SyncManager.isOnline
+              && typeof SyncManager.syncStocktakeTasks === 'function') {
+            try { await SyncManager.syncStocktakeTasks({ taskId: myTask.taskId, status: 'closed', sheetId: myTask.sheetId, closedAt: myTask.closedAt, updatedAt: myTask.updatedAt }); } catch (e) { /* 失败由补推队列兜底 */ }
+          }
+        } catch (e) { console.warn('[stocktake] 远程结算关任务失败(下一轮重试):', e && e.message); return false; }
+        try {
+          const sess = this._getOpenSession();
+          if (sess && sess.sheetType === 'quarter' && sess.sheetId === sheetId) this._clearOpenSession();
+        } catch (e) { /* 忽略 */ }
+        this.toast('管理员已结束本轮，你已盘的数据已自动上传归档');
+      } else if (draftN > 0) {
+        // 无分派任务但有草稿（自主盘点场景）→ 仅落库记录
+        try {
+          const stock = await DataStore.getRows('stock');
+          const stockMap = {};
+          (stock || []).forEach(s => { stockMap[String(s.存货编码).trim()] = s; });
+          const rows = Object.keys(draft.qty).map(code => {
+            const s = stockMap[code] || {};
+            return {
+              存货编码: code, 存货名称: s.存货名称 || '', 规格型号: s.规格型号 || '',
+              现存量: parseFloat(s.现存数量) || 0,
+              盘点数量: draft.qty[code],
+              入库量: s.入库量 || 0, 出库量: s.出库量 || 0,
+              备注: (draft.remarks && draft.remarks[code]) || ''
+            };
+          });
+          await this._commitRows(rows, {
+            counter: me, sheetId: sheetId, batchNo: (draft.sheet && draft.sheet.batchNo) || '',
+            sheetType: 'quarter', forceClosed: true
+          });
+          try {
+            const sess = this._getOpenSession();
+            if (sess && sess.sheetType === 'quarter' && sess.sheetId === sheetId) this._clearOpenSession();
+          } catch (e) { /* 忽略 */ }
+          this.toast('管理员已结束本轮，你已盘的数据已自动上传归档');
+        } catch (e) { console.warn('[stocktake] 远程结算落库失败(下一轮重试):', e && e.message); return false; }
+      }
+      // ③ 无现场无草稿：什么都不做（已点过「结束本次盘点」的数据早已在云端）
+      try { localStorage.setItem(ackKey, String(rc.settleAt || '1')); } catch (e) {}
+      return true;
+    } catch (e) { console.warn('[stocktake] 远程结算处理异常(已忽略):', e && e.message); return false; }
+  },
+
+  /** 🟢 v228.74：对本机已知的所有「要求结算」轮次逐一处理（幂等，供 render 延迟兜底调用） */
+  async _handleRemoteSettleAll() {
+    const rcMap = this._getRoundClosed() || {};
+    const sids = Object.keys(rcMap).filter(k => rcMap[k] && rcMap[k].settleReq);
+    for (const sid of sids) {
+      try { await this._handleRemoteSettle(sid); } catch (e) { /* 单轮失败不影响其他 */ }
     }
   },
 
@@ -5072,6 +5193,9 @@ const StocktakeModule = {
       || ((typeof AppConfig !== 'undefined' && typeof AppConfig.getKeeperModules === 'function') && (AppConfig.getKeeperModules(c) || []).indexOf('stocktakeAssign') !== -1);
     if (!hasPerm) { this.toast('只有管理员或具备【查看/分派盘点任务】权限的库管员可结束本批次'); return; }
     if (!sheetId) { this.toast('批次标识缺失'); return; }
+    // 🟢 v228.74：幂等守卫 —— 已结束的轮次不允许重复结算（多端竞态/双击/其他端已操作的防护）。
+    //   旧版无此守卫：另一端已紧急结束/已结算而本端界面未刷新时，可对已关闭轮次重复走结算。
+    if (this.isQuarterRoundClosed(sheetId)) { this.toast('本轮已处于结束状态，无需重复结束'); return; }
     const batchNo = String(this.batchNo || sheetId);
 
     // 统计本批次 open / 进行中情况，确认提示
@@ -5083,15 +5207,18 @@ const StocktakeModule = {
     const openCount = batchTasks.filter(t => t.status !== 'closed').length;
     const counters = Array.from(new Set(batchTasks.map(t => t.counter).filter(Boolean)));
 
+    // 🟢 v228.74：确认文案 —— 明确「远程自动结算」的新行为：盘点人手机会收到指令后自动上传，
+    //   未盘完的自动增量归档，已点过「结束本次盘点」的不受影响；联系不上的由延迟结算兜底。
     const ok = await WBModal.confirm(
-      '本次季度盘点结束（盘点号 ' + batchNo + '）？\n\n' +
+      '结束本轮季度盘点（盘点号 ' + batchNo + '）？\n\n' +
       (openCount > 0
         ? '⚠️ 当前还有 ' + openCount + ' 个分派任务（含 ' + counters.length + ' 位盘点人）未结束。\n' +
-          '  系统将强制结束所有盘点人的分派任务，等同于盘点人点击「结束本次盘点」；\n' +
-          '  已落库的盘点记录保留并汇总到清单，未落库的随任务一并结束。\n\n'
+          '  系统将通知这些盘点人的手机自动把已盘数据落库上传（约 3~10 秒/人）；\n' +
+          '  已点过「结束本次盘点」的不受影响；届时仍联系不上的（锁屏/离线），\n' +
+          '  将在其打开盘点时自动补传。\n\n'
         : '所有盘点人都已完成。\n\n') +
       '结束后本批次不可再进入盘点。是否继续？',
-      { title: '本次季度盘点结束', okText: '确定结束', cancelText: '取消' }
+      { title: '结束本轮并归档', okText: '确定结束', cancelText: '取消' }
     );
     if (!ok) return;
 
@@ -5106,8 +5233,11 @@ const StocktakeModule = {
     await new Promise(r => setTimeout(r, 700));
 
     // 1) 标记 round closed（先写本地 + 推云端）—— 🟢 v227.12：记录被关闭的是第几轮
+    // 🟢 v228.74：settleReq/settleAt = 远程自动结算指令 —— 盘点人手机轮询到该标记后
+    //   自动把本机已盘数据落库上传（增量去重），任务 closed 即回执；settleAt 兼作幂等标记。
     const map = this._getRoundClosed();
-    const closedInfo = { closedBy: c, closedAt: new Date().toISOString(), batchNo: batchNo, round: this._getRoundNo(sheetId) };
+    const closedInfo = { closedBy: c, closedAt: new Date().toISOString(), batchNo: batchNo,
+                         round: this._getRoundNo(sheetId), settleReq: true, settleAt: new Date().toISOString() };
     map[sheetId] = closedInfo;
     // 🟢 v228.33：把当前未结束会话的 sheetId 也关上 —— 防止 _anchorRangeToOpenSession
     //   把 query 漂到旧日期后，结束标记写在「错」的 sheetId 下，导致重进仍显示「进行中」。
@@ -5123,6 +5253,15 @@ const StocktakeModule = {
     // 🟢 v227.67：合并式推送（不再整包覆盖），避免把其他设备已结束的轮次从云端抹掉
     try { await this._setRoundClosedCloud(sheetId, map[sheetId]); }
     catch (e) { console.warn('[stocktake] 批次结束标记推云端失败(已忽略):', e && e.message); }
+
+    // 🟢 v228.74：远程自动结算 —— 等待盘点人手机收到 settleReq 指令并自动落库上传
+    //   （回执 = 任务 closed；每 1.5s 拉一次云端任务表，KB 级；全部关闭提前返回）。
+    //   超时仍未关闭的（锁屏/离线/杀后台）由下方兜底强制收尾 + 延迟结算补传。
+    let autoClosed = 0;
+    try {
+      const w = await this._waitForSettleReceipts(sheetId, batchTasks, 15000);
+      autoClosed = w.autoClosed || 0;
+    } catch (e) { console.warn('[stocktake] 等待自动结算回执异常(已忽略):', e && e.message); }
 
     // 2) 强制收尾：所有 open 任务标 closed + 推云端（保留 createdAt，补 closedAt/updatedAt）
     //    🟢 v227.15（G4）：收口范围额外纳入 replenishAssigned 任务 —— 这类任务 status 已是 closed
@@ -5245,7 +5384,10 @@ const StocktakeModule = {
     // 🟢 v228.35（P3）：结束是管理员最需要即时反馈的动作，立即刷新一次不等轮询周期
     try { await this._refreshNowAfterAction(); } catch (e) { /* 忽略 */ }
 
-    this.toast('本次季度盘点已结束：' + batchNo + '（共收 ' + counters.length + ' 位盘点人）');
+    // 🟢 v228.74：结束文案带出自动归档人数（autoClosed = 结算等待期内手机自动上传的任务数）
+    this.toast('本轮已结束并归档：' + batchNo + '（共收 ' + counters.length + ' 位盘点人'
+      + (autoClosed > 0 ? '，自动归档 ' + autoClosed + ' 人' : '')
+      + '）');
     if (this._entrySheetType === 'quarter') this.startQuarter();
   },
 
@@ -7081,7 +7223,8 @@ const StocktakeModule = {
     return (this.sheet ? this.sheet.sheetId : 'sheet') + '_' + c + '_' + s + '-' + e;
   },
 
-  async finishStocktake() {
+  async finishStocktake(opts) {
+    const _auto = !!(opts && opts.auto);   // 🟢 v228.74：远程结算时跳过确认弹窗（无人工在场）
     if (!this.sheet) { this.toast('请先点击【日常盘点】或【季度盘点】'); return; }
     this._markSheetTouched('finished');
     const u = (typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser && AppConfig.getCurrentUser()) || null;
@@ -7109,7 +7252,7 @@ const StocktakeModule = {
       ? ('未盘点：' + unfilled.length + ' 条（以「/」保存，不计入盘亏）\n\n'
         + 'ℹ️ 结束后如有未盘项，系统会自动为你保留补盘入口，可随时补录漏盘（只列没盘过的编码）。')
       : '未盘点：0 条（本次全部盘完 🎉）';
-    const ok = await WBModal.confirm(
+    const ok = _auto ? true : await WBModal.confirm(
       '确认结束本次盘点？\n\n' +
       '盘点号：' + batchNoText + '\n' +
       '盘点人：' + counter + '\n' +

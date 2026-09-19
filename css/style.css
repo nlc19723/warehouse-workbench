@@ -4639,7 +4639,9 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
   .filter-bar-m .fb-row--buttons > .btn,
   .filter-bar-m .fb-row--buttons > button{ flex: 0 0 auto !important; }
 
-  /* ⑥ 控件统一 44px + 16px + 凹陷感（覆盖 PC 端 36px / 12.5px） */
+  /* ⑥ 控件统一 44px + 凹陷感（覆盖 PC 端 36px / 12.5px）
+     🟢 v228.75：字号从本块拆出——日期框/下拉框 14px（用户圈红反馈调小一号），
+     文本/搜索框维持 16px（未圈红，且防 iOS 聚焦整页缩放） */
   .filter-bar select,
   .filter-bar input[type="text"],
   .filter-bar input[type="search"],
@@ -4653,6 +4655,19 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
     font-size: 16px !important;
     border-radius: 10px !important;
     box-sizing: border-box !important;
+  }
+  /* 🟢 v228.75：日期框 + 下拉选择框 字号统一调小一号（16px → 14px，全模块生效）。
+     覆盖：原生 select（全部供应商/项目/状态…）、自定义下拉触发器（SearchSelect .ss-trigger）、
+     日期框（.filter-date / DatePicker 挂载后的 .dp-input——挂载后 type 变 text，
+     与上方 input[type="text"] 同特异性 (0,2,1)，靠「声明在后」取胜）。
+     高度/触控区维持 44px 不变，仅字号变小。 */
+  .filter-bar select,
+  .filter-bar input[type="date"],
+  .filter-bar input.filter-date,
+  .filter-bar input.dp-input,
+  .filter-bar-m .ss-wrap .ss-trigger,
+  .filter-bar .ss-wrap .ss-trigger{
+    font-size: 14px !important;
   }
   /* ss-trigger padding 调整：line-height 44 下需要垂直居中 */
   .filter-bar-m .ss-wrap .ss-trigger{
@@ -4855,55 +4870,65 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
 }
 
 /* ==========================================================================
-   🟢 v228.27 · 方案 B「移动端表格视口 + 分页吸底」——表头 / 数据 / 分页 三者同屏
+   🟢 v228.73 · 方案 C「表格实测限高 + 紧凑分页」——修复多表格叠加 / 分页溢出 / 数据穿键
    --------------------------------------------------------------------------
-   目标终态（外层内容区滚到底后，同一屏内）：
-     顶栏 → 表头(吸顶) → 数据行(表格内部滚动) → 分页条(吸底)
-   做法：把表格容器高度改为「视口剩余高 − 分页条高」，使其与分页条合计恰好一屏；
-        分页条 sticky 吸底常驻，翻页键任何时候都够得着。
-   兼容：dvh 需 iOS 15.4+，用 @supports 回退到 vh。
+   背景（v228.27 方案 B 的两个缺陷，用户实测截图实锤）：
+     ① 容器吸顶规则 .content-scroll > *:has(.table-wrapper) 对「单页多表格」的详情页
+        （存货/供应商/订单详情的 入库记录 + 关联订单 等多 section）同样生效——
+        多个 sticky 容器依次钉在 top:0，页面下滑时区块相互叠加穿透。
+     ② 表格视口高 --table-vh 靠「魔法常数 82px」估算表格上方内容高，各模块结构不一；
+        估不准时表格下沿越过吸底分页条，数据行从翻页键后穿过，体验差；
+        且数字页码按钮 + 每页下拉 + 跳至 在窄屏横向溢出，只能靠横向滚动承载。
+   方案 C：
+     ① 废除容器吸顶，表格容器回归文档流——多表格页天然不再叠加（根除）。
+     ② 表格高度 JS 实测适配（TableUtils.fitMobileTables，v228.73 新增）：
+        逐 wrapper 实测其在滚动容器内的偏移，
+        高度 = 滚动容器可视高 − 表格顶偏移 − 分页条高 − 余量，
+        任何模块结构下「表格下沿 = 分页条上沿」，数据永远不会再穿过翻页键。
+        实测值经行内 CSS 变量 --wb-fit-h 注入（配合下方 var() 消费，绕开 !important）。
+     ③ 分页条保持吸底常驻（不透明背景 + 投影），重排为紧凑单行：
+        « ‹  x / y  › » + 每页下拉；数字页码按钮、「跳至」在移动端隐藏（纯 CSS，桌面不变）。
+     ④ 多表格页（JS 给 .content-scroll 打 .wb-multi-table 标）：分页条改为随表静态排列
+        （每表各自一条、随内容滚动），每表高度由 JS 另设上限，避免单表霸屏。
    ========================================================================== */
-@media (max-width: 768px){
-  :root{
-    --pager-h: 56px;          /* 分页条压成单行后的固定高，需与下方 .pagination-bar 定高一致 */
-    /* 表格视口高度 = 视口 − 顶栏(56) − 分页条(56) − 顶栏下余量
-       实测校准（390×844）：sticky 块顶 ~69、分页顶 ~718 → 表格可视高应 ≈649，
-       即从视口扣除 844−649 = 195px ≈ 56(顶栏) + 56(分页) + 83。取 82 留 1px 安全余量。 */
-    --table-vh: calc(100vh - var(--header-height, 56px) - var(--pager-h) - 82px);
-  }
-  @supports (height: 100dvh){
-    :root{ --table-vh: calc(100dvh - var(--header-height, 56px) - var(--pager-h) - 82px); }
-  }
 
-  /* --- 1. 表格视口高度动态化：wrapper + 分页条 = 一屏 --- */
-  /* 先把「承载表格的那一层」钉在内容区顶部，保证外层滚到底后表头不被固定顶栏遮挡。
-     各模块结构不一：有的是 .card 包裹，有的是无类名的普通 div；
-     统一用 :has() 命中「含表格滚动容器的直接子元素」，并兼容 .card 嵌一层的场景。
-     sticky 层需限制总高（表头 + 表格视口），否则内容会向下溢出压住吸底分页条。 */
+/* 桌面端：紧凑页码指示（x / y）不参与布局，数字页码按钮照常显示 */
+.pagination-bar .wb-pager-ind{ display: none; }
+
+@media (max-width: 768px){
+  :root{ --pager-h: 56px; }   /* 分页条压成单行后的固定高，需与下方 .pagination-bar 定高一致 */
+
+  /* --- 1. 废除容器吸顶（多表格叠加的根因）：容器回归文档流 --- */
   .content-scroll > *:has(.table-wrapper),
   .content-scroll > *:has(.ob-list-table-wrapper),
   .content-scroll > *:has(.oc-entry-table-wrapper),
   .content-scroll > *:has(.ob-entry-table-wrapper),
   .content-scroll > * > .card:has(.table-wrapper){
-    position: sticky; top: 0; z-index: 4;
-    max-height: calc(var(--table-vh) + 42px);   /* 表格视口 + 表头行高，防溢出压到分页条 */
-    overflow: visible;
+    position: static !important;
+    max-height: none !important;
+    overflow: visible !important;
   }
+  /* 表格滚动容器：CSS 先给保守兜底高度（JS fitMobileTables 经 --wb-fit-h 精确覆写） */
   .table-wrapper,
   .ob-list-table-wrapper,
   .oc-entry-table-wrapper,
   .ob-entry-table-wrapper{
-    max-height: var(--table-vh) !important;
-    overflow-y: auto !important;              /* 保留表格内部纵滚（方案 B 核心，与 A1 相反） */
+    max-height: var(--wb-fit-h, calc(100vh - 210px)) !important;
+    overflow-y: auto !important;
     -webkit-overflow-scrolling: touch;
   }
+  @supports (height: 100dvh){
+    .table-wrapper,
+    .ob-list-table-wrapper,
+    .oc-entry-table-wrapper,
+    .ob-entry-table-wrapper{ max-height: var(--wb-fit-h, calc(100dvh - 210px)) !important; }
+  }
 
-  /* --- 2. 分页条吸底常驻（11 个模块一次命中，零 JS 改动） --- */
+  /* --- 2. 分页条吸底常驻（单表格模块）；背景不透明，数据行绝不透出 --- */
   .pagination-bar{
     position: sticky; bottom: 0; z-index: 9;
     height: var(--pager-h); min-height: var(--pager-h);
     /* 横跨内容区全宽：负外边距抵消 .content-scroll 的 10px 左右内边距；
-       底部不留负值，避免分页条上移与表格末行重叠。
        背景必须不透明——--card-bg 是 rgba(255,255,255,0.82) 半透明令牌，
        直接用它会让下方数据行透出、与分页按钮叠字。 */
     margin: 0 -10px !important; padding: 0 10px !important;
@@ -4915,26 +4940,49 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
     gap: 6px; justify-content: space-between;
   }
   .pagination-bar::-webkit-scrollbar{ height: 3px; }
-  /* 「共 N 条」与「跳至」文本块（inline style 生成，无类名 → 用直接子 span 定位） */
+  /* 「共 N 条」「跳至」等文本块（inline style 生成，无类名 → 用直接子 span 定位） */
   .pagination-bar > span{ font-size: 11px !important; white-space: nowrap; flex: 0 0 auto; }
   .pagination-bar > span input{ height: 26px !important; width: 40px !important; font-size: 11px !important; }
   .pagination-bar .page-btns{ flex: 0 1 auto; justify-content: center; gap: 4px !important; }
   /* 触控命中区保持 v228.23 规格：移动端翻页键 ≥40px（不可为塞下按钮而缩小） */
   .pagination-bar .page-btns button,
   .pagination-bar .page-btns .wb-pager-btn{ min-width: 40px !important; min-height: 40px !important; }
-  /* 窄屏隐藏"每页条数"下拉与"跳至"块，给翻页键让位（≥480px 仍显示） */
-  .pagination-bar > span:has(> select){ display: none !important; }
-  .pagination-bar > span:last-child{ display: none !important; }
+
+  /* --- 3. 紧凑分页：隐藏数字页码按钮与「跳至」，显示「x / y」指示（彻底消除横向溢出） --- */
+  .pagination-bar .page-btns button:not(.wb-pager-btn){ display: none !important; }
+  .pagination-bar .wb-pager-ind{
+    display: inline-flex !important; align-items: center; justify-content: center;
+    min-width: 52px; height: 40px; padding: 0 2px;
+    font-size: 13px; font-weight: 600; color: var(--text-main);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .pagination-bar > span:last-child{ display: none !important; }   /* 「跳至 x / y 页」隐藏 */
+  .pagination-bar > span:has(> select){                            /* 「每页 N 条」保留 */
+    display: inline-flex !important; align-items: center; gap: 4px;
+  }
+  .pagination-bar select{ max-width: 76px; height: 28px; font-size: 11px; }
+
+  /* --- 4. 多表格页（详情类，JS 打标 .wb-multi-table）：分页条随表静态排列，不再吸底 --- */
+  .content-scroll.wb-multi-table .pagination-bar{
+    position: static !important;
+    height: auto; min-height: 0;
+    margin: 0 !important; padding: 6px 4px !important;
+    box-shadow: none;
+  }
+  /* 每张子表的高度上限由 fitMobileTables 按「min(剩余空间, 62% 屏高)」经 --wb-fit-h 注入 */
+
+  /* --- 5. 🟢 v228.75 长内容页（表格上方有搜索/筛选/统计卡片/图表等高内容，JS 打标 .wb-table-region）：
+     旧吸底 sticky 的两个实测问题（用户圈红截图）：①浏览图表/卡片时翻页键悬浮压在非表格内容上；
+     ②吸底条与表格行穿叠。现改为随表静态排列 —— 翻页键永远固定在「表格区域」正下方（文档流内），
+     表格区域自身限高满屏、内部滚动（fitMobileTables 注入 regionBudget），滚到页底即
+     「表格满屏（≥十几行）+ 翻页键贴底」。观感保持吸底同款：全宽 + 不透明背景 + 上边线。 --- */
+  .wb-table-region .pagination-bar{
+    position: static !important;
+    box-shadow: none;
+  }
 }
-/* 超窄屏（≤430px）：翻页键保持 40px 触控命中区（v228.23 S-3 规格），
-   宽度不足时由 .pagination-bar 的 overflow-x:auto 横向滚动承载，不缩小按钮。 */
+/* 超窄屏（≤430px）：隐藏「共 N 条」给翻页键让位；字号微降 */
 @media (max-width: 430px){
   .pagination-bar > span{ font-size: 10px !important; }
-  .pagination-bar > span:has(> select){ display: none !important; }
-  .pagination-bar > span:last-child{ display: none !important; }
-}
-@media (min-width: 480px) and (max-width: 768px){
-  .pagination-bar > span:has(> select){ display: inline-flex !important; align-items: center; gap: 4px; }
-  .pagination-bar > span:last-child{ display: inline-flex !important; align-items: center; gap: 4px; }
-  .pagination-bar select{ max-width: 76px; height: 28px; font-size: 11px; }
+  .pagination-bar > span:first-child{ display: none !important; }
 }

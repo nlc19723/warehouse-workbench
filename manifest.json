@@ -2,7 +2,7 @@
   "name": "StockHub",
   "short_name": "StockHub",
   "description": "StockHub - 数据驱动的仓库管理助手",
-  "start_url": "./?v=228.72",
+  "start_url": "./?v=228.75",
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#F0F4F8",

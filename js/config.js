@@ -128,6 +128,101 @@ function _credRestore() {
 }
 const _REST = _credRestore();
 
+// ────────────────────────────────────────
+// 🔐 v228.74：cloudConfig 下发签名（修复 AUDIT-228-102）
+//   · v228.72 把 cloudConfig 改成「强制跟随」，但写入通道是 anon（公开 key），
+//     任何拿到 anon key 的人都能覆盖 settings/cloudConfig.json，使全体设备每 60s
+//     无确认地切到攻击者桶 → 数据外泄/劫持。
+//   · 修复：管理员「下发」时对本机 effective 配置做 HMAC-SHA256 签名（密钥混淆内嵌于前端），
+//     客户端 pull 时必须校验签名通过才跟随；无签名/签名不符的配置一律忽略。
+//   · 这是静态 PWA（无 Auth）下的最小可用防护：把攻击门槛从「有 anon key 即可」提高到
+//     「须反编译出混淆签名密钥」。密钥仍在前端（anon 全权属 AUDIT-228-101，需后端代理/Auth 才能根除）。
+// ────────────────────────────────────────
+const _CFG_SIG_XOR = 'wb-cfg-sig-2026';
+const _CFG_SIG_PARTS = [
+  'TlUbUFNVSxUNAU8ABgAERgcZWgNfHU',
+  'MIBBsDAgNQEgQdW1IEG0ZdBhtQBlME',
+  'ElIUUwcFHEAMXk9XCFRUFlIfAA=='
+];
+function _cfgSigSecret() {
+  try {
+    const bin = atob(_CFG_SIG_PARTS.join(''));
+    const k = _CFG_SIG_XOR;
+    let out = '';
+    for (let i = 0; i < bin.length; i++) out += String.fromCharCode(bin.charCodeAt(i) ^ k.charCodeAt(i % k.length));
+    return out;
+  } catch (e) { console.error('[config] cloudConfig 签名密钥还原失败:', e); return ''; }
+}
+
+// 纯 JS SHA-256 + HMAC-SHA256（字节级，依赖 TextEncoder，浏览器/Node 通用）
+// 已与 Node crypto.createHmac('sha256') 交叉验证一致。
+const _SHA256_K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+function _sha256Bytes(bytes) {
+  const H=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const l=bytes.length, bitLen=l*8, total=((l+1+8+63)&~63);
+  const m=new Uint8Array(total); m.set(bytes); m[l]=0x80;
+  const hi=Math.floor(bitLen/0x100000000), lo=bitLen>>>0;
+  m[total-8]=(hi>>>24)&255; m[total-7]=(hi>>>16)&255; m[total-6]=(hi>>>8)&255; m[total-5]=hi&255;
+  m[total-4]=(lo>>>24)&255; m[total-3]=(lo>>>16)&255; m[total-2]=(lo>>>8)&255; m[total-1]=lo&255;
+  const w=new Uint32Array(64);
+  for (let off=0; off<total; off+=64) {
+    for (let i=0;i<16;i++){ const j=off+i*4; w[i]=(m[j]<<24)|(m[j+1]<<16)|(m[j+2]<<8)|m[j+3]; }
+    for (let i=16;i<64;i++){
+      const s0=((w[i-15]>>>7)|(w[i-15]<<25))^((w[i-15]>>>18)|(w[i-15]<<14))^(w[i-15]>>>3);
+      const s1=((w[i-2]>>>17)|(w[i-2]<<15))^((w[i-2]>>>19)|(w[i-2]<<13))^(w[i-2]>>>10);
+      w[i]=(w[i-16]+s0+w[i-7]+s1)>>>0;
+    }
+    let a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for (let i=0;i<64;i++){
+      const S1=((e>>>6)|(e<<26))^((e>>>11)|(e<<21))^((e>>>25)|(e<<7));
+      const ch=(e&f)^((~e)&g), t1=(h+S1+ch+_SHA256_K[i]+w[i])>>>0;
+      const S0=((a>>>2)|(a<<30))^((a>>>13)|(a<<19))^((a>>>22)|(a<<10));
+      const maj=(a&b)^(a&c)^(b&c), t2=(S0+maj)>>>0;
+      h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+    }
+    H[0]=(H[0]+a)>>>0; H[1]=(H[1]+b)>>>0; H[2]=(H[2]+c)>>>0; H[3]=(H[3]+d)>>>0;
+    H[4]=(H[4]+e)>>>0; H[5]=(H[5]+f)>>>0; H[6]=(H[6]+g)>>>0; H[7]=(H[7]+h)>>>0;
+  }
+  return H;
+}
+function _hmacSha256Hex(msgStr, keyStr) {
+  const enc=new TextEncoder();
+  let key=enc.encode(keyStr);
+  if (key.length>64) key=_sha256Bytes(key);
+  const inner=new Uint8Array(64), outer=new Uint8Array(64);
+  for (let i=0;i<key.length;i++){ inner[i]=key[i]^0x36; outer[i]=key[i]^0x5c; }
+  for (let i=key.length;i<64;i++){ inner[i]=0x36; outer[i]=0x5c; }
+  const msg=enc.encode(msgStr);
+  const innerMsg=new Uint8Array(64+msg.length); innerMsg.set(inner); innerMsg.set(msg,64);
+  const ih=_sha256Bytes(innerMsg), outerMsg=new Uint8Array(64+32); outerMsg.set(outer);
+  for (let i=0;i<8;i++) for (let j=0;j<4;j++) outerMsg[64+i*4+j]=(ih[i]>>>(24-j*8))&255;
+  const fh=_sha256Bytes(outerMsg); let s='';
+  for (let i=0;i<8;i++) for (let j=3;j>=0;j--) s+=((fh[i]>>>(j*8))&255).toString(16).padStart(2,'0');
+  return s;
+}
+function _cloudConfigPayload(url, key, bucket, ts) {
+  return url + '|' + key + '|' + (bucket || 'workbench-data') + '|' + ts;
+}
+function _verifyCloudConfig(cfg) {
+  if (!cfg || !cfg.url || !cfg.key || !cfg.sig || cfg.ts === undefined || cfg.ts === null) return false;
+  const bucket = cfg.bucket || 'workbench-data';
+  const payload = _cloudConfigPayload(cfg.url, cfg.key, bucket, cfg.ts);
+  const expect = _hmacSha256Hex(payload, _cfgSigSecret());
+  if (typeof expect !== 'string' || expect.length === 0) return false;
+  const a = String(cfg.sig), b = expect;
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
 window.AppConfig = {
 
   // ────────────────────────────────────────
@@ -169,7 +264,7 @@ window.AppConfig = {
     // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
     // 🟢 v228.48：真实走查修复 —— 启动兜底「空状态」不再覆盖用户已打开的界面
     // 🟢 v228.45：季度盘点跨端一致性 —— 同一账号 PC/移动端任务、进度、批次区间完全统一
-    version: 'v228.72',
+    version: 'v228.75',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
@@ -547,11 +642,18 @@ window.AppConfig = {
   // 🟢 v228.72：强制跟随云端下发的共享配置（管理员界面改凭证后全员自动切换）
   //   · 云端 cloudConfig 为权威；任何设备 effective 与云端不一致即切换（不再保护本地 override）
   //   · 已是最新则直接返回不重复连；切到新桶后读到新桶无 cloudConfig → 自然停住，不会回跳/死循环
+  // 🔐 v228.74：跟随前强制校验签名（AUDIT-228-102）；无签名/签名不符的配置直接忽略，
+  //   关闭「anon 改写 cloudConfig → 全体无确认切换到攻击者桶」的劫持路径。
+  //   旧版（v228.72/73）写入的无签名 cloudConfig 不再被信任——本机内置凭证已指向新桶，忽略不影响连接。
   async pullCloudConfigFromCloud() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     try {
       const cfg = await SyncManager.getSetting('cloudConfig');
       if (!cfg || !cfg.url || !cfg.key) return false;
+      if (!_verifyCloudConfig(cfg)) {
+        console.warn('[cloudConfig] 签名校验未通过，疑似被篡改，已忽略本次云端配置（不会自动切换）');
+        return false;
+      }
       const cur = this.getEffectiveSupabase();
       if (cur && cur.url === cfg.url && cur.key === cfg.key) return false; // 已是最新
       try {
@@ -569,11 +671,19 @@ window.AppConfig = {
   // 🟢 v227.39 / v228.72：管理员把当前 effective 配置上云，供其他设备一键同步
   //   · 在 setSupabaseOverride 之后、本机重连之前调用 → 此刻 SyncManager.client 仍是「旧桶」，
   //     cloudConfig 写入旧桶，其他仍连旧桶的设备即可读到新凭证并自动切换（见 pullCloudConfigFromCloud）
+  // 🔐 v228.74：写入时附带 HMAC-SHA256 签名与时间戳（AUDIT-228-102）——只有携带正确签名的配置才会被跟随。
   async syncCloudConfig() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     const eff = this.getEffectiveSupabase();
     if (!eff.url || !eff.key) return false;
-    try { await SyncManager.setSetting('cloudConfig', { url: eff.url, key: eff.key, bucket: eff.bucket }); return true; }
+    try {
+      const bucket = eff.bucket || (this.supabase && this.supabase.bucket) || 'workbench-data';
+      const ts = Date.now();
+      const payload = _cloudConfigPayload(eff.url, eff.key, bucket, ts);
+      const sig = _hmacSha256Hex(payload, _cfgSigSecret());
+      await SyncManager.setSetting('cloudConfig', { url: eff.url, key: eff.key, bucket: bucket, ts: ts, sig: sig });
+      return true;
+    }
     catch (e) { console.warn('[cloudConfig] 上云失败(已忽略):', e && e.message); return false; }
   }
 };

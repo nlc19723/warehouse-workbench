@@ -2085,6 +2085,10 @@ const App = {
         if (typeof TableUtils !== 'undefined' && TableUtils.initSortableHeadersAuto) {
           TableUtils.initSortableHeadersAuto(area);
         }
+        // 🟢 v228.73：任何 DOM 重渲染后重跑移动端表格高度适配（数据异步到货/换页后表格高度需重算）
+        if (typeof TableUtils !== 'undefined' && TableUtils.fitMobileTables) {
+          try { TableUtils.fitMobileTables(); } catch (e) { /* 适配失败不影响渲染 */ }
+        }
       });
     };
     const obs = new MutationObserver(schedule);
