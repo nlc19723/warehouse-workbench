@@ -1229,17 +1229,35 @@ const StocktakeModule = {
     const curId = this._currentQuarterSheetId();
     if (t.batchKey) return curId ? (t.batchKey === curId) : false;
     // ② 兼容分支：无 batchKey 的历史任务（v228.38 之前分派）
-    if (t.startDate == null || t.startDate === '') return true;
-    try {
-      const c = t.createdAt ? new Date(t.createdAt) : null;
-      if (c && !isNaN(c.getTime())) {
-        const cs = this._ymdLocal(c);
-        if (sd && ed && cs >= sd && cs <= ed) return true;
-        const age = Date.now() - c.getTime();
-        if (isFinite(age) && age >= -86400000 && age <= 30 * 86400000) return true;
-      }
-    } catch (e) { /* 忽略 */ }
+    //   🟢 v228.68 修复：旧实现 `if (t.startDate == null) return true` 会让「无 sheetId 且无 startDate」
+    //       的幽灵任务永久漏进每一轮（结束盘点/开下一轮都清不掉，一直显示）。
+    //       现严格锚定：必须能对应到当前批次身份——有 sheetId 则要求 === 当前批次；
+    //       两者皆缺（极旧任务 / 跨端版本不一致产生的孤儿）一律视为已脱离当前批次，不再展示。
+    if (!curId) return false;
+    if (t.sheetId) return t.sheetId === curId;
     return false;
+  },
+
+  // 🟢 v228.68：清理「既无 batchKey 也无 sheetId」的季度幽灵任务。
+  //   此类任务无法锚定到任何批次，旧兼容分支会令其永久显示在管理员视图且清不掉。
+  //   墓碑化（deleted:true）后随云端任务通道传播，清除本机与云端残留。
+  _gcGhostTasks() {
+    try {
+      const raw = (DataStore._tasksRaw && DataStore._tasksRaw()) || {};
+      let changed = false;
+      Object.keys(raw).forEach(k => {
+        const t = raw[k];
+        if (!t || t.deleted) return;
+        if (t.sheetType === 'quarter' && !t.batchKey && !t.sheetId) {
+          raw[k] = { taskId: t.taskId, deleted: true, updatedAt: new Date().toISOString() };
+          changed = true;
+        }
+      });
+      if (changed) {
+        try { DataStore._lsSet('wb_stocktake_tasks', raw); } catch (e) {}
+        try { if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) DataStore._pushStocktakeTasksToCloud(); } catch (e) {}
+      }
+    } catch (e) {}
   },
 
   /**
@@ -2002,6 +2020,8 @@ const StocktakeModule = {
   //   批次标识仍用 query 区间（默认近 30 天，跨设备一致），但不再强制用户先选日期。
   async startQuarter() {
     this._hideUnfinishedBanner();
+    // 🟢 v228.68：进入季度盘点即清理无法锚定批次的幽灵任务（结束/开下一轮仍清不掉的残留）
+    try { this._gcGhostTasks(); } catch (e) {}
     // 🟢 v228.48：开局流程 —— **批次身份优先，日期退居显示**。
     //
     //   新顺序（旧版那套「解析器→云端→本机锚定」的三段纠葛已随批次身份重构一并消失）：
@@ -2099,7 +2119,11 @@ const StocktakeModule = {
 
     // 拉本批次所有 open 任务
     const allTasks = DataStore.getStocktakeTasks() || {};
-    const myTasks = counter ? (DataStore.getMyOpenTasks(counter) || []) : [];
+    // 🟢 v228.68：我的任务必须限定当前批次 —— getMyOpenTasks 只按「本人+open」过滤，
+    //   旧批次遗留任务会永久挂在「我的任务」里（结束盘点/开下一轮都清不掉的直接病灶之一）。
+    const myTasks = counter
+      ? (DataStore.getMyOpenTasks(counter) || []).filter(t => this._taskInCurrentBatch(t, sd, ed))
+      : [];
     // 🟢 v224：本人已结束的任务 → 补盘入口（否则结束后发现漏盘，在界面上根本点不到）
     const myClosed = counter
       ? Object.keys(allTasks).map(k => allTasks[k]).filter(t =>
@@ -2253,31 +2277,51 @@ const StocktakeModule = {
     //   （线上反馈图：nx 已结束但有 2 项漏盘，nx 界面仍显示「暂无分配给你的任务」）。
     //   现改为：只要有「本人已结束且存在漏盘」的任务，就渲染该块（不论轮次是否已关闭）。
     //   roundClosed=true 时仍保留原本「本批次已被管理员结束」的语义提示。
-    const closedRows = closedArr.map(t => `
-      <div class="st-banner-info" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;margin-bottom:6px;">
-        <span style="font-size:13px;"><b>${escH(t.counter)}</b> · 序号 ${t.noStart}-${t.noEnd} · ${(t.codes || []).length} 项 · <span style="color:#2563eb;">已结束</span>${(() => {
-          // 🟢 v228.40（二-2a）：把「漏盘 N 项」显式标在补盘行上 —— 用户视角「有 2 项漏盘却看不到补盘」，
-          //   一是入口不出现（已修），二是即使出现也看不出要补几项。取跨端概览的 unfilledCount。
-          // 🟢 v228.41（优化项-2）：再进一步 —— 悬停即可预览「是哪几项漏盘」。
-          //   漏盘 codes 取本任务的 codes 减去跨端概览已盘数对应的项太脆弱，
-          //   改为直接用概览缺失编码清单（unfilledCodes / leakCodes 任一存在即用），取不到则回退纯计数。
-          try {
-            const ov = this._getAllOverviews()[this._overviewKey(t.counter, t.sheetId || sheetId)] || null;
-            const n = (ov && ov.unfilledCount) || 0;
-            if (!(n > 0)) return '';
-            const leakCodes = (ov && (ov.unfilledCodes || ov.leakCodes)) || [];
-            const titleTxt = leakCodes.length
-              ? ('漏盘编码：' + leakCodes.slice(0, 30).join('、') + (leakCodes.length > 30 ? ' …' : ''))
-              : ('本任务共 ' + n + ' 项未盘，点「补盘」后只会列出这些编码');
-            return ` · <span style="color:#dc2626;font-weight:600;cursor:help;" title="${escA(titleTxt)}">漏盘 ${n} 项</span>`;
-          } catch (e) { return ''; }
-        })()}</span>
-        <span style="margin-left:auto;font-size:11px;color:var(--text-secondary);">${t.closedAt ? escH(String(t.closedAt).slice(0, 10)) : ''}</span>
-        ${blocked(t)
-          ? '<span class="st-btn-disabled" role="button" aria-disabled="true" title="本轮已被管理员结束，不能补盘；如需补录漏盘请联系管理员指派补盘" style="font-size:12px;color:#dc2626;padding:4px 12px;">⛔ 已结束</span>'
-          : `<button class="btn--ghost" onclick="StocktakeModule._claimQuarterTask('${escA(t.taskId)}')" style="padding:4px 12px;font-size:12px;">${t.replenishAssigned ? '🔧 补盘（管理员指派）' : '补盘'}</button>`}
-        <button class="btn--ghost" onclick="StocktakeModule.returnLeak('${escA(t.taskId)}')" style="padding:4px 12px;font-size:12px;margin-left:6px;" title="放弃补盘，将漏盘项退回管理员处补派">放弃补盘</button>
-      </div>`).join('');
+    // 🟢 v228.69（用户反馈·移动端）：补盘行重排 —— 旧实现「信息 + 日期 + 补盘 + 放弃补盘」四个 flex
+    //   子项挤一行，移动端 390px 下信息列被挤成一字一行、按钮溢出屏幕外。现改为两行布局：
+    //   第一行 = 姓名/序号/项数/状态/漏盘（自然换行）+ 日期靠右；第二行 = 「补盘」「放弃补盘」并排。
+    //   按钮文案「补盘（管理员指派）」→「补盘」（是否指派由区块顶部蓝色提示行说明，不再撑长按钮）。
+    const closedRows = closedArr.map(t => {
+      const leakSpan = (() => {
+        try {
+          const ov = this._getAllOverviews()[this._overviewKey(t.counter, t.sheetId || sheetId)] || null;
+          const n = (ov && ov.unfilledCount) || 0;
+          if (!(n > 0)) return '';
+          const leakCodes = (ov && (ov.unfilledCodes || ov.leakCodes)) || [];
+          const titleTxt = leakCodes.length
+            ? ('漏盘编码：' + leakCodes.slice(0, 30).join('、') + (leakCodes.length > 30 ? ' …' : ''))
+            : ('本任务共 ' + n + ' 项未盘，点「补盘」后只会列出这些编码');
+          return ` · <span style="color:#dc2626;font-weight:600;cursor:help;" title="${escA(titleTxt)}">漏盘 ${n} 项</span>`;
+        } catch (e) { return ''; }
+      })();
+      return `
+      <div class="st-banner-info" style="padding:8px 10px;border-radius:8px;margin-bottom:6px;">
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <span style="font-size:13px;line-height:1.7;"><b>${escH(t.counter)}</b> · 序号 ${t.noStart}-${t.noEnd} · ${(t.codes || []).length} 项 · <span style="color:#2563eb;">已结束</span>${leakSpan}</span>
+          <span style="margin-left:auto;flex:0 0 auto;font-size:11px;color:var(--text-secondary);">${t.closedAt ? escH(String(t.closedAt).slice(0, 10)) : ''}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;">
+          ${(() => {
+            // 🟢 v228.70（用户反馈·漏洞修复）：已放弃补盘（leakReturned）的任务，「补盘」「放弃补盘」
+            //   两按钮仍带 onclick 可反复点击 → 造成重复退回。现改为：两按钮置灰（无 onclick、
+            //   not-allowed 光标）+ 追加「🚫 已放弃补盘」状态说明；如需恢复由管理员重新指派。
+            if (t.leakReturned) {
+              const nRet = (t.returnedLeakCodes || []).length;
+              const gray = 'display:inline-flex;align-items:center;justify-content:center;padding:4px 14px;font-size:12px;'
+                + 'border-radius:8px;border:1px dashed var(--border-color,#d1d5db);color:var(--text-muted);'
+                + 'opacity:.55;cursor:not-allowed;user-select:none;white-space:nowrap;';
+              return '<span aria-disabled="true" style="' + gray + '" title="已放弃补盘，如需恢复请联系管理员重新指派">补盘</span>'
+                + '<span aria-disabled="true" style="' + gray + '" title="已放弃补盘，不能重复操作">放弃补盘</span>'
+                + '<span style="font-size:12px;color:#9ca3af;">🚫 已放弃补盘' + (nRet ? ' · ' + nRet + ' 项已退回管理员' : '') + '</span>';
+            }
+            return (blocked(t)
+              ? '<span class="st-btn-disabled" role="button" aria-disabled="true" title="本轮已被管理员结束，不能补盘；如需补录漏盘请联系管理员指派补盘" style="font-size:12px;color:#dc2626;padding:4px 12px;">⛔ 已结束</span>'
+              : `<button class="btn--ghost" onclick="StocktakeModule._claimQuarterTask('${escA(t.taskId)}')" style="padding:4px 14px;font-size:12px;">补盘</button>`)
+              + `<button class="btn--ghost" onclick="StocktakeModule.returnLeak('${escA(t.taskId)}')" style="padding:4px 14px;font-size:12px;" title="放弃补盘，将漏盘项退回管理员处补派">放弃补盘</button>`;
+          })()}
+        </div>
+      </div>`;
+    }).join('');
 
     // 🟢 v228.40（二-2a）：只要本人有「已结束」任务就渲染补盘块（不再限定 roundClosed）。
     //   漏盘项自动归本人补盘（无需管理员指派）；本人点「放弃补盘」才退回管理员补派池。
@@ -2304,24 +2348,28 @@ const StocktakeModule = {
     area.innerHTML = `
       <div style="margin-top:8px;">
         <div style="background:var(--bg-card,#fff);border:1px solid var(--border-color,#e5e7eb);border-radius:10px;padding:14px;margin-bottom:12px;">
-          <!-- 🟢 v227.27：顶部冗余状态行精简为一行 chip -->
-          <div class="quarter-status-bar" style="margin-bottom:10px;">
+          <!-- 🟢 v227.27：顶部冗余状态行精简为一行 chip
+               🟢 v228.69：诊断/清场/刷新移出状态行与「我的任务」行，集中到两排之间的工具行（靠左并排） -->
+          <div class="quarter-status-bar" style="margin-bottom:8px;">
             <span>👤 作业身份：<b>${escH(counter || '未登录')}</b></span>
             ${roundBadge ? `<span>${roundBadge}</span>` : ''}
             <span title="其他盘点人保存/结束盘点后，本视图通过云端 + BroadcastChannel 自动刷新">
               <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#16a34a;animation:pulse 2s infinite;"></span>
               实时同步
             </span>
+          </div>
+          <!-- 🟢 v228.69：工具行 —— 刷新 / 诊断 / 清场 靠左并排（用户指定：置于「作业身份」与「我的任务」两排中间） -->
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+            <button id="stTaskRefresh" class="btn--ghost as-refresh-btn" onclick="StocktakeModule.refreshMyTasks()" title="从云端全量刷新：批次身份 / 轮次状态 / 分派给我的任务 / 管理员视图·盘点人进度" style="padding:3px 9px;font-size:12px;line-height:1.3;">🔄 刷新</button>
             ${/* 🟢 v228.48-fix2：把「清场重置」从控制台命令搬进界面。
                   用户真机反馈：「两边都没有办法清，你不能帮我清一下嘛」「电脑上这样也麻烦」——
                   原方案要求两端各开 F12 控制台敲 `resetQuarterSyncState()`，仓库场景不现实。
                   这里给出界面入口（需 stocktakeAssign 权限 + 二次确认），语义与命令完全一致。 */ ''}
-            ${isAdmin ? `<button class="btn--ghost" onclick="StocktakeModule.showSyncDiagnose()" title="查看本机与云端的批次/会话/进度是否一致，分叉时可一键对齐" style="margin-left:auto;padding:2px 8px;font-size:11px;line-height:1.3;opacity:.75;">🩺 诊断</button>` : ''}
-            ${isAdmin ? `<button class="btn--ghost" onclick="StocktakeModule.resetFromUI()" title="把本机的季度批次/轮次/任务/概览缓存清成干净起点（会先备份，可回滚）" style="padding:2px 8px;font-size:11px;line-height:1.3;opacity:.75;">🧹 清场</button>` : ''}
+            ${isAdmin ? `<button class="btn--ghost" onclick="StocktakeModule.showSyncDiagnose()" title="查看本机与云端的批次/会话/进度是否一致，分叉时可一键对齐" style="padding:3px 9px;font-size:12px;line-height:1.3;opacity:.85;">🩺 诊断</button>` : ''}
+            ${isAdmin ? `<button class="btn--ghost" onclick="StocktakeModule.resetFromUI()" title="把本机的季度批次/轮次/任务/概览缓存清成干净起点（会先备份，可回滚）" style="padding:3px 9px;font-size:12px;line-height:1.3;opacity:.85;">🧹 清场</button>` : ''}
           </div>
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
             <span style="font-size:13px;font-weight:600;">📋 我的任务</span>
-            <button id="stTaskRefresh" class="btn--ghost as-refresh-btn" onclick="StocktakeModule.refreshMyTasks()" title="从云端全量刷新：批次身份 / 轮次状态 / 分派给我的任务 / 管理员视图·盘点人进度" style="padding:3px 9px;font-size:12px;line-height:1.3;">🔄 刷新</button>
           </div>
           ${myRows}
         </div>
@@ -2525,7 +2573,13 @@ const StocktakeModule = {
       if (t.noStart != null && t.noEnd != null) grouped[c].intervals.push([t.noStart, t.noEnd]);
     });
     // 用户（counter）概览填充
-    const rows = Object.keys(grouped).map(c => {
+    // 🟢 v228.68：轮次已结束时，丢弃「无概览数据」的分派行——即已结束却从未盘任何项、
+    //   盘点记录列表里也没有对应数据的空占位（如“本轮已结束 尚未开启”）。它们只是噪声，
+    //   留着会误导管理员，且正是“结束盘点后清不掉”的那一行。有真实盘点数据的行照常保留。
+    const rows = Object.keys(grouped).filter(c => {
+      if (roundClosed && !ovMap[this._overviewKey(c, sheetId)]) return false;
+      return true;
+    }).map(c => {
       const g = grouped[c];
       const ov = ovMap[this._overviewKey(c, sheetId)] || null;
       // 🟢 v228.35（P6）：三态开工徽标 —— 未开工 / 盘点中 / 已结束。
@@ -2575,30 +2629,41 @@ const StocktakeModule = {
           ? `<button class="btn--ghost" onclick="StocktakeModule.assignReplenish('${escA(g.counter)}','${escA(sheetId)}')" ` +
             `style="padding:3px 10px;font-size:12px;margin-left:8px;">🔧 指派补盘（漏 ${unfilledN}）</button>`
           : ''));
-      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px dashed var(--border-color,#eee);font-size:13px;flex-wrap:wrap;">
-        <span style="min-width:90px;"><b>${escH(g.counter)}</b></span>
-        <span style="color:var(--text-secondary);">${(() => {
-          // 🟢 v228.40（二-2c）：按真实分派区间逐段展示（同行逗号串联），不再用 min-max 合并成一段。
-          //   去重 + 排序，保证多端展示稳定；无区间信息时回退旧的 min-max。
-          const iv = (g.intervals || []).slice()
-            .map(p => [Number(p[0]), Number(p[1])])
-            .filter(p => isFinite(p[0]) && isFinite(p[1]))
-            .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-          const uniq = [];
-          iv.forEach(p => { const last = uniq[uniq.length - 1]; if (!last || last[0] !== p[0] || last[1] !== p[1]) uniq.push(p); });
-          const txt = uniq.length
-            ? uniq.map(p => p[0] + '–' + p[1]).join('、')
-            : ((g.noStart || '-') + '–' + (g.noEnd || '-'));
-          return escH(txt) + ' · ' + uniq.length + ' 个区间 · ' + g.codesLen + ' 项';
-        })()}</span>
-        ${stateBadge}
-        ${statsHtml}
-        <span style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;">${idleHtml}${roundClosed && !isFinished ? '' : ''}</span>
-        ${replenishBtn}
+      // 🟢 v228.70（用户反馈·移动端）：不同盘点人行排版不一致 —— 旧实现所有元素挤在同一个
+      //   flex-wrap 行里，换行位置随内容宽度漂移（如「管理员」行徽章落在第一行右端，
+      //   「zmy」行徽章掉到第二行、按钮再掉到第三行）。现固定为两行结构，每个盘点人一致：
+      //   第一行 = 姓名 + 区间信息 + 状态徽章（固定行尾右端）；
+      //   第二行 = 已盘进度 + 最后活动 / 指派补盘按钮（固定行尾右端）。
+      return `<div style="padding:7px 10px;border-bottom:1px dashed var(--border-color,#eee);font-size:13px;">
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <span style="flex:0 0 auto;"><b>${escH(g.counter)}</b></span>
+          <span style="color:var(--text-secondary);font-size:12px;min-width:0;">${(() => {
+            // 🟢 v228.40（二-2c）：按真实分派区间逐段展示（同行逗号串联），不再用 min-max 合并成一段。
+            //   去重 + 排序，保证多端展示稳定；无区间信息时回退旧的 min-max。
+            const iv = (g.intervals || []).slice()
+              .map(p => [Number(p[0]), Number(p[1])])
+              .filter(p => isFinite(p[0]) && isFinite(p[1]))
+              .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+            const uniq = [];
+            iv.forEach(p => { const last = uniq[uniq.length - 1]; if (!last || last[0] !== p[0] || last[1] !== p[1]) uniq.push(p); });
+            const txt = uniq.length
+              ? uniq.map(p => p[0] + '–' + p[1]).join('、')
+              : ((g.noStart || '-') + '–' + (g.noEnd || '-'));
+            return escH(txt) + ' · ' + uniq.length + ' 个区间 · ' + g.codesLen + ' 项';
+          })()}</span>
+          <span style="margin-left:auto;flex:0 0 auto;">${stateBadge}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px;flex-wrap:wrap;">
+          ${statsHtml}
+          <span style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;">${idleHtml}${replenishBtn}</span>
+        </div>
       </div>`;
     }).join('');
+    // 🟢 v228.69（用户反馈）：本轮结束后不再显示「⛔ xx 已结束（批次号）」文字徽章 ——
+    //   「👑 本批次全部任务」标题旁已有 roundBadge 红色「已结束」标识，行内这枚纯文本徽章冗余，
+    //   还把「🔄 开下一轮盘点」挤到老远。置空后按钮行自然收敛为「分派任务 + 开下一轮盘点」紧靠并排。
     const endBatchBtn = roundClosed
-      ? `<span style="font-size:12px;color:#dc2626;">⛔ ${escH(this._roundDisplay(sheetId, closedRound || roundNo))} 已结束（${escH(batchNo)}）</span>`
+      ? ''
       : `<button class="btn--danger" onclick="StocktakeModule.endQuarterRound('${escA(sheetId)}')" style="padding:6px 14px;font-size:13px;">结束季度盘点</button>`;
     // 🟢 v228.35（P5）：紧急结束入口 —— 只锁入口、不结算，处理「有人一直不交、必须马上锁盘」。
     //   与「结束季度盘点」并排但视觉降级为 ghost，避免误点把正常结算流程绕过去。
@@ -2613,10 +2678,11 @@ const StocktakeModule = {
     // 🟢 v227.21：批次已结束且有漏盘 → 顶部加一条醒目提示，明确「指派补盘」入口就在一行最右侧，
     //   解决管理员反馈「结束季度盘点后找不到分配补盘任务的地方」。
     const leakCounters = Object.keys(grouped).filter(c => ((ovMap[this._overviewKey(c, sheetId)] || {}).unfilledCount || 0) > 0);
+    // 🟢 v228.70（用户反馈）：提示精简 —— 旧文案两行、把操作细节全部铺出，移动端观感繁杂。
+    //   只保留「几个人漏盘 / 是谁 / 怎么办」三个必要信息，一行讲完（操作按钮本身就在下方行内，无需赘述）。
     const leakHint = (roundClosed && leakCounters.length)
       ? `<div class="st-banner-warning" style="margin:8px 0 4px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.6;">
-           ⚠️ 本批次已结束，仍有 <b>${leakCounters.length}</b> 人漏盘（${leakCounters.map(c => escH(c)).join('、')}）。<br>
-           点其所在行最右侧的 <b>🔧 指派补盘（漏 N）</b> 按钮，即可指定该盘点人回来补录未盘编码（归属不变、不产生重复行）。
+           ⚠️ 本批次已结束，仍有 <b>${leakCounters.length}</b> 人漏盘（${leakCounters.map(c => escH(c)).join('、')}）—— 点其所在行的「🔧 指派补盘」安排补录。
          </div>`
       : '';
     // 🟢 v228.34：退回待分配池 + 补盘人员监控（实时取基线序号，复用现有概览）
@@ -2681,9 +2747,16 @@ const StocktakeModule = {
       const fromLabel = p.from === 'task' ? '放弃任务' : '放弃补盘';
       const origin = p.originCounter ? escH(p.originCounter) : '（无）';
       const codesPreview = p.availCodes.slice(0, 8).map(escH).join('、') + (p.availCodes.length > 8 ? ' …' : '');
-      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 10px;border-bottom:1px dashed var(--border-color,#eee);font-size:12.5px;">
-        <span><b>${fromLabel}</b> · 原负责人 ${origin} · 可补派 <b>${serials.length}</b> 项（序号 ${rangeTxt}）</span>
-        <span style="margin-left:auto;color:var(--text-secondary);font-size:11px;">编码：${codesPreview}</span>
+      // 🟢 v228.71（用户反馈·移动端）：与管理员视图进度行统一的两行结构 ——
+      //   第一行 = 类型 + 原负责人 + 序号 + 「可补派 N 项」徽标（固定行尾右端）；
+      //   第二行 = 编码明细（次要信息，自然换行）。旧单行 flex-wrap 在窄屏挤成竖条。
+      return `<div style="padding:7px 10px;border-bottom:1px dashed var(--border-color,#eee);font-size:12.5px;">
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <span style="flex:0 0 auto;"><b>${fromLabel}</b></span>
+          <span style="color:var(--text-secondary);font-size:12px;min-width:0;">原负责人 ${origin} · 序号 ${rangeTxt}</span>
+          <span style="margin-left:auto;flex:0 0 auto;color:#2563eb;font-size:12px;">可补派 <b>${serials.length}</b> 项</span>
+        </div>
+        <div style="margin-top:4px;color:var(--text-secondary);font-size:11px;line-height:1.6;word-break:break-all;">编码：${codesPreview}</div>
       </div>`;
     }).join('') : `<div style="font-size:12px;color:var(--text-secondary);padding:4px 0;">当前没有退回待分配项。</div>`;
     return `
@@ -2719,11 +2792,18 @@ const StocktakeModule = {
       const serials = (t.codes || []).map(c => serialOf ? serialOf.get(c) : null).filter(Boolean).sort((a, b) => a - b);
       const rangeTxt = serials.length ? (serials[0] + (serials.length > 1 ? '–' + serials[serials.length - 1] : '')) : '-';
       const statusLabel = (t.status === 'closed' || (ov && ov.status === 'finished')) ? '✅ 已完成' : '🟡 补盘中';
-      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px dashed var(--border-color,#eee);font-size:13px;flex-wrap:wrap;">
-        <span style="min-width:80px;"><b>${escH(t.counter)}</b></span>
-        <span style="color:var(--text-secondary);">${fromLabel} · 序号 ${rangeTxt} · ${(t.codes || []).length} 项</span>
-        ${statsHtml}
-        <span style="margin-left:auto;font-size:11px;color:var(--text-secondary);">${statusLabel}</span>
+      // 🟢 v228.71（用户反馈·移动端）：与管理员视图进度行统一的两行结构 ——
+      //   第一行 = 姓名 + 补派类型/序号/项数 + 状态徽标（固定行尾右端）；
+      //   第二行 = 已盘进度。旧单行 flex-wrap 换行位置随内容漂移、不同人不一致。
+      return `<div style="padding:7px 10px;border-bottom:1px dashed var(--border-color,#eee);font-size:13px;">
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <span style="flex:0 0 auto;"><b>${escH(t.counter)}</b></span>
+          <span style="color:var(--text-secondary);font-size:12px;min-width:0;">${fromLabel} · 序号 ${rangeTxt} · ${(t.codes || []).length} 项</span>
+          <span style="margin-left:auto;flex:0 0 auto;font-size:12px;">${statusLabel}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px;flex-wrap:wrap;">
+          ${statsHtml}
+        </div>
       </div>`;
     }).join('');
     return `
@@ -3971,7 +4051,11 @@ const StocktakeModule = {
     if (!ctx) return;
     const { sd, ed, sheetId, counter, batchNo } = ctx;
     const allTasks = DataStore.getStocktakeTasks() || {};
-    const myTasks = counter ? (DataStore.getMyOpenTasks(counter) || []) : [];
+    // 🟢 v228.68：我的任务必须限定当前批次 —— getMyOpenTasks 只按「本人+open」过滤，
+    //   旧批次遗留任务会永久挂在「我的任务」里（结束盘点/开下一轮都清不掉的直接病灶之一）。
+    const myTasks = counter
+      ? (DataStore.getMyOpenTasks(counter) || []).filter(t => this._taskInCurrentBatch(t, sd, ed))
+      : [];
     const myClosed = counter
       ? Object.keys(allTasks).map(k => allTasks[k]).filter(t =>
           t && t.counter === counter && t.status === 'closed' && this._taskInCurrentBatch(t, sd, ed))
@@ -4427,7 +4511,7 @@ const StocktakeModule = {
         banner.id = 'stFreezeBanner';
         area.insertBefore(banner, area.firstChild);
       }
-      banner.style.cssText = 'padding:10px 14px;margin-bottom:10px;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;border-radius:8px;font-size:13px;';
+      banner.style.cssText = 'padding:10px 14px;margin-bottom:10px;background:var(--status-warning-bg,#fff7ed);border:1px solid var(--border-color,#fdba74);color:var(--status-warning,#9a3412);border-radius:8px;font-size:13px;';
       banner.innerHTML = '⚠️ 管理员正在结束本轮盘点，已自动保存你的进度，盘点已锁定，请稍候…';
     } catch (e) { /* 忽略 */ }
   },
@@ -4501,7 +4585,11 @@ const StocktakeModule = {
       const counter = String(((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser)
         ? ((AppConfig.getCurrentUser() || {}).username || '') : '') || this.task.counter || '').trim();
       const allTasks = DataStore.getStocktakeTasks() || {};
-      const myTasks = counter ? (DataStore.getMyOpenTasks(counter) || []) : [];
+      // 🟢 v228.68：我的任务必须限定当前批次 —— getMyOpenTasks 只按「本人+open」过滤，
+    //   旧批次遗留任务会永久挂在「我的任务」里（结束盘点/开下一轮都清不掉的直接病灶之一）。
+    const myTasks = counter
+      ? (DataStore.getMyOpenTasks(counter) || []).filter(t => this._taskInCurrentBatch(t, sd, ed))
+      : [];
       const myClosed = counter
         ? Object.keys(allTasks).map(k => allTasks[k]).filter(t =>
             t && t.counter === counter && t.status === 'closed' && this._taskInCurrentBatch(t, sd, ed))
@@ -5507,8 +5595,13 @@ const StocktakeModule = {
       WBModal.alert('该任务（' + t.counter + ' · 序号 ' + t.noStart + '-' + t.noEnd + '）无漏盘项，无需放弃补盘。');
       return;
     }
-    const ok = await WBModal.confirm('确认放弃补盘：' + t.counter + ' · 序号 ' + t.noStart + '-' + t.noEnd +
-      '\n退回 <b>' + leak.length + '</b> 项漏盘给管理员补派？', { title: '放弃补盘' });
+    // 🟢 v228.70（用户反馈）：弹窗文案精简美化。旧文案把 <b> HTML 标签传进 WBModal.confirm，
+    //   而 confirm 是纯文本渲染 → 真机上显示字面「<b>2</b>」。改用纯文本并只保留必要信息：
+    //   谁 · 哪段序号 / 多少项漏盘将退回 / 确认语气。
+    const ok = await WBModal.confirm(
+      t.counter + ' · 序号 ' + t.noStart + '-' + t.noEnd + '\n' +
+      '将把 ' + leak.length + ' 项漏盘退回管理员补派，确定放弃？',
+      { title: '放弃补盘' });
     if (!ok) return;
     const now = new Date().toISOString();
     const cur = ((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? ((AppConfig.getCurrentUser() || {}).username || '') : '').trim();
@@ -6194,7 +6287,7 @@ const StocktakeModule = {
     const curUser = (typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? AppConfig.getCurrentUser() : null;
     const counterVal = logged && curUser ? curUser.username : (this.task.counter || '');
     const counterInput = logged
-      ? `<label>盘点人 <input type="text" id="stCounter" value="${escAttr(counterVal)}" readonly style="width:110px;background:#f3f4f6;color:#666;cursor:not-allowed;"></label>`
+      ? `<label>盘点人 <input type="text" id="stCounter" value="${escAttr(counterVal)}" readonly style="width:110px;background:var(--bg-input,#f3f4f6);color:var(--text-secondary,#666);cursor:not-allowed;"></label>`
       : `<label>盘点人 <input type="text" id="stCounter" value="${escAttr(counterVal)}" placeholder="填写姓名" style="width:110px;"></label>`;
     const loginWarn = logged ? '' : `<span style="opacity:.85;color:#dc2626;margin-left:6px;">⚠ 未登录，填错人将影响续盘与归属，建议先登录</span>`;
 
@@ -6207,7 +6300,7 @@ const StocktakeModule = {
       <div style="margin-bottom:10px;padding:8px 12px;border-radius:8px;background:var(--status-info-bg,#eef6ff);font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span>盘点人：<b>${esc(this.task.counter)}</b></span>
         <span>序号区间：<b>${this.task.noStart}-${this.task.noEnd}</b></span>
-        ${batchNoText ? '<span>盘点号：<input type="text" readonly value="' + escAttr(batchNoText) + '" style="width:120px;background:#f3f4f6;color:#475569;font-weight:600;cursor:not-allowed;border:1px solid #cbd5e1;border-radius:6px;padding:2px 8px;"></span>' : ''}
+        ${batchNoText ? '<span>盘点号：<input type="text" readonly value="' + escAttr(batchNoText) + '" style="width:120px;background:var(--bg-input,#f3f4f6);color:var(--text-secondary,#475569);font-weight:600;cursor:not-allowed;border:1px solid var(--border-color,#cbd5e1);border-radius:6px;padding:2px 8px;"></span>' : ''}
         <button class="btn--primary" onclick="StocktakeModule.goBackFromSheet()" title="返回上一级（盘点工作台）" style="padding:4px 14px;font-size:12.5px;display:inline-flex;align-items:center;gap:5px;">
           <span style="font-size:14px;">◀</span>返回
         </button>
@@ -6215,7 +6308,7 @@ const StocktakeModule = {
       : (isDailyStarted ? `
       <div style="margin-bottom:10px;padding:8px 12px;border-radius:8px;background:var(--status-warning-bg,#fff7ed);border:1px solid #fed7aa;font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span>盘点人：<b>${esc(counterVal || '')}</b>${counterVal ? '（已自动带出）' : '<span style="color:#dc2626;">（未登录，请先登录库管员账号）</span>'}</span>
-        ${batchNoText ? '<span>盘点号：<input type="text" readonly value="' + escAttr(batchNoText) + '" style="width:120px;background:#f3f4f6;color:#475569;font-weight:600;cursor:not-allowed;border:1px solid #cbd5e1;border-radius:6px;padding:2px 8px;"></span>' : ''}
+        ${batchNoText ? '<span>盘点号：<input type="text" readonly value="' + escAttr(batchNoText) + '" style="width:120px;background:var(--bg-input,#f3f4f6);color:var(--text-secondary,#475569);font-weight:600;cursor:not-allowed;border:1px solid var(--border-color,#cbd5e1);border-radius:6px;padding:2px 8px;"></span>' : ''}
         <span style="color:#b45309;font-size:12px;">⚠️ 本次盘点<b>尚未结束</b>：点【暂存并退出】只是存到本机（不计入盘点记录），全部盘完请点【结束本次盘点】才算完成</span>
         <button class="btn--primary" onclick="StocktakeModule.goBackFromSheet()" title="返回上一级（盘点工作台）" style="padding:4px 14px;font-size:12.5px;display:inline-flex;align-items:center;gap:5px;">
           <span style="font-size:14px;">◀</span>返回
@@ -6316,6 +6409,17 @@ const StocktakeModule = {
     // 🟢 v228.41（优化项-3）：渲染后立即按当前填写状态刷新「未盘」预警
     this._refreshLeakHint();
     // 🟢 v227.91：移动端把表格列折叠按钮搬到原「清空已填」位置（progressBar）
+    // 🟢 v228.69：先显式安装列折叠，再搬按钮。旧实现只依赖全局 MutationObserver → initColumnResizers
+    //   链路异步挂载，而该链路里 initColumnResize 若先抛错（真机出现过「有排序箭头、无折叠按钮」），
+    //   折叠按钮就永远装不上。这里在渲染完成后同步直装（保留列配置 stArea = 存货名称/规格型号/现存量/盘点数量，
+    //   默认收起、可展开），全局链路后到时会因 #stArea 已带 _colCollapseBtn 而自动跳过，不会重复挂。
+    try {
+      const stTable = area.querySelector('table.data-table');
+      if (stTable && rows.length > 0 && window.TableStickyOverlay && window.TableStickyOverlay.installColumnCollapse) {
+        const wrap = stTable.closest('[id]') || stTable.parentElement;
+        window.TableStickyOverlay.installColumnCollapse(wrap, stTable);
+      }
+    } catch (e) { /* 折叠安装失败不阻断主流程（表格仍可横向滑动查看） */ }
     this._relocateColCollapseToProgressBar();
     if (rows.length > 0) {
       this.updateProgress();
@@ -6587,9 +6691,10 @@ const StocktakeModule = {
     }
 
     // ② 新批次：算出当日下一个可用序号（next = 1 表示用无后缀的 base）
-    // 🟢 v227.91：盘点号继承/复用规则 —— 删除（voided）的记录不再占用序号。
-    //   只统计「非 voided」的当日同号集合，取最小未占用 N；
-    //   N=1 → base（无后缀）；N>1 → base-N。保证删除前两份记录后，新号回填 rc…-1 / rc…-2。
+    // 🟢 v228.68：占用规则以「盘点记录列表（stocktake_records，非 voided）」为唯一权威依据 ——
+    //   用户明确要求：记录列表里没有前面批次的保存记录时，新批次号应复用最小未占用号，不递增。
+    //   在此之上仅保留「当前正在生成的批次」的占用（防并发开局重号）。
+    //   已结束、且记录列表里无对应记录的批次号一律释放；由此根治 jd20260919-2…-10 只增不减。
     let next = 1;
     const used = new Set();   // 已占用的当日序号（含 N=1 即 base）
     const bump = (no) => {
@@ -6597,25 +6702,31 @@ const StocktakeModule = {
       const m = /^.+-(\d+)$/.exec(String(no));
       used.add(m ? parseInt(m[1], 10) : 1);
     };
-    Object.keys(map).forEach(k => {
-      const it = map[k];
-      if (!it || !it.no) return;
-      // 🟢 v228.37：只有「未结束」的批次才由 no_map 占坑（防止并发开局重号，此时记录尚未落库）。
-      //   已结束批次的号改由下方记录表判定：记录还在 → 记录 bump 占号；记录已删（voided/清空）
-      //   → 序号释放可回填。原实现对 map 无条件 bump，反复「结束→开下一轮」积累的 finished 墓碑
-      //   会把当日序号一路推高（如 jd20260915-6），即使盘点记录一条不剩也永不回落（线上反馈）。
-      if (!it.finished) bump(it.no);
-    });
+    // (a) 盘点记录列表（真源）：非 voided 的当日同号都占号
     try {
       const allRecs = (DataStore._tableCache && DataStore._tableCache['stocktake_records']) || [];
-      // 只 bump 未删除的记录；voided（删除墓碑）不占号 → 新批次可回填该序号
       (allRecs || []).forEach(r => { if (r && !r.voided) bump(r.batchNo); });
     } catch (e) {}
-    // 旧版计数器兜底（v226 之前写过 wb_stocktake_no_* 时避免重号）
+    // (b) no_map：仅「当前批次（sheetId）且未结束」占号；其余未结束条目若无记录撑着则视为孤儿，
+    //     在 persist 时物理删除、释放其号（避免 jd…-N 只增不减）。finished 条目不占号（记录有则已占）。
+    let mapChanged = false;
     try {
-      const old = parseInt(localStorage.getItem('wb_stocktake_no_' + type + '_' + today) || '0', 10);
-      if (!isNaN(old) && old > 0) used.add(old);
+      Object.keys(map).forEach(k => {
+        const it = map[k];
+        if (!it || !it.no) return;
+        if (k === sheetId) { if (!it.finished) bump(it.no); return; } // 当前批次：进行中则占号
+        if (!it.finished) {
+          const m = /^.+-(\d+)$/.exec(String(it.no));
+          const num = m ? parseInt(m[1], 10) : 1;
+          if (used.has(num)) bump(it.no);            // 有记录撑着 → 保留
+          else if (persist) { delete map[k]; mapChanged = true; } // 孤儿 → 释放
+        }
+        // finished 的其他条目：不占号（记录若有数据已由 (a) 占）
+      });
+      if (mapChanged) try { localStorage.setItem(MAP_KEY, JSON.stringify(map)); } catch (e) {}
     } catch (e) {}
+    // (c) 旧版计数器（v226 之前写过 wb_stocktake_no_*）已废弃：在「记录表为权威依据」的新方案下
+    //     它只会把号一路顶高（如把 base 顶成 -2），且记录表已完整覆盖其语义，故不再纳入占用计算。
     // 取最小未占用序号：1, 2, 3…直到找到第一个不在 used 里的
     next = 1;
     while (used.has(next)) next++;
@@ -7498,7 +7609,10 @@ const StocktakeModule = {
     const sd = this.query.startDate, ed = this.query.endDate;
     const sheetId = info.sheetId;
     const allTasks = DataStore.getStocktakeTasks() || {};
-    const myTasks = info.counter ? (DataStore.getMyOpenTasks(info.counter) || []) : [];
+    // 🟢 v228.68：同上 —— 续盘路径的「我的任务」也限定当前批次
+    const myTasks = info.counter
+      ? (DataStore.getMyOpenTasks(info.counter) || []).filter(t => this._taskInCurrentBatch(t, sd, ed))
+      : [];
     this.batchNo = this._genBatchNo('quarter', sheetId);
     // 🟢 v228.40（一-1/一-2）：续盘同样回推批次号，保证多端同一号
     try { this._pushBatchCommonState(sheetId, this.batchNo); } catch (e) { /* 忽略 */ }

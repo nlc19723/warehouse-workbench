@@ -74,6 +74,18 @@ const SyncManager = {
   //         ②🟢 v227.99：无保存配置且用户未主动断开过 → 用「管理员覆盖 > 内置默认」凭证自动连接，
   //            登录页即显示「云端已同步」，无需再手动到「云端同步」里点保存。
   //         ③用户点过「断开连接」→ 记 wb_sync_user_disconnected=1，刷新/重启不再自动重连（尊重用户意图）。
+  _cloudCfgTimer: null,
+  // 🟢 v228.72：运行中设备周期性检查云端下发切换（管理员改凭证后，无需重载即自动跟随）
+  //   每 60s 一次轻量 getSetting('cloudConfig')；已是最新时 pull 内部直接返回，无额外开销/无死循环。
+  _startCloudConfigWatch() {
+    if (this._cloudCfgTimer) return;
+    const tick = () => {
+      if (!this.isOnline || typeof AppConfig === 'undefined' || typeof AppConfig.pullCloudConfigFromCloud !== 'function') return;
+      try { AppConfig.pullCloudConfigFromCloud(); } catch (e) { /* 已忽略 */ }
+    };
+    this._cloudCfgTimer = setInterval(tick, 60000);
+  },
+
   async init() {
     try {
       const saved = localStorage.getItem('supabase_config');
@@ -98,6 +110,7 @@ const SyncManager = {
         //   （表现为：设备 A 保存能推上云，设备 B 刷新却看不到）。
         await this._connect();
         this._bindNetworkEvents();
+        this._startCloudConfigWatch();
       }
     } catch (e) {
       console.warn('Sync config load failed:', e);
@@ -267,7 +280,13 @@ const SyncManager = {
           AppConfig.pullKeepersFromCloud();
         }
       } catch (e) { console.warn('[sync.js] 账号拉取异常(已忽略):', e && e.message); }
-      // 🟢 v227.37：连接成功后拉取云端「共享云配置」(cloudConfig) — 但本连接就是该配置的源头，跳过避免覆盖刚保存的值
+      // 🟢 v227.37 / v228.72：连接成功后拉取云端「共享云配置」并自动跟随切换。
+      //   已切到新桶的设备读到新桶无 cloudConfig → 自然停住，不会回跳；本调用不会造成死循环。
+      try {
+        if (typeof AppConfig !== 'undefined' && typeof AppConfig.pullCloudConfigFromCloud === 'function') {
+          AppConfig.pullCloudConfigFromCloud();
+        }
+      } catch (e) { console.warn('[sync.js] 云配置拉取异常(已忽略):', e && e.message); }
       return true;
     } catch (e) {
       console.error('Supabase connect failed:', e);

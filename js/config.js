@@ -103,10 +103,10 @@ window.sha256Hex = function (msg) {
 //    → 把输出的 _CRED_PARTS 片段整体替换到下方；再用 `verify` 校验还原一致。
 const _CRED_XOR = 'stockhub-2026';
 const _CRED_PARTS = [
-  'CFYaEQdKT0BFRkRCRUlbQAIeDA8IV0ZRVFARAAIbGAACA0lcHkFDAxUNAhgNWwFCEBwQXRYNTVlJDQwoRVB3UV88H',
-  'SUqPhI8U2NbeUF/HSZaACghQytGQmhkdTlNQQYSIgUBHn9ZfV85Dgs7KQAsD2tIamF/AD0BKQcyHCsbe110Byk8Hx',
-  'IOBicKd19qW1I0RVsAWQBGO3pgRXtfBB0MDlIbLzFkBHlfcAYWXVcCJDYoXWtoY188HipQJCwgVmJmZQd5Nx8cKgY',
-  '+QQFuewZ/XDYDIjc6Wzg2RgZ/agZdJj8zEjwdBXdofXBaFw0cGwAdPC9vQ2AEc0sjPSgDGDAtd3xhVwMaACUiDEoI',
+  'CFYaEQdKT0BFRkRCRUlbQBkPCx8TRFtUQU4WAAcFHgccDVpLHkFDAxUNAhgNWwFCEBwQXRYNTVlJDQwoRVB3UV88H',
+  'SUqPhI8U2NbeUF/HSZaACghQytGQmhkdTlNQQYSIgUBHn9ZfV85Dgs7KQAsD2tIamF/AD0BKQcyHCsbe15CXSpGHx',
+  'sKPxkJTgFYXlI0HAIHPFEFAB5WBXtfBB0MDlIbLzFkBHlfcAYWXVcCJDYoXWtoY188HipQJCweVmB2ZUh7Jy0cKgY',
+  '+QQFuewZ/XDYDITcmXDg2YEp+XAZdOTUxMVEPUGtTAGpMARUlJhwlTDZARVF2cBxMLhAKKz4qTkp0Z341DSoMAEoI',
 ];
 
 /** 同步还原内置凭证（分段拼接 → Base64 解码 → XOR）。失败时明确报错，不静默置空。 */
@@ -169,7 +169,7 @@ window.AppConfig = {
     // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
     // 🟢 v228.48：真实走查修复 —— 启动兜底「空状态」不再覆盖用户已打开的界面
     // 🟢 v228.45：季度盘点跨端一致性 —— 同一账号 PC/移动端任务、进度、批次区间完全统一
-    version: 'v228.67',
+    version: 'v228.72',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
@@ -318,6 +318,7 @@ window.AppConfig = {
     opts = opts || {};
     const name = String(username || '').trim();
     if (!name) return { ok: false, msg: '用户名不能为空' };
+    this._clearKeeperDeleted(name);   // 🟢 v228.71：重建同名账号 = 撤销删除意图，清墓碑
     const list = this.getKeepers();
     const exist = list.find(k => k.username === name);
     const rec = exist || { username: name, createdAt: new Date().toISOString() };
@@ -436,6 +437,28 @@ window.AppConfig = {
   isLoggedIn() { return !!this.getCurrentUser(); },
 
   // v222：真删除账号（历史盘点记录按用户名归属，删账号不影响已产生的记录，仍可查）
+  // 🟢 v228.71：删除墓碑 —— 修复「删除后重开权限面板账号又冒出来」。
+  //   根因：删除走 setKeepers→syncKeepers 异步推云端，而权限面板每次打开都会
+  //   pullKeepersFromCloud 用云端列表做「云端独有→合并回本地」；一旦推送尚未完成/失败，
+  //   云端还是旧列表，被删账号就被合并回来（读-改-写竞态）。现删除时写入墓碑
+  //   （wb_keeper_deleted），云端合并时跳过墓碑中的账号；推送成功（云端已无此号）后自动清墓碑。
+  _keeperDeletedKey() { return 'wb_keeper_deleted'; },
+  _getKeeperDeleted() {
+    try { const v = JSON.parse(localStorage.getItem(this._keeperDeletedKey()) || '[]'); return Array.isArray(v) ? v : []; }
+    catch (e) { return []; }
+  },
+  _markKeeperDeleted(name) {
+    try {
+      const set = this._getKeeperDeleted().filter(x => x !== name); set.push(name);
+      localStorage.setItem(this._keeperDeletedKey(), JSON.stringify(set));
+    } catch (e) { /* 隐私模式忽略 */ }
+  },
+  _clearKeeperDeleted(name) {
+    try {
+      const set = this._getKeeperDeleted().filter(x => x !== name);
+      localStorage.setItem(this._keeperDeletedKey(), JSON.stringify(set));
+    } catch (e) { /* 隐私模式忽略 */ }
+  },
   removeKeeper(username) {
     const name = String(username || '').trim();
     if (!name) return { ok: false, msg: '用户名不能为空' };
@@ -444,6 +467,7 @@ window.AppConfig = {
     const idx = list.findIndex(k => k.username === name);
     if (idx === -1) return { ok: false, msg: '账号不存在' };
     list.splice(idx, 1);
+    this._markKeeperDeleted(name);
     this.setKeepers(list);
     // 当前登录的正是被删账号 → 退出该身份（管理员特权保留则回落管理员）
     const u = this.getCurrentUser();
@@ -493,43 +517,63 @@ window.AppConfig = {
         return st;
       }
       const local = this.getKeepers();
+      const deleted = this._getKeeperDeleted();   // 🟢 v228.71：删除墓碑 —— 云端仍存在的已删账号不回合并
       const map = {};
       local.forEach(k => { map[k.username] = k; });
+      let cloudHasDeleted = false;
       cloud.forEach(k => {
+        if (deleted.indexOf(k.username) !== -1) { cloudHasDeleted = true; return; }  // 墓碑中的账号跳过
         const ex = map[k.username];
         if (!ex) map[k.username] = k;                                   // 云端独有账号 → 同步到本地
         else if (!ex.disabled && k.disabled) ex.disabled = 1;           // 云端已禁用 → 同步禁用
         // 本地已禁用而云端未禁用：本地优先（管理员刚在本机禁用是最终意图）
       });
       this.setKeepers(Object.values(map));
+      // 墓碑自愈：云端已无此号（删除推送已生效）→ 清掉对应墓碑；
+      // 若云端仍有（推送失败/他机旧数据回写），保留墓碑继续拦截，并立即补推一次最新列表。
+      if (deleted.length) {
+        const gone = deleted.filter(n => !cloud.some(k => k.username === n));
+        try {
+          gone.forEach(n => this._clearKeeperDeleted(n));
+          if (cloudHasDeleted) { this.syncKeepers(); console.warn('[keepers] 云端仍存在已删除账号，已补推最新列表'); }
+        } catch (e) { /* 自愈失败不阻断 */ }
+      }
       return 'ok';
     } catch (e) { console.warn('[keepers] 拉取失败(已忽略):', e && e.message); return 'fail'; }
   },
   // 🟢 v227.39：从云端下发的「共享云配置」（URL + Anon Key）→ 写入 wb_supabase_override → 触发自动连
   //   - 管理员首次配好后，下发到所有 keeper 设备；新设备登录即默认连接
   //   - 本地已有 override 时不会被云端覆盖（避免管理员误改影响他人）
+  // 🟢 v228.72：强制跟随云端下发的共享配置（管理员界面改凭证后全员自动切换）
+  //   · 云端 cloudConfig 为权威；任何设备 effective 与云端不一致即切换（不再保护本地 override）
+  //   · 已是最新则直接返回不重复连；切到新桶后读到新桶无 cloudConfig → 自然停住，不会回跳/死循环
   async pullCloudConfigFromCloud() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     try {
       const cfg = await SyncManager.getSetting('cloudConfig');
       if (!cfg || !cfg.url || !cfg.key) return false;
-      // 已有本地 override 且不同时来自本机的，不覆盖
-      const haveLocal = (() => { try { return !!localStorage.getItem('wb_supabase_override'); } catch (e) { return false; } })();
-      if (!haveLocal) {
-        try { localStorage.setItem('wb_supabase_override', JSON.stringify({ url: cfg.url, key: cfg.key })); } catch (e) {}
-        if (typeof SyncManager === 'object' && SyncManager && typeof SyncManager.connect === 'function') {
-          try { await SyncManager.connect(cfg.url, cfg.key); } catch (e) { console.warn('[cloudConfig] 自动连接失败(已忽略):', e && e.message); }
-        }
+      const cur = this.getEffectiveSupabase();
+      if (cur && cur.url === cfg.url && cur.key === cfg.key) return false; // 已是最新
+      try {
+        localStorage.setItem('wb_supabase_override', JSON.stringify({
+          url: cfg.url, key: cfg.key,
+          bucket: cfg.bucket || (AppConfig.supabase && AppConfig.supabase.bucket) || 'workbench-data'
+        }));
+      } catch (e) {}
+      if (typeof SyncManager === 'object' && SyncManager && typeof SyncManager.connect === 'function') {
+        try { await SyncManager.connect(cfg.url, cfg.key, cfg.bucket); } catch (e) { console.warn('[cloudConfig] 自动连接失败(已忽略):', e && e.message); }
       }
       return true;
     } catch (e) { console.warn('[cloudConfig] 拉取失败(已忽略):', e && e.message); return false; }
   },
-  // 🟢 v227.39：管理员把当前 effective 配置上云，供其他设备一键同步
+  // 🟢 v227.39 / v228.72：管理员把当前 effective 配置上云，供其他设备一键同步
+  //   · 在 setSupabaseOverride 之后、本机重连之前调用 → 此刻 SyncManager.client 仍是「旧桶」，
+  //     cloudConfig 写入旧桶，其他仍连旧桶的设备即可读到新凭证并自动切换（见 pullCloudConfigFromCloud）
   async syncCloudConfig() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     const eff = this.getEffectiveSupabase();
     if (!eff.url || !eff.key) return false;
-    try { await SyncManager.setSetting('cloudConfig', { url: eff.url, key: eff.key }); return true; }
+    try { await SyncManager.setSetting('cloudConfig', { url: eff.url, key: eff.key, bucket: eff.bucket }); return true; }
     catch (e) { console.warn('[cloudConfig] 上云失败(已忽略):', e && e.message); return false; }
   }
 };

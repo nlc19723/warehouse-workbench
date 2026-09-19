@@ -92,9 +92,9 @@ const App = {
     if (typeof SyncManager !== 'undefined') {
       try { await SyncManager.init(); } catch (e) { console.warn('SyncManager init 失败:', e); }
     }
-    // 🟢 v227.37：首次启动若 SyncManager 离线且云端 settings.cloudConfig 有值 → 自动填 + 自动连
-    //   （管理员保存凭证时已下发；新设备/清缓存设备首次打开即默认连云端，无需手动配）
-    if (typeof SyncManager !== 'undefined' && !SyncManager.isOnline && typeof AppConfig !== 'undefined' && typeof AppConfig.pullCloudConfigFromCloud === 'function') {
+    // 🟢 v227.37 / v228.72：启动后若已连云端，拉取一次共享云配置并跟随（管理员改凭证后全员自动切）
+    //   （云端 cloudConfig 为权威；已是最新则 pull 内部直接返回，不会重复连）
+    if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof AppConfig !== 'undefined' && typeof AppConfig.pullCloudConfigFromCloud === 'function') {
       try { await AppConfig.pullCloudConfigFromCloud(); } catch (e) { console.warn('[cloudConfig] 启动自动拉取失败(已忽略):', e && e.message); }
     }
     if (typeof DataStore !== 'undefined') {
@@ -794,7 +794,7 @@ const App = {
           <div style="margin-top:8px;">
             <button onclick="App.openKeeperEditor()" class="btn--primary" style="width:100%;padding:8px 14px;">+ 新增库管员账号（可勾选模块权限）</button>
           </div>
-          <p style="font-size:11.5px;color:var(--text-secondary);margin-top:6px;line-height:1.5;">用户名创建后不可改（盘点记录按名字归属）；删除 = 禁用（历史记录可查）。账号自动同步云端。新账号默认授予「盘点岗」权限（盘点 / 盘点记录列表 / 查询 / 出库列表）；系统入口（云端同步 / 数据导入 / 设置 / 源码）需在编辑权限时单独勾选。</p>
+          <p style="font-size:11.5px;color:var(--text-secondary);margin-top:6px;line-height:1.6;">· 用户名创建后不可改；删除后历史记录仍可查<br>· 新账号默认「盘点岗」权限，系统入口需单独勾选，账号自动同步云端</p>
         </div>
       </div>`;
     const overlay = document.getElementById('panelOverlay');
@@ -835,15 +835,7 @@ const App = {
     WBModal.alert('云端凭证已更新并下发给所有 keeper 设备');
   },
 
-  // 保存云端凭证覆盖（换 Supabase 项目）
-  _saveSupabaseOverride() {
-    const u = document.getElementById('admSbUrl');
-    const k = document.getElementById('admSbKey');
-    if (!u || !k) return;
-    if (!u.value.trim() || !k.value.trim()) { WBModal.alert('URL 与 Key 均需填写'); return; }
-    AppConfig.setSupabaseOverride(u.value.trim(), k.value.trim());
-    WBModal.alert('云端凭证已更新');
-  },
+  // 🟢 v228.72：删除「无下发的重复版本」，仅保留带 syncCloudConfig 下发的 _saveSupabaseOverride（见上）
 
   // ===== 库管员账号体系（v216 Step 5）=====
 
@@ -1341,7 +1333,13 @@ const App = {
       el.innerHTML = '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;line-height:1.6;">' + hint + '</div>';
       return;
     }
-    el.innerHTML = list.map(k => {
+    // 🟢 v228.71（用户反馈）：管理员为内置账号（密码固定、默认全权限、不可删除），
+    //   放在可管理列表里只会造成误解（「还需要显示吗？」）→ 不再渲染该行，仅加一行说明。
+    const manageables = list.filter(k => k.username !== '管理员');
+    const builtinHint = (list.some(k => k.username === '管理员'))
+      ? '<div style="font-size:11.5px;color:var(--text-secondary);padding:5px 0;border-bottom:1px dashed var(--border-color,#eee);">管理员为内置账号，默认全权限，无需在此配置</div>'
+      : '';
+    el.innerHTML = builtinHint + manageables.map(k => {
       const disabled = k.disabled ? '（已禁用）' : '';
       const style = k.disabled ? 'opacity:.55;' : '';
       const un = (typeof escAttr === 'function' ? escAttr(k.username) : k.username);
@@ -1395,6 +1393,9 @@ const App = {
     if (!ok) return;
     const res = AppConfig.removeKeeper(username);
     if (!res.ok) { WBModal.alert(res.msg || '删除失败'); return; }
+    // 🟢 v228.71：立即把删除后的最新列表推上云端（syncKeepers 内部 best-effort），
+    //   与删除墓碑双保险，避免面板重开时 pullKeepersFromCloud 用云端旧列表把账号合并回来。
+    try { if (typeof AppConfig.syncKeepers === 'function') await AppConfig.syncKeepers(); } catch (e) { /* 推送失败由墓碑兜底 */ }
     this.renderAccountBar();
     this.renderKeeperList();
     // 删的正是当前作业身份 → 已回落（可能是管理员或未登录），检查当前模块是否还有权访问
