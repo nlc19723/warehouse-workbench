@@ -28,6 +28,13 @@ window.PricingModule = PricingModule;
 window.QueryModule = QueryModule;
 window.ReconciliationModule = ReconciliationModule;
 window.StockModule = StockModule;
+// 🟢 v228.64：AUDIT-606 遗漏补挂。原清单 15 个 *Module 里独独漏了 StocktakeModule，
+//   是本次走查（docs/季度盘点同步链路实机走查报告.md §四 缺陷 6-1）才发现的：
+//   表现是「外部诊断/自动化无法访问盘点模块」（Playwright 打桩时 `StocktakeModule is not defined`），
+//   潜在风险是「一旦 index.html 改成 type="module"，盘点模块将全线失效」。
+//   仅追加 window 引用，不改原脚本作用域绑定，对现有功能零影响。
+window.StocktakeModule = StocktakeModule;
+window.StocktakeRecordModule = StocktakeRecordModule;
 window.SupplierModule = SupplierModule;
 window.Toast = Toast;
 

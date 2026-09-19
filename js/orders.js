@@ -119,7 +119,7 @@ const OrdersModule = {
     const totalAmount = TableUtils.sumMoney(filteredOrders, '原币价税合计'); // 🟢 AUDIT-003 整数分聚合
 
     if (rt !== undefined && rt !== App._goToken) return;
-    document.getElementById('orderSummary').innerHTML = `
+    TableUtils.setHtml('orderSummary', `
       <div class="kpi-card card-info">
         <div class="kpi-label">订单总数</div>
         <div class="kpi-value">${uniqueTotal}</div>
@@ -135,7 +135,7 @@ const OrdersModule = {
         <div class="kpi-value">${uninboundUnique}</div>
         <div class="kpi-sub">占总数 ${uniqueTotal > 0 ? (uninboundUnique / uniqueTotal * 100).toFixed(1) : 0}%</div>
       </div>
-    `;
+    `);
 
     await this.renderTable(rt);
     this.renderTrendChart(filteredOrders);
@@ -195,7 +195,7 @@ const OrdersModule = {
     const area = document.getElementById('orderTableArea');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无订单数据</div></div>';
-      document.getElementById('orderPagination').innerHTML = '';
+      TableUtils.setHtml('orderPagination', '');
       return;
     }
 

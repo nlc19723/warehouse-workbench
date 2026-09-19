@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>季度盘点分派方案对比 · v228.32 预览</title>
+<style>
+  :root{
+    --primary:#4a7ce8; --primary-dark:#2f5fb0;
+    --bg:#f6f9fd; --card:#fff; --border:#e2e8f0;
+    --text:#1f2937; --text2:#64748b; --text3:#94a3b8;
+    --ok:#16a34a; --ok-bg:#dcfce7; --ok-bd:#86efac;
+    --dead:#94a3b8; --dead-bg:#f1f5f9; --dead-bd:#cbd5e1;
+    --new:#ea580c; --new-bg:#fff7ed; --new-bd:#fdba74;
+    --bad:#dc2626; --bad-bg:#fee2e2; --bad-bd:#fca5a5;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    background:linear-gradient(160deg,#eef4fc,#f7fafd 60%);
+    color:var(--text); padding:20px 16px 40px; line-height:1.6;
+  }
+  .wrap{max-width:1240px;margin:0 auto;}
+  header{text-align:center;margin-bottom:18px;}
+  h1{font-size:20px;font-weight:700;letter-spacing:.3px;}
+  .sub{font-size:13px;color:var(--text2);margin-top:4px;}
+  .badge-preview{
+    display:inline-block;margin-top:8px;padding:3px 12px;border-radius:99px;
+    background:var(--new-bg);color:var(--new);border:1px solid var(--new-bd);
+    font-size:12px;font-weight:600;
+  }
+  .controls{display:flex;justify-content:center;gap:10px;align-items:center;margin:18px 0 6px;flex-wrap:wrap;}
+  .daybtn{
+    padding:9px 22px;border-radius:10px;border:1px solid var(--border);background:#fff;
+    font-size:13px;font-weight:600;color:var(--text2);cursor:pointer;transition:all .18s;
+  }
+  .daybtn.active{background:linear-gradient(135deg,var(--primary),#6b8fe8);color:#fff;border-color:var(--primary);box-shadow:0 3px 10px rgba(74,124,232,.28);}
+  .dayhint{font-size:12.5px;color:var(--text2);text-align:center;margin-bottom:14px;}
+  .legend{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;font-size:12px;color:var(--text2);margin:10px 0 18px;}
+  .legend span{display:inline-flex;align-items:center;gap:5px;}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block;border:1px solid;}
+  .cols{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+  @media(max-width:900px){.cols{grid-template-columns:1fr;}}
+  .col{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:0 2px 10px rgba(15,23,42,.05);}
+  .col.rec{border-color:var(--primary);box-shadow:0 4px 16px rgba(74,124,232,.16);}
+  .col-head{padding:12px 14px;border-bottom:1px solid var(--border);}
+  .col.rec .col-head{background:linear-gradient(135deg,rgba(74,124,232,.10),rgba(74,124,232,.02));}
+  .col-title{font-size:14.5px;font-weight:700;display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
+  .tag{font-size:11px;padding:2px 8px;border-radius:6px;font-weight:600;}
+  .tag.cur{background:var(--dead-bg);color:var(--text2);border:1px solid var(--dead-bd);}
+  .tag.no{background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad-bd);}
+  .tag.yes{background:var(--ok-bg);color:var(--ok);border:1px solid var(--ok-bd);}
+  .pool{margin-top:7px;font-size:12.5px;color:var(--text2);}
+  .pool b{color:var(--text);}
+  .pool code{background:#f1f5f9;padding:1px 6px;border-radius:5px;font-size:11.5px;color:var(--primary-dark);}
+  .tasks{padding:12px 14px;display:flex;flex-direction:column;gap:11px;}
+  .task{border:1px solid var(--border);border-radius:10px;padding:9px 10px;background:#fcfdff;}
+  .task.wait{opacity:.45;}
+  .task-h{font-size:12.5px;font-weight:600;margin-bottom:7px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+  .who{background:var(--primary);color:#fff;padding:1px 8px;border-radius:5px;font-size:11.5px;}
+  .rng{color:var(--text2);font-size:11.5px;}
+  .dayb{font-size:10.5px;padding:1px 6px;border-radius:4px;background:#eef2f7;color:#64748b;border:1px solid #cbd5e1;}
+  .chips{display:flex;flex-wrap:wrap;gap:4px;}
+  .chip{
+    font-size:11px;padding:2px 6px;border-radius:5px;border:1px solid;font-weight:500;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  .chip.ok{background:var(--ok-bg);color:var(--ok);border-color:var(--ok-bd);}
+  .chip.dead{background:#eef2f7;color:#64748b;border-color:#cbd5e1;}
+  .chip.junk{background:var(--bad-bg);color:var(--bad);border-color:var(--bad-bd);text-decoration:line-through;}
+  .chip.new{background:var(--new-bg);color:var(--new);border-color:var(--new-bd);}
+  .verdict{padding:11px 14px;border-top:1px solid var(--border);font-size:12.5px;background:#fafbfd;}
+  .verdict .row{display:flex;justify-content:space-between;gap:8px;padding:2px 0;}
+  .verdict .row b{font-variant-numeric:tabular-nums;}
+  .v-bad{color:var(--bad);} .v-ok{color:var(--ok);} .v-warn{color:var(--new);}
+  .note{margin-top:5px;padding-top:7px;border-top:1px dashed var(--border);font-size:11.5px;color:var(--text2);}
+  .section{margin-top:26px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px 18px;box-shadow:0 2px 10px rgba(15,23,42,.05);}
+  .section h2{font-size:15px;margin-bottom:8px;}
+  .section p{font-size:13px;color:var(--text2);margin-bottom:6px;}
+  .zerochips{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px;}
+  .concl{margin-top:20px;background:linear-gradient(135deg,rgba(74,124,232,.08),rgba(74,124,232,.02));border:1px solid var(--primary);border-radius:14px;padding:16px 18px;}
+  .concl h2{font-size:15px;color:var(--primary-dark);margin-bottom:8px;}
+  .concl ul{margin-left:18px;font-size:13px;color:var(--text);}
+  .concl li{margin-bottom:5px;}
+  table.mini{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px;}
+  table.mini th,table.mini td{border:1px solid var(--border);padding:6px 9px;text-align:left;}
+  table.mini th{background:#f1f5f9;font-weight:600;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>季度盘点分派方案对比</h1>
+    <div class="sub">「剔除 0 存量」看似只是加个 filter——但 0 存量每天都在变。下面用同一批存货，对比三种分配锚点。</div>
+    <div class="badge-preview">⚠ 仅方案预览，未改动任何正式代码</div>
+  </header>
+
+  <div class="controls">
+    <button class="daybtn active" id="btnD1">Day 1 · 开局分派</button>
+    <button class="daybtn" id="btnD2">Day 2 · 隔天继续分派</button>
+  </div>
+  <div class="dayhint" id="dayHint"></div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--ok-bg);border-color:var(--ok-bd)"></i>核心必盘（两日都有货）</span>
+    <span><i class="dot" style="background:#eef2f7;border-color:#cbd5e1"></i>已清零 · 合法盘亏（账有实物无，正当差异）</span>
+    <span><i class="dot" style="background:var(--bad-bg);border-color:var(--bad-bd)"></i>从未有货 · 白占工作量</span>
+    <span><i class="dot" style="background:var(--new-bg);border-color:var(--new-bd)"></i>Day2 才入池（基线外）</span>
+  </div>
+
+  <div class="cols" id="cols"></div>
+
+  <div class="section">
+    <h2>🗂 0 存量抽查清单</h2>
+    <p>开局时被判定为「全 0 存量」而剔除的编码。它们不占序号、不进常规分派，但<b>不会被丢弃</b>——管理员可单独勾选指派抽查，专门用来发现「有实物、无账面」的盘盈。</p>
+    <div class="zerochips" id="zeroChips"></div>
+  </div>
+
+  <div class="concl">
+    <h2>📌 结论</h2>
+    <ul>
+      <li><b>甲（现状）</b>序号稳定，但清单臃肿——盘点人对着大量 0 存量行白忙。你的主诉就是它。</li>
+      <li><b>乙（实时剔除 0 存量）</b>清单干净了，但序号池每天重算 → 管理员认知与系统<b>不一致</b>，产生<b>不可预测的隐性遗漏</b>（甚至可能重复盘）。这是最危险的。</li>
+      <li><b>丙（批次基线快照）</b>开局冻结一份有效编码名册，序号全程稳定 + 清单干净。未覆盖项是<b>明示的、可控的</b>（开局时为 0 存量），且已列在抽查清单里。</li>
+      <li>📎 顺带纠正一个直觉：<b>「存量被清零」的行不算白盘</b>——账上还有数、实物出库没了，这正是一次合法的盘亏记录，必须留给盘点人现场核实。真正浪费的是<b>从未有货</b>的 0 存量行（图中划线红块）。</li>
+    </ul>
+    <table class="mini">
+      <tr><th>方案</th><th>序号漂移</th><th>白占行数</th><th>核心必盘覆盖</th><th>遗漏性质</th><th>结论</th></tr>
+      <tr><td>甲 全库实时</td><td>无</td><td style="color:var(--bad)"><b>7 行</b></td><td>12/12</td><td>无遗漏</td><td>现状，效率低</td></tr>
+      <tr><td>乙 实时剔除 0</td><td style="color:var(--bad)"><b>每天漂移</b></td><td>0</td><td style="color:var(--bad)"><b>11/12 ✗</b></td><td style="color:var(--bad)"><b>隐性、不可预期</b></td><td>❌ 不可取</td></tr>
+      <tr><td>丙 基线快照</td><td>冻结，无漂移</td><td>0</td><td style="color:var(--ok)"><b>12/12 ✓</b></td><td>明示、可抽查补上</td><td>✅ 推荐</td></tr>
+    </table>
+  </div>
+</div>
+
+<script>
+// ---- 模拟存货：d1 = Day1 各行现存数量，d2 = Day2（发生出入库后）----
+const RAW = {
+  S001:{n:'六角螺栓 M8',  d1:[10,5],  d2:[10,5]},
+  S002:{n:'平垫圈 8',     d1:[0],     d2:[6]},      // Day2 入库 → 变有货
+  S003:{n:'六角螺母 M8',  d1:[8,2],   d2:[8,2]},
+  S004:{n:'弹簧垫圈 8',   d1:[0,0],   d2:[0,0]},
+  S005:{n:'轴承 6203',    d1:[-5,5],  d2:[0,0]},    // Day2 相抵清零
+  S006:{n:'切割片 100',   d1:[-3],    d2:[-3]},     // 负库存（异常，兜底纳入）
+  S007:{n:'砂轮片 125',   d1:[0],     d2:[0]},
+  S008:{n:'焊条 J422',    d1:[12],    d2:[0]},      // Day2 出库完
+  S009:{n:'角磨片 100',   d1:[7],     d2:[7]},
+  S010:{n:'手电钻 13mm',  d1:[0],     d2:[0]},
+  S011:{n:'麻花钻头 6',   d1:[3,0],   d2:[3,0]},
+  S012:{n:'丝锥 M10',     d1:[15],    d2:[15]},
+  S013:{n:'板牙 M10',     d1:[0],     d2:[0]},
+  S014:{n:'游标卡尺 150', d1:[6],     d2:[6]},
+  S015:{n:'卷尺 5m',      d1:[2],     d2:[2]},
+  S016:{n:'美工刀',       d1:[0,0],   d2:[0,0]},
+  S017:{n:'钢锯条',       d1:[9],     d2:[9]},
+  S018:{n:'锉刀 200',     d1:[4],     d2:[4]},
+  S019:{n:'钢丝刷',       d1:[0],     d2:[0]},
+  S020:{n:'生料带',       d1:[11],    d2:[0]},      // Day2 出库完
+  S021:{n:'密封圈',       d1:[-2],    d2:[-2]},     // 负库存
+  S022:{n:'黄油枪',       d1:[0],     d2:[3]},      // Day2 入库 → 变有货
+  S023:{n:'液压油',       d1:[5],     d2:[5]},
+  S024:{n:'抹布',         d1:[0],     d2:[0]},
+};
+
+const CODES = Object.keys(RAW).sort();
+// 判定规则（定稿）：任一行 现存数量 ≠ 0 就纳入；没/空值算 0
+const hasStock = (rows) => rows.some(v => Number.isFinite(v) && v !== 0);
+const avail = (day) => CODES.filter(c => hasStock(RAW[c][day]));
+const sumOf = (rows) => rows.filter(v=>Number.isFinite(v)).reduce((a,b)=>a+b,0);
+
+const ALL  = CODES.slice();      // 甲：全库
+const A1   = avail('d1');        // 乙/丙 Day1
+const A2   = avail('d2');        // Day2 真实该盘的
+const BASE = A1.slice();         // 丙：开局快照
+
+// 三方案在两天的分派（Day1 派张三；Day2 派李四、王五）
+// [ 显示名, {d1:[a,b]|null, d2:[a,b]|null}, 取的池 ]
+const PLANS = [
+  { key:'jia', title:'甲 · 全库实时', tag:'现状', tagCls:'cur', rec:false,
+    poolTxt:'stock 全表按编码排序，<b>不去重/不剔除</b>',
+    poolOf: () => ALL, poolFixed:true,
+    tasks:[ ['张三',{d1:[1,8],d2:null}], ['李四',{d1:null,d2:[9,16]}], ['王五',{d1:null,d2:[17,24]}] ] },
+
+  { key:'yi', title:'乙 · 实时剔除 0 存量', tag:'不可取', tagCls:'no', rec:false,
+    poolTxt:'每次分派现场算 stock 过滤 0 存量，<b>天天重排</b>',
+    poolOf: (day) => day==='d1'?A1:A2, poolFixed:false,
+    tasks:[ ['张三',{d1:[1,5],d2:null}], ['李四',{d1:null,d2:[6,10]}], ['王五',{d1:null,d2:[11,14]}] ] },
+
+  { key:'bing', title:'丙 · 批次基线快照', tag:'推荐', tagCls:'yes', rec:true,
+    poolTxt:'开局冻结 Day1 有效清单，<b>全程沿用同一份</b>',
+    poolOf: () => BASE, poolFixed:true,
+    tasks:[ ['张三',{d1:[1,5],d2:null}], ['李四',{d1:null,d2:[6,10]}], ['王五',{d1:null,d2:[11,15]}] ] },
+];
+
+let DAY = 'd1';
+
+function slice(pool,a,b){ return pool.slice(a-1,b); }
+
+function tip(c){
+  const r = RAW[c], s1 = sumOf(r.d1), s2 = sumOf(r.d2);
+  const st = (hasStock(r.d2)?'有效该盘':'已清零(不必盘)');
+  return `${c} ${r.n}\nDay1 各行[${r.d1.join(', ')}] 合计=${s1}\nDay2 各行[${r.d2.join(', ')}] 合计=${s2}\nDay2 判定：${st}`;
+}
+
+// 四类互斥：核心必盘(两天都有效) / 已清零(曾持有→出库清零，合法盘亏) / 从未有货(纯占位垃圾) / 今日才入池
+const CORE = CODES.filter(c=>A1.includes(c)&&A2.includes(c));
+function evaluate(codes){
+  const ok=[],drain=[],junk=[],nu=[];
+  codes.forEach(c=>{
+    if(A2.includes(c)){ A1.includes(c) ? ok.push(c) : nu.push(c); }
+    else              { A1.includes(c) ? drain.push(c) : junk.push(c); }
+  });
+  return {ok,drain,junk,nu};
+}
+
+function render(){
+  document.getElementById('dayHint').textContent = DAY==='d1'
+    ? '📍 Day 1：盘点开局，管理员给「张三」分派一段序号。'
+    : '📍 Day 2：隔了一天，期间发生出入库（S008/S020 出库完、S005 相抵清零、S002/S022 新入库）。管理员继续给「李四」「王五」分派剩余区间。';
+
+  const cols = document.getElementById('cols');
+  cols.innerHTML = PLANS.map(p=>{
+    const poolKind = p.poolFixed ? p.poolOf() : p.poolOf(DAY);
+    const rows = p.tasks.map(([who,rg])=>{
+      // 任务在哪一天派出，就用那一天那一刻的池 —— 派出后即固化，永不随后续数据变化而改写
+      const assignDay = (DAY==='d2' && rg.d2) ? 'd2' : (rg.d1 ? 'd1' : null);
+      if(!assignDay) return `<div class="task wait"><div class="task-h"><span class="who">${who}</span><span class="rng">尚未分派</span></div><div class="chips"><span class="chip dead" style="text-decoration:none">Day 2 才轮到</span></div></div>`;
+      const poolForTask = p.poolFixed ? p.poolOf() : p.poolOf(assignDay);
+      const rng = assignDay==='d1' ? rg.d1 : rg.d2;
+      const got = slice(poolForTask, rng[0], rng[1]);
+      const e = evaluate(got);
+      const chips = [
+        ...e.ok.map(c=>`<span class="chip ok" title="${tip(c)}">${c}</span>`),
+        ...e.drain.map(c=>`<span class="chip dead" title="${tip(c)}">${c}</span>`),
+        ...e.junk.map(c=>`<span class="chip junk" title="${tip(c)}">${c}</span>`),
+        ...e.nu.map(c=>`<span class="chip new" title="${tip(c)}">${c}</span>`),
+      ].join('');
+      const flag = e.junk.length ? `<span style="color:var(--bad);font-size:11px;">✂ 白占${e.junk.length}行</span>`
+                 : (e.drain.length ? `<span style="color:#64748b;font-size:11px;">含${e.drain.length}行已清零(合法盘亏)</span>` : '');
+      return `<div class="task"><div class="task-h"><span class="who">${who}</span><span class="dayb">Day${assignDay==='d1'?1:2} 派出</span><span class="rng">序号 ${rng[0]}-${rng[1]} · ${got.length}项</span>${flag}</div><div class="chips">${chips}</div></div>`;
+    }).join('');
+
+    // 汇总（只统计到 Day2 为止已派出的）
+    let assigned=[];
+    p.tasks.forEach(([who,rg])=>{
+      const g1 = rg.d1? slice(p.poolOf('d1'), rg.d1[0], rg.d1[1]) : [];
+      const pk2 = p.poolFixed ? p.poolOf() : p.poolOf('d2');
+      const g2 = rg.d2? slice(pk2, rg.d2[0], rg.d2[1]) : [];
+      assigned = assigned.concat(g1,g2);
+    });
+    const e = evaluate(assigned);
+    const missedALL = A2.filter(c=>!assigned.includes(c));
+    const missedCore = CORE.filter(c=>!assigned.includes(c));
+    const covCore = CORE.filter(c=>assigned.includes(c)).length;
+    const missedNow = DAY==='d2' ? missedALL : [];
+    return `<div class="col ${p.rec?'rec':''}">
+      <div class="col-head">
+        <div class="col-title">${p.title}<span class="tag ${p.tagCls}">${p.tag}</span></div>
+        <div class="pool">${p.poolTxt}<br>当前序号池：<b>${poolKind.length}</b> 项 ${p.poolFixed?'<code>冻结</code>':'<code>实时重算</code>'}</div>
+      </div>
+      <div class="tasks">${rows}</div>
+      <div class="verdict">
+        <div class="row"><span>核心必盘覆盖（两日都有货 ${CORE.length}项）</span><b class="${covCore===CORE.length?'v-ok':'v-bad'}">${covCore}/${CORE.length}</b></div>
+        <div class="row"><span>✂ 从未有货 · 白占工作量</span><b class="${e.junk.length?'v-bad':'v-ok'}">${e.junk.length}</b></div>
+        <div class="row"><span>◐ 已清零 · 合法盘亏（不算缺陷）</span><b>${e.drain.length}</b></div>
+        ${DAY==='d2'? `<div class="row"><span>未覆盖</span><b class="${missedCore.length?'v-bad':(missedALL.length?'v-warn':'v-ok')}">${missedALL.length?missedALL.join(' '):'0'}</b></div>`:''}
+        ${DAY==='d2'&&missedCore.length? `<div class="row"><span style="color:var(--bad)">⚠ 其中漏掉核心必盘</span><b class="v-bad">${missedCore.join(' ')}</b></div>`:''}
+        <div class="note">${
+          p.key==='jia' ? `序号稳定，但清单里 ${e.junk.length} 行是从未有货的纯占位（${e.junk.join(' ')}…），盘点人对着 0 存量行白忙——这就是你的主诉。`
+          : p.key==='yi' ? (DAY==='d2'
+              ? `⚠ 池子 Day1=${A1.length} → Day2=${A2.length} 且成员变了。管理员以为「1-5 已给张三」，但 Day2 的序号已另指他人 → 核心必盘项 <b style="color:var(--bad)">${missedCore.join(' ')||'—'}</b> 被<b>隐性漏掉</b>。同样机制下也可能重复盘。`
+              : 'Day1 看着一切正常——问题要到 Day2 数据变化后才爆炸，且事前完全无法预见。')
+          : `核心必盘 ${CORE.length}/${CORE.length} 全中 ✓。未覆盖项是开局时为 0 存量的编码，属<b>明示剔除</b>，已列在下方抽查清单里，管理员可主动派抽查。`
+        }</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // 抽查清单 = 开局(Day1)判定为 0 存量的编码
+  const zc = CODES.filter(c=>!A1.includes(c));
+  document.getElementById('zeroChips').innerHTML = zc.map(c=>{
+    const inA2 = A2.includes(c);
+    const cls = inA2?'new':'dead';
+    const extra = inA2?'（Day2 已变有货，建议抽查）':'';
+    return `<span class="chip ${cls}" style="text-decoration:none" title="${tip(c)}">${c} ${RAW[c].n}${extra}</span>`;
+  }).join('');
+}
+
+document.getElementById('btnD1').onclick = ()=>{ DAY='d1'; document.getElementById('btnD1').classList.add('active'); document.getElementById('btnD2').classList.remove('active'); render(); };
+document.getElementById('btnD2').onclick = ()=>{ DAY='d2'; document.getElementById('btnD2').classList.add('active'); document.getElementById('btnD1').classList.remove('active'); render(); };
+render();
+</script>
+</body>
+</html>

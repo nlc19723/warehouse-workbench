@@ -167,7 +167,9 @@ window.AppConfig = {
     //   本值仅作为脚本加载失败/无 ?v= 时的兜底。
     // 🟢 v201：二维码白框上下边与基础信息白框严格对齐
     // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
-    version: 'v228.23',
+    // 🟢 v228.48：真实走查修复 —— 启动兜底「空状态」不再覆盖用户已打开的界面
+    // 🟢 v228.45：季度盘点跨端一致性 —— 同一账号 PC/移动端任务、进度、批次区间完全统一
+    version: 'v228.67',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
@@ -199,12 +201,13 @@ window.AppConfig = {
   getEffectiveSupabase() {
     try {
       const o = JSON.parse(localStorage.getItem('wb_supabase_override') || 'null');
-      if (o && o.url && o.key) return { url: o.url, key: o.key };
+      if (o && o.url && o.key) return { url: o.url, key: o.key, bucket: o.bucket || this.supabase.bucket };
     } catch (e) { /* 解析失败回退默认 */ }
-    return { url: this.supabase.url, key: this.supabase.anonKey };
+    return { url: this.supabase.url, key: this.supabase.anonKey, bucket: this.supabase.bucket };
   },
-  setSupabaseOverride(url, key) {
-    try { localStorage.setItem('wb_supabase_override', JSON.stringify({ url: url, key: key })); }
+  // 🟢 v228.66-P0：override 支持 bucket，便于迁移到自定义桶名的项目（D2=B）
+  setSupabaseOverride(url, key, bucket) {
+    try { localStorage.setItem('wb_supabase_override', JSON.stringify({ url: url, key: key, bucket: bucket || this.supabase.bucket })); }
     catch (e) { /* 隐私模式忽略 */ }
   },
 
@@ -269,12 +272,12 @@ window.AppConfig = {
   ],
   // 快速预设
   KEEPER_PRESETS: {
-    // 盘点岗（只负责盘点的库管员）：可查看/分派任务（自领）、不含批次汇总（管理视角）
+    // 盘点岗（只负责盘点的库管员）：可查看/分派任务（自领）
     stocktake: ['stocktake', 'stocktakeAssign', 'stocktakeRecord', 'query', 'outboundList'],
     // 全业务（管理员 / 自己）：含全部模块 + 子权限 + 4 个系统入口
     admin: [
-      // 18 业务模块
-      'dashboard','query','inventoryAlert','orderCheck','orderTrack','stock','stocktake','stocktakeAssign','stocktakeBatch','stocktakeRecord','orders','inbound','pricing','reconciliation','supplier','lowTurnover','breach','outbound','outboundList',
+      // 17 业务模块（🟢 v228.60：移除 stocktakeBatch —— 盘点批次汇总模块已下线）
+      'dashboard','query','inventoryAlert','orderCheck','orderTrack','stock','stocktake','stocktakeAssign','stocktakeRecord','orders','inbound','pricing','reconciliation','supplier','lowTurnover','breach','outbound','outboundList',
       // 🟢 v227.39：4 个系统入口（云端/导入/设置/源码）
       'cloud','import','settings','source'
     ]
@@ -451,15 +454,44 @@ window.AppConfig = {
   // 账号上云：复用现有 settings.json（key='keepers'，读-改-写 + 回读），与盘点数据包完全独立
   async syncKeepers() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
-    try { await SyncManager.setSetting('keepers', this.getKeepers()); }
+    // 🟢 v228.55：本机账号列表为空时【绝不上云】——账号真相源在各设备本机，
+    //   若某台设备 localStorage 被清（清浏览器数据/无痕模式/换设备）后任何动作触发
+    //   setKeepers([]) → syncKeepers，空数组会覆盖云端唯一备份 → 所有设备再也拉不回账号
+    //   （真机事故：云端 keepers 键消失，新设备显示"暂无账号"且无法恢复）。
+    const list = this.getKeepers();
+    if (!Array.isArray(list) || !list.length) {
+      console.warn('[keepers] 本机账号列表为空，跳过上云（防止抹掉云端备份）');
+      return;
+    }
+    try { await SyncManager.setSetting('keepers', list); }
     catch (e) { console.warn('[keepers] 上云失败(已忽略):', e && e.message); }
   },
   // 启动连接成功后拉取云端账号并与本地合并（云端独有→加入；禁用态以本地为准）
+  // 🟢 v228.55：返回状态字符串（'ok'|'empty'|'fail'|'offline'）——旧版把失败吞成 undefined，
+  //   权限面板在「云端挂了」时只会静默显示"暂无账号"，管理员无从知道账号其实能从云端恢复。
+  //   返回值不抛异常，fire-and-forget 调用方（sync.js 等）行为不变。
   async pullKeepersFromCloud() {
-    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return 'offline';
     try {
       const cloud = await SyncManager.getSetting('keepers');
-      if (!Array.isArray(cloud) || !cloud.length) return;
+      // 🟢 v228.55：云端无值时区分「真没有」和「连不上」——
+      //   getSettings 本次 list+download 全失败（_lastSettingsReadOk===false）说明云端项目不可达，
+      //   此时读到的空是假象，返回 'fail' 让面板给出恢复指引，而非误导性的"云端也没有账号"。
+      if (!Array.isArray(cloud) || !cloud.length) {
+        const st = (SyncManager._lastSettingsReadOk === false) ? 'fail' : 'empty';
+        // 🟢 v228.56：云端账号真空 + 本机还有账号 → 自动补备份回云端（桶重建后的自愈路径：
+        //   任何一台还有账号的设备联网拉取一次，即把账号推回云端，其他设备随后自动拉回）
+        if (st === 'empty') {
+          try {
+            const localList = this.getKeepers();
+            if (Array.isArray(localList) && localList.length) {
+              await this.syncKeepers();
+              console.log('[keepers] 云端账号为空、本机有 ' + localList.length + ' 个账号 → 已自动补备份到云端');
+            }
+          } catch (e) { /* 补备份失败不阻断 */ }
+        }
+        return st;
+      }
       const local = this.getKeepers();
       const map = {};
       local.forEach(k => { map[k.username] = k; });
@@ -470,7 +502,8 @@ window.AppConfig = {
         // 本地已禁用而云端未禁用：本地优先（管理员刚在本机禁用是最终意图）
       });
       this.setKeepers(Object.values(map));
-    } catch (e) { console.warn('[keepers] 拉取失败(已忽略):', e && e.message); }
+      return 'ok';
+    } catch (e) { console.warn('[keepers] 拉取失败(已忽略):', e && e.message); return 'fail'; }
   },
   // 🟢 v227.39：从云端下发的「共享云配置」（URL + Anon Key）→ 写入 wb_supabase_override → 触发自动连
   //   - 管理员首次配好后，下发到所有 keeper 设备；新设备登录即默认连接

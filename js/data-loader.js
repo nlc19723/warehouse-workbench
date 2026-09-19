@@ -6,6 +6,10 @@
 // 记录本机最后一次与云端对齐的 savedAt（拉取或推送成功时更新）。
 // 推送前比对云端 savedAt：不一致说明云端已被其它设备改动 → 中止，避免静默覆盖。
 const CLOUD_BASE_KEY = 'wb_cloud_base_savedAt';
+// 🟢 v228.66(P2/C-1)：data.json 云端文件的「最后已知 updated_at」存储键。
+//   引导同步前先比对它：云端文件 mtime 没变 → 必定与本地一致 → 跳过 18MB 整包下载。
+//   这样「每次开机都下载一遍工作数据包只为读 savedAt」的无底洞被彻底堵死。
+const CLOUD_DATA_MTIME_KEY = 'wb_cloud_data_mtime';
 
 const DataLoader = {
   // Excel 源文件相对路径（与 config.js 中的 app.dataPath 保持一致，避免两处硬编码不同步）
@@ -19,6 +23,16 @@ const DataLoader = {
   _setCloudBase(v) {
     try { localStorage.setItem(CLOUD_BASE_KEY, v || ''); }
     catch (e) { this._cloudBaseMem = v || ''; }
+  },
+
+  // 🟢 v228.66(P2/C-1)：data.json 云端文件的「最后已知 mtime」读写（localStorage 不可用退化为内存）
+  _cloudDataMtime() {
+    try { return localStorage.getItem(CLOUD_DATA_MTIME_KEY) || null; }
+    catch (e) { return this._cloudDataMtimeMem || null; }
+  },
+  _setCloudDataMtime(v) {
+    try { localStorage.setItem(CLOUD_DATA_MTIME_KEY, v || ''); }
+    catch (e) { this._cloudDataMtimeMem = v || ''; }
   },
 
   // 参与云端同步的数据表（meta 是元数据表，单独处理）
@@ -116,27 +130,80 @@ const DataLoader = {
     const sl = (t, o) => { if (!this._aborted) showLoading(t, o); };
 
     // 1) 本地已有完整数据 → 立即显示（首屏不阻塞），后台静默从云端拉取并按"云端优先覆盖本地"策略同步
+    //
+    // 🟢 v228.62（首屏提速）：先复用/等待在途的后台同步，避免"同一份全量包被还原两遍"。
+    //
+    //   实测缺陷链（冷启动，本地 DB 为空）：
+    //     · app.js 把 autoSyncFromCloud 后台化后，它在 t≈0.4s 开始下载 18.4MB 并还原；
+    //     · _doInit 在 t≈1.9s 读 dataImported —— 此刻后台还原**还没提交事务**（DB 仍为空）
+    //       → isDataImported=false → 走云端兜底分支 → 自己又还原一遍；
+    //     · 结果：一次冷启动还原两份全量包，首屏遮罩挂到 13~20s（多次实测）。
+    //
+    //   ⚠️ v228.62 初版在这里"无条件等后台同步"，实测是错的 —— 见下方 🔴 说明。
+    //
+    //   🔴 v228.63（热刷新白等 16.5 秒的真根因，勿改回无条件等待）：
+    //     实测（本地 DB 已完整的日常刷新，trace_boot2.py round 2）：
+    //       [  81ms] MASK ON  「正在准备数据库...」
+    //       [ 766ms] -> data.json                ← app.js 的后台 autoSyncFromCloud 开始下载 31.7MB
+    //       [2160ms] MASK ON  「正在从云端同步最新数据...」← _doInit 落进「云端兜底」分支
+    //       [16885ms] MASK OFF                    ← 中间 14.7s 零网络请求，纯等待
+    //     而 trace_di.py 已证明：热刷新时 dataImported 在 **t=190ms 就是 true**。
+    //     即"判断"根本没花时间，16.5s 全花在第 133-140 行那个 await 上 —— 后台同步在
+    //     重写 32,342 行（实测约 15~20s），_doInit 老老实实陪它等满。
+    //
+    //   修法：**本地数据完整就不等**。先查本地（毫秒级），
+    //     · 本地已完整 → 立刻 hideLoading 放行首屏，后台同步爱跑多久跑多久（它自己会收尾）；
+    //     · 本地不完整（真空库首启）→ 才等后台同步，避免"后台正在 clear+写、这边读到空表又还原一遍"。
+    //   这样两种场景都不亏：热刷新 16.5s → 亚秒级；冷启动行为与 v228.62 一致。
+    const bootImported = await DataStore.isDataImported();
+    const bootComplete = bootImported ? await this._allCoreTablesPopulated() : false;
+    const wasBgSync = !!this._backgroundSyncPromise;
+    if (wasBgSync && !(bootImported && bootComplete)) {
+      console.log('[同步] 本地数据未就绪且后台全量同步在途，等待其收尾后再判断完整性（避免重复还原同一份数据）');
+      await Promise.race([
+        this._backgroundSyncPromise.catch(() => {}),
+        new Promise(res => setTimeout(res, this._restoreWaitMs))
+      ]);
+    }
     const imported = await DataStore.isDataImported();
     if (imported) {
       const localComplete = await this._allCoreTablesPopulated();
       if (localComplete) {
         console.log('[同步] 本地有完整数据，立即显示；后台静默执行：云端→本地（云端不一致则覆盖本地）');
         hideLoading();
-        this._syncFromCloudInBackground();  // 云端优先覆盖本地，不阻塞首屏
+        // 🟢 v228.62：刚才等的那条后台同步已经把云端最新落地 → 不再重复启动
+        if (!wasBgSync) this._syncFromCloudInBackground();  // 云端优先覆盖本地，不阻塞首屏
         return true;
       }
       console.warn('[data-loader] 本地数据不完整（缺表），放弃本地缓存改从云端/Excel 导入');
     }
 
     // 2) 本地无完整数据：已连接云端则先拉云端工作数据；否则直接 Excel 兜底
+    // 🟢 v228.57：启动时【主动快速探测】云端桶可用性（1.5s 上限，单次轻量 list）。
+    //   旧逻辑依赖 SyncManager.isBucketMissing()，但该标记只有"云端请求已经失败过一次"后才会置位，
+    //   启动时恒为 false → 照样白等 8s 工作数据超时 + 8s 基准超时 = 16s，用户体感"链接打不开"。
+    //   这里开机先探：桶不可用 → 整个云端阶段跳过，直接走本地 Excel 兜底，秒进界面。
+    let _cloudUsable = true;
     if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
+      try {
+        if (typeof SyncManager.probeBucket === 'function') {
+          _cloudUsable = await this._withTimeout(SyncManager.probeBucket(), 1500, '云端桶探测').catch(function () { return false; });
+        }
+        if (!_cloudUsable) {
+          console.warn('[data-loader] 云端桶不可用，跳过整个云端阶段，直接本地兜底（快速启动）');
+          try { SyncManager._bucketMissing = true; } catch (e) {}
+        }
+      } catch (e) { _cloudUsable = true; /* 探测本身异常按可用处理，走原有超时兜底 */ }
+    }
+    if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && _cloudUsable) {
       sl('正在从云端同步数据...', { variant:'capsule' });
       try {
         const bundle = await this._pullWithTimeout(8000);
         // 校验云端 bundle 完整性：9 张核心表必须都存在且有数据（避免残缺 bundle 覆盖本地）
         if (bundle && bundle.tables && this._isBundleComplete(bundle)) {
           sl('正在从云端同步最新数据...', { variant:'capsule' });
-          await this.loadBundleFromCloud(bundle);
+          // 🟢 v228.56：写入阶段加硬超时 —— 底层挂起时 15s 后放行走兜底，绝不让启动屏永久卡死
+          await this._withTimeout(this.loadBundleFromCloud(bundle), 15000, '云端数据写入');
           if (this._aborted) return false;   // 🟢 v228.22：用户已跳过，立即收尾
           const restored = await this._allCoreTablesPopulated();
           hideLoading();
@@ -152,7 +219,10 @@ const DataLoader = {
         console.warn('云端工作数据拉取失败:', e.message || e);
       }
       // 🟢 基准数据自动垫底：工作数据缺失或还原不完整时，用云端 base.json 铺一套系统底账
-      try {
+      // 🟢 v228.56：第一轮拉取已确认桶缺失 → 基准拉取同桶同 404，直接跳过
+      if (typeof SyncManager !== 'undefined' && typeof SyncManager.isBucketMissing === 'function' && SyncManager.isBucketMissing()) {
+        console.warn('[data-loader] 云端存储桶缺失，跳过云端基准拉取，直接本地兜底');
+      } else try {
         const baseBundle = await this._pullBaseWithTimeout(8000);
         if (baseBundle && baseBundle.tables && this._isBundleComplete(baseBundle)) {
           await DataStore.clearWorkTables();   // 🔵 v227.97：仅清工作表，保留设置包(outbound)数据
@@ -236,6 +306,21 @@ const DataLoader = {
       console.log('[同步] 未连接云端，跳过后台同步');
       return;
     }
+    // 🟢 v228.56：桶缺失 → 云端必 404，跳过后台同步
+    if (typeof SyncManager.isBucketMissing === 'function' && SyncManager.isBucketMissing()) {
+      console.log('[同步] 云端存储桶缺失，跳过后台同步');
+      return;
+    }
+    // 🟢 v228.57：后台同步前主动探测桶（后台执行、不阻塞首屏；不可用则不发 21 个必失败的请求）
+    try {
+      if (typeof SyncManager.probeBucket === 'function') {
+        const ok = await this._withTimeout(SyncManager.probeBucket(), 3000, '云端桶探测').catch(function () { return false; });
+        if (!ok) {
+          console.log('[同步] 云端桶不可用，跳过后台同步');
+          return;
+        }
+      }
+    } catch (e) { /* 探测异常按可用处理 */ }
 
     // 显示同步中状态
     const stEl = document.getElementById('syncStatusText');
@@ -244,17 +329,48 @@ const DataLoader = {
     if (scEl) { scEl.classList.remove('online'); scEl.style.background = 'linear-gradient(135deg,rgba(2,132,199,0.12),rgba(14,165,233,0.08))'; }
 
     try {
+      // 🟢 v228.66(P2/C-1)：引导同步前先「廉价探版本」——查 data.json 的云端 mtime，
+      //   与本地上次记录的 mtime 比对。两者相等 ⇒ 云端工作包必然与本地一致（mtime 与 savedAt 同源变化），
+      //   直接跳过 18MB 整包下载（原本只是为读一个 savedAt）。仅当 mtime 变化 / 无基准时才真正下整包。
+      //   这是开机流量的最大头（每次开应用白下 18MB），跳过它单机开机流量从 18MB 降到一次 list（<1KB）。
+      const dataMeta = (typeof SyncManager !== 'undefined' && SyncManager.getObjectMeta)
+        ? await SyncManager.getObjectMeta(SyncManager.FILE).catch(() => null) : null;
+      const lastMtime = this._cloudDataMtime();
+      if (dataMeta && dataMeta.updated_at && lastMtime && dataMeta.updated_at === lastMtime && this._cloudBase()) {
+        console.log('[同步] data.json 云端未变更（mtime=' + dataMeta.updated_at + '），跳过 18MB 整包下载（省流量）');
+        if (typeof SyncManager !== 'undefined') SyncManager.updateUI();
+        return;
+      }
       const bundle = await this._pullWithTimeout(8000);
       // 仅处理云端 bundle 完整的情况；残缺/缺失直接跳过（绝不用残缺数据覆盖本地）
       if (bundle && bundle.tables && bundle.savedAt && this._isBundleComplete(bundle)) {
-        const localTime = await DataStore.getImportTime();
-        // 云端优先：云端与本地不一致（云端更新或本地无时间戳）→ 用云端覆盖本地
-        const cloudNewerOrLocalUnknown = !localTime || bundle.savedAt !== localTime;
+        // 🔴 v228.62（真机实测：每次刷新白等 16 秒的根因，勿改回）：
+        //   旧版此处拿 **bundle.savedAt** 去比 **DataStore.getImportTime()** —— 两者语义完全不同：
+        //     · savedAt    = 云端工作包的版本戳（pushAllToCloud 时写入）
+        //     · importTime = 本地「导入完成」时间（markDataImported 时写入）
+        //   实测值：savedAt=2026-09-18T05:49:00.657Z，importTime=2026-09-18T11:50:59.857Z
+        //   → 恒不相等 → cloudNewerOrLocalUnknown 恒为 true → **每次刷新都全量还原 32k 行**，
+        //     而全量还原实测约 16~23s，用户每次刷新都白等（这正是"同步速度慢"的体感来源）。
+        //
+        //   正确的"是否需要覆盖"判据是 **_cloudBase()**（本机最后一次与云端对齐的 savedAt），
+        //   它才是与 bundle.savedAt 同源的量。autoSyncFromCloud 一直用的是正确的基准，
+        //   本函数是漏改的那一处。
+        //   语义保持：localTime 为空（本机从未导入）仍视为需要覆盖。
+        const base = this._cloudBase();
+        const cloudNewerOrLocalUnknown = !base || bundle.savedAt !== base;
         if (cloudNewerOrLocalUnknown) {
-          console.log('[同步] 云端与本地不一致（云端 savedAt=' + bundle.savedAt + ', 本地=' + localTime + '），执行云端→本地覆盖');
+          console.log('[同步] 云端与本机基准不一致（云端 savedAt=' + bundle.savedAt + ', 本机基准=' + (base || '无') + '），执行云端→本地覆盖');
           if (stEl) stEl.textContent = '云端更新中…';
-          await this.loadBundleFromCloud(bundle);
+          // 🟢 v228.62：走 _loadBundleOnce 单飞入口 —— 与启动链路的还原互斥，杜绝两份并发还原
+          await this._withTimeout(this._loadBundleOnce(bundle), 15000, '云端数据写入');   // 🟢 v228.56 硬超时
           console.log('[同步] 云端数据已覆盖本地');
+          // 🟢 v228.66(P2/C-1)：记下云端 data.json 的 mtime，下次开机据此跳过整包下载
+          if (dataMeta && dataMeta.updated_at) this._setCloudDataMtime(dataMeta.updated_at);
+          // 🟢 v228.61（P1-C 启动解耦）：后台覆盖完成后，主动把跨端共享状态（批次锚点/轮次/
+          //   结束闸门/概览/任务）拉一次，否则盘点模块要等下一次 3s 轮询才会看到云端真实态
+          //   —— 用户体感就是「刚打开页面，批次/轮次显示的还是旧的，过几秒才自己跳过来」。
+          //   放在重渲之前执行，让重渲拿到的是已经收敛过的状态。
+          await this._refreshStocktakeAfterBackgroundSync();
           // 仅当没有打开的弹窗/侧边面板时才重渲染当前模块，避免打断用户操作
           const modalOpen = document.getElementById('modalOverlay') && document.getElementById('modalOverlay').classList.contains('show');
           const panelOpen = document.getElementById('panelOverlay') && document.getElementById('panelOverlay').classList.contains('show');
@@ -264,7 +380,9 @@ const DataLoader = {
             console.log('[同步] 后台覆盖完成，但检测到有打开的弹窗/面板，跳过重渲染');
           }
         } else {
-          console.log('[同步] 云端与本地一致，无需覆盖（本地=' + localTime + '）');
+          console.log('[同步] 云端与本机基准一致，无需覆盖（基准=' + base + '）');
+          // 🟢 v228.66(P2/C-1)：一致也记下 mtime（此时 dataMeta.updated_at 必等于已存值，幂等）
+          if (dataMeta && dataMeta.updated_at) this._setCloudDataMtime(dataMeta.updated_at);
         }
       } else {
         console.log('[同步] 云端数据不可用（缺失/不完整/超时），保持本地数据');
@@ -277,6 +395,37 @@ const DataLoader = {
     if (scEl) scEl.style.background = '';
   },
 
+  /**
+   * 🟢 v228.61（P1-C 启动解耦）：后台同步完成后，主动收敛盘点模块的跨端共享状态。
+   *
+   *   缺口（改造前）：_syncFromCloudInBackground 覆盖完本地数据后只做 App.go(当前模块) 重渲，
+   *   但盘点模块的「批次锚点 / 轮次号 / 结束闸门 / 概览 / 任务」是独立于工作包的 settings 通道，
+   *   没被拉过 —— 于是重渲出来的仍是启动那一刻的旧状态，要等下一次 3s 轮询才自己纠正。
+   *   用户体感：「刚打开页面，批次/轮次还是上一批的，过几秒才跳过来」。
+   *
+   *   本方法复用盘点模块既有的拉取方法（不另造逻辑），逐项容错：
+   *   任何一项失败都不影响其他项，也不影响主流程（后台任务不应把异常抛给启动链路）。
+   */
+  async _refreshStocktakeAfterBackgroundSync() {
+    try {
+      if (typeof StocktakeModule === 'undefined') return false;
+      const M = StocktakeModule;
+      // ① 任务：分派/认领/放弃的状态变化
+      try { if (typeof DataStore !== 'undefined' && DataStore.pullStocktakeTasksFromCloud) await DataStore.pullStocktakeTasksFromCloud(); } catch (e) { /* 容错 */ }
+      // ② 跨端共享状态：批次锚点 / 轮次号 / 结束闸门 / 轮次命名 / 批次号映射
+      try { if (M._pullBatchCommonState) await M._pullBatchCommonState(); } catch (e) { /* 容错 */ }
+      // ③ 概览（管理员视图里的盘点人进度数字）
+      try { if (M._pullQuarterOverviews) await M._pullQuarterOverviews(); } catch (e) { /* 容错 */ }
+      // ④ 结束闸门 / 轮次号 / 轮次命名的兜底补齐
+      try { if (M._pullRoundClosed) await M._pullRoundClosed(); } catch (e) { /* 容错 */ }
+      console.log('[同步] 后台同步完成：已主动收敛盘点跨端状态');
+      return true;
+    } catch (e) {
+      console.warn('[同步] 盘点状态收敛异常(已忽略):', e && e.message);
+      return false;
+    }
+  },
+
   // 带超时的云端拉取（防止网络请求卡死整个初始化）
   _pullWithTimeout(ms) {
     return new Promise((resolve, reject) => {
@@ -284,7 +433,10 @@ const DataLoader = {
         console.warn('云端拉取超时(' + ms + 'ms)，回退本地');
         resolve(null); // 超时返回 null，走本地回退
       }, ms);
-      SyncManager.pullData().then(result => {
+      // 🟢 v228.62：改走带单飞+短缓存的拉取 —— 与后台 autoSyncFromCloud 共用同一份结果，
+      //   避免「一次启动下载两份全量 data.json」（实测：t=457ms 私有通道一份，t=21586ms 公开 URL 又一份 31.7MB）。
+      //   契约不变：超时 resolve(null)、异常 reject，调用方的分支逻辑无需改动。
+      DataLoader._pullDataPrivateCached().then(result => {
         clearTimeout(timer);
         resolve(result);
       }).catch(err => {
@@ -443,6 +595,13 @@ const DataLoader = {
       }
       if (ok) {
         this._setCloudBase(bundle.savedAt);   // 推送成功 → 基准推进到本次
+        // 🟢 v228.66(P2/C-1)：记下推送后 data.json 的新 mtime，使下次开机据此跳过整包下载
+        //   （本地已含本次推送内容，无需再下 18MB）。getObjectMeta 失败不影响推送结果。
+        try {
+          const m = (typeof SyncManager !== 'undefined' && SyncManager.getObjectMeta)
+            ? await SyncManager.getObjectMeta(SyncManager.FILE).catch(() => null) : null;
+          if (m && m.updated_at) this._setCloudDataMtime(m.updated_at);
+        } catch (e) { /* 忽略 */ }
         console.log('已推送到云端（双版本滚动已生效）');
         return ok;
       }
@@ -673,7 +832,8 @@ const DataLoader = {
       // 🟢 AUDIT-308：大文件解析移至 Web Worker，避免主线程阻塞（不支持 Worker 时回退同步解析）
       workbook = await this._parseWorkbookAsync(arrayBuffer);
     } catch (err) {
-      throw new Error('文件解析失败，请确认是有效的 .xlsx / .xls 文件');
+      // 🟢 v228.53：不再吞掉底层错误 —— 按文件魔数精确诊断（CSV 改名 / HTML 伪装 / 加密 OLE / 损坏）
+      throw new Error(this._explainParseError(arrayBuffer, err));
     }
     // 🟢 v228.08：XLSX 已改为按需加载。Worker 解析不会把 XLSX 暴露给主线程，
     //   而下方 _estimateRowCount / parseSheet / loadBreach 等会同步调用 XLSX.utils.*，
@@ -776,15 +936,18 @@ const DataLoader = {
     // 解析 XLSX 组件地址（与 LazyLib 中 lib/xlsx.full.min.js 同源），供 Worker importScripts
     const xlsxUrl = new URL('lib/xlsx.full.min.js', location.href).href;
     return new Promise((resolve, reject) => {
+      // 🟢 v228.53：主线程兜底提取为独立函数 —— Worker「加载失败」≠「文件有问题」，
+      //   旧版 onerror 直接报「文件解析失败」会把可导入的文件误判为坏文件。
+      const mainThreadFallback = () => LazyLib.xlsx().then(function (X) {
+        try { resolve(X.read(arrayBuffer, { type: 'array', cellDates: true })); }
+        catch (err) { reject(err); }
+      }).catch(reject);
       let worker;
       try {
         worker = new Worker('js/import-worker.js');
       } catch (e) {
         // Worker 不可用 → 主线程兜底：加载 XLSX 后解析，行为不变
-        LazyLib.xlsx().then(function (X) {
-          try { resolve(X.read(arrayBuffer, { type: 'array', cellDates: true })); }
-          catch (err) { reject(err); }
-        }).catch(reject);
+        mainThreadFallback();
         return;
       }
       let settled = false;
@@ -797,11 +960,58 @@ const DataLoader = {
       worker.onmessage = (e) => {
         const d = e.data || {};
         if (d.type === 'result') finish(() => resolve(d.workbook));
-        else if (d.type === 'error') finish(() => reject(new Error('文件解析失败，请确认是有效的 .xlsx / .xls 文件')));
+        // 🟢 v228.53：透传 Worker 内真实错误（如「File is password-protected」「CPK 头损坏」），
+        //   不再替换成通用文案 —— 否则用户与排障者都无法区分「文件坏」还是「程序坏」。
+        else if (d.type === 'error') finish(() => reject(new Error(d.error || 'XLSX 解析失败')));
       };
-      worker.onerror = () => finish(() => reject(new Error('文件解析失败，请确认是有效的 .xlsx / .xls 文件')));
+      // Worker 脚本加载/运行崩溃（404、SW 缓存坏、importScripts 失败等）→ 回退主线程解析，而非误报文件坏
+      worker.onerror = (ev) => finish(() => {
+        console.warn('[data-loader] Worker 解析崩溃，回退主线程解析:', ev && (ev.message || ev.type));
+        mainThreadFallback();
+      });
       worker.postMessage({ type: 'parse', arrayBuffer: arrayBuffer, xlsxUrl: xlsxUrl });
     });
+  },
+
+  /**
+   * 🟢 v228.53：解析失败的精确诊断 —— 读文件头魔数区分「文件本身不是真 Excel」的常见情形。
+   *   背景：真机反馈「无法导入 excel 表」，但实测导入链路对合法 xlsx 完全正常；
+   *   多数此类问题是伪 xlsx（CSV/网页表格改名、文件加密、下载不完整），
+   *   旧版统一报「请确认是有效的 .xlsx/.xls 文件」让用户无从下手。
+   *   魔数：PK\x03\x04=真xlsx(zip)；D0CF11E0=OLE2(老.xls 或加密文档)；文本=CSV/HTML 改名。
+   */
+  _explainParseError(arrayBuffer, err) {
+    const detail = (err && err.message) ? String(err.message) : String(err || '');
+    const tail = detail ? ('（底层信息：' + detail + '）') : '';
+    try {
+      const u8 = new Uint8Array(arrayBuffer || new ArrayBuffer(0));
+      const head = Array.from(u8.slice(0, 512));
+      const isZip = head.length > 4 && head[0] === 0x50 && head[1] === 0x4B && (head[2] === 3 || head[2] === 5 || head[2] === 7);
+      const isOle = head.length > 4 && head[0] === 0xD0 && head[1] === 0xCF && head[2] === 0x11 && head[3] === 0xE0;
+      let textHead = '';
+      try { textHead = new TextDecoder('utf-8', { fatal: false }).decode(u8.slice(0, 512)); } catch (e) { /* 二进制 */ }
+      const lower = (textHead || '').toLowerCase();
+      const binaryLike = head.some(b => b === 0);
+      if (!isZip && !isOle && textHead && !binaryLike &&
+          (lower.includes('<html') || lower.includes('<table') || lower.includes('<!doctype') || lower.includes('<?xml'))) {
+        return '文件解析失败：这个文件其实是「网页/HTML 表格」改名的 .xls/.xlsx（常见于网页系统右键导出）。' +
+               '请用 Excel/WPS 打开它，另存为「Excel 工作簿 (*.xlsx)」后再导入。';
+      }
+      if (!isZip && !isOle && textHead && !binaryLike) {
+        return '文件解析失败：这个文件其实是 CSV/纯文本，只是扩展名改成了 .xlsx，Excel 并不认。' +
+               '请用 Excel/WPS 打开后「文件 → 另存为 → Excel 工作簿 (*.xlsx)」再导入。';
+      }
+      if (isOle) {
+        if (/password|encrypt|cipher|加密/i.test(detail)) {
+          return '文件解析失败：该 Excel 已被密码加密。请先在 Excel 中解除密码（另存为不带密码的 .xlsx）后再导入。';
+        }
+        return '文件解析失败：这是老版 .xls（OLE2）或加密文档，解析组件读不出来。请用 Excel 打开确认能正常显示后，另存为 .xlsx 再导入。' + tail;
+      }
+      if (isZip) {
+        return '文件解析失败：文件结构损坏，不是完整的 Excel 工作簿（可能是下载/传输不完整）。请重新导出或另存为新的 .xlsx。' + tail;
+      }
+    } catch (e) { /* 嗅探失败走通用文案 */ }
+    return '文件解析失败，请确认是有效的 .xlsx / .xls 文件。' + tail;
   },
 
   // 数据导入：支持上传 .xlsx / .xls 文件，或从云端重新导入基准数据
@@ -923,10 +1133,120 @@ const DataLoader = {
   // 🟢 v227.96：进入工作台「静默自动同步」——等价于「云端恢复（最新）」但不弹危险确认框。
   // 仅当云端工作包比本机上次同步基线（_cloudBase）更新时才覆盖本地，避免误清本地未上传的改动。
   // 满足"每次进入即拉取最新云端工作数据"的预期；GitHub 等全新设备（无基线）首次进入即自动拉满。
+  /**
+   * 🟢 v227.96：进入即静默自动同步（时间戳门控，不弹确认）。
+   *
+   *   🔴 v228.62（启动提速，实测驱动）：
+   *   本方法是**后台静默**语义，调用方（app.js）已改为不 await（见 app.js 注释：
+   *   旧版 await 它导致启动白等 19.2s，其中 17.9s 是 loadBundleFromCloud 的 IndexedDB 还原）。
+   *   后台化后它与紧随其后的 DataLoader.init() 会**并发**，两边都要同一份全量 data.json →
+   *   实测出现两次下载（一次 SDK 私有、一次公开 URL，后者 31.7MB）。
+   *
+   *   这里加**单飞 + 结果缓存**：同一时刻只有一个全量拉取在飞；拉回来的 bundle 缓存 20s，
+   *   供 DataLoader._doInit 复用（它自己也有 8s 超时兜底，拿不到就照旧自己拉，行为不变）。
+   *   净效果：一次启动只下载一份 data.json，而不是两份。
+   */
+  _bundleFlight: null,      // 在途的 pullDataPrivate Promise（单飞）
+  _bundleCache: null,       // { bundle, at } 最近一次成功拉取的全量包
+  _BUNDLE_CACHE_MS: 20000,  // 缓存有效期：覆盖启动窗口即可，不长期持有大对象
+
+  /** 🟢 v228.62：带单飞 + 短缓存的私有全量拉取（供 autoSyncFromCloud 与 _doInit 共用） */
+  async _pullDataPrivateCached() {
+    const now = Date.now();
+    if (this._bundleCache && (now - this._bundleCache.at) < this._BUNDLE_CACHE_MS) {
+      return this._bundleCache.bundle;
+    }
+    if (this._bundleFlight) {
+      try { return await this._bundleFlight; } catch (e) { return null; }
+    }
+    const run = (async () => {
+      try {
+        const b = await SyncManager.pullDataPrivate();
+        if (b) this._bundleCache = { bundle: b, at: Date.now() };
+        return b;
+      } catch (e) { return null; }
+    })();
+    this._bundleFlight = run.finally(() => { this._bundleFlight = null; });
+    return this._bundleFlight;
+  },
+
+  /**
+   * 🟢 v228.62：等待在途的全量还原结束（通用工具，当前 _doInit 未使用）。
+   *
+   *   🔴 实测背景（保留供排障）：
+   *     启动初期有两条链同时想还原同一份 18.4MB 数据 ——
+   *     ① app.js 的 autoSyncFromCloud（后台）；② DataLoader._doInit（启动主链）。
+   *     两份并发还原会把启动拖到 20s+。现由 _loadBundleOnce（幂等单飞）+
+   *     _backgroundSyncPromise（后台同步整体单飞）双重收口，已实测降为 1 次还原。
+   *
+   *   ⚠️ 注意：_doInit **不应**等这个方法 —— 全量还原本身约 18s，
+   *     等它等于把首屏阻塞装回来（实测 _doInit 会变成 19.4s）。
+   *     首屏正确做法是"本地已完整就用本地，后台继续同步"，见 _doInit 注释。
+   */
+  _restoringPromise: null,   // 🟢 v228.62：在途的全量还原 Promise
+  _restoreWaitMs: 25000,     // 等待上限：还原本身约 15~20s，略留余量
+
+  async _waitForInflightRestore() {
+    if (!this._restoringPromise) return false;
+    try {
+      await Promise.race([
+        this._restoringPromise,
+        new Promise(res => setTimeout(res, this._restoreWaitMs))
+      ]);
+      return true;
+    } catch (e) { return false; }
+  },
+  // 注：_doInit 现改为等待 _backgroundSyncPromise（后台同步整体链），本方法保留作通用工具备用。
+
+  /**
+   * 🟢 v228.62：全量还原统一入口 —— 单飞 + 幂等。
+   *
+   *   两条调用链会在启动初期同时想还原同一份数据：
+   *     ① app.js 的 autoSyncFromCloud（后台）；
+   *     ② DataLoader._doInit（启动主链）。
+   *   仅靠"在途就 await"不够：二者可能**几乎同时**进入（实测 t=4435ms 与 t=4437ms 各调一次
+   *   loadBundleFromCloud），此时谁都还没把 _restoringPromise 建起来 → 单飞失效 → 还原两遍。
+   *
+   *   故补「已还原过就不重复」：用 savedAt 作为这份 bundle 的身份，同一份还原成功一次即记账，
+   *   后续对同一 savedAt 的还原请求直接返回 true（数据已经在库里了，语义等价）。
+   *   不同 savedAt（真有新版本）仍会正常还原。
+   */
+  _restoredSavedAt: null,
+  async _loadBundleOnce(bundle) {
+    if (!bundle) return false;
+    const id = bundle.savedAt || '(no-savedAt)';
+    if (this._restoredSavedAt === id) return true;      // 同一份已还原过 → 幂等返回
+    if (this._restoringPromise) {
+      try { await this._restoringPromise; } catch (e) { /* 前一次失败则继续走本次 */ }
+      if (this._restoredSavedAt === id) return true;    // 等待期间别人已还原同一份 → 复用
+    }
+    const run = (async () => {
+      const ok = await this.loadBundleFromCloud(bundle);
+      if (ok) this._restoredSavedAt = id;
+      return ok;
+    })();
+    this._restoringPromise = run.finally(() => { this._restoringPromise = null; });
+    return this._restoringPromise;
+  },
+
   async autoSyncFromCloud() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+    // 🟢 v228.62：整体单飞 —— 启动链路（app.js）与 _doInit 都可能触发，只允许一条链在跑。
+    //   同时把 Promise 暴露到 _backgroundSyncPromise，供 _doInit 等待收尾，
+    //   避免"后台正在 clear+写库、_doInit 读到空表 → 误判不完整 → 又还原一遍"。
+    if (this._backgroundSyncPromise) {
+      try { return await this._backgroundSyncPromise; } catch (e) { return false; }
+    }
+    const run = this._autoSyncFromCloudInner();
+    this._backgroundSyncPromise = run.finally(() => { this._backgroundSyncPromise = null; });
+    return this._backgroundSyncPromise;
+  },
+  _backgroundSyncPromise: null,   // 🟢 v228.62：后台全量同步（下载→判断→还原）整体链的单飞 Promise
+
+  async _autoSyncFromCloudInner() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     try {
-      const bundle = await SyncManager.pullDataPrivate();
+      const bundle = await this._pullDataPrivateCached();   // 🟢 v228.62：走单飞+缓存，避免与 _doInit 各拉一份
       if (!bundle || !bundle.tables || !this._isBundleComplete(bundle)) return false;
       const cloudTs = bundle.savedAt || null;
       const base = this._cloudBase();
@@ -938,7 +1258,7 @@ const DataLoader = {
         const localCnt = await db.suppliers.count().catch(() => 0);
         if (localCnt > 0) return false;
       }
-      await this.loadBundleFromCloud(bundle); // 事务内清空+还原，静默无确认（内部已推进 _cloudBase）
+      await this._loadBundleOnce(bundle); // 🟢 v228.62：单飞入口；事务内清空+还原，静默无确认（内部已推进 _cloudBase）
       console.log('[autoSync] 已从云端自动同步最新工作数据（savedAt=' + cloudTs + '）');
       return true;
     } catch (e) {

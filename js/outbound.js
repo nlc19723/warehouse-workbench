@@ -1150,7 +1150,7 @@ const OutboundListModule = {
     const area = document.getElementById('oblTableArea');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📤</div><div class="empty-text">暂无出库记录</div></div>';
-      document.getElementById('oblPagination').innerHTML = '';
+      TableUtils.setHtml('oblPagination', '');
       return;
     }
 

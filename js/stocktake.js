@@ -24,12 +24,50 @@ const StocktakeModule = {
   // 🟢 v227.5：本次盘点概览 —— 每人每次季度盘点一条。结构 { counter, batchNo, sheetId, sd, ed,
   //   totalCount, realCount, zeroCount, unfilledCount, completionRate, status, finishedAt, noStart, noEnd, updatedAt }
   OVERVIEW_KEY: 'wb_stocktake_overview',
+  // 🟢 v228.52：清场「全局 reset 纪元」—— 任一端点清场写云端此键（时间戳）；
+  //   所有端的轮询检测到纪元比本端已应用的新，就自动把本端同步元数据清回干净起点，
+  //   使"清一次 = 两端同时收敛"，根治旧清场"只清本端、另一端继续回推分歧态（清了白清）"。
+  QUARTER_RESET_EPOCH_KEY: 'wb_stocktake_reset_epoch',
+  QUARTER_RESET_SEEN_KEY: 'wb_stocktake_reset_epoch_seen',
   // 🟢 v227.5：本批次（季度盘点 round）结束标记 —— 一旦置为 'closed'，概览视图隐藏。
   //   key = batchNo；value = { closedBy, closedAt }
   ROUND_CLOSED_KEY: 'wb_stocktake_round_closed',
+  // 🟢 v228.33：记住「上次季度批次」区间，重进工作台时优先落回它（显示「已结束」），
+  //   而不是每次都从「当天」空批次开始被误显示成「第 1 轮 · 进行中」。
+  //   value = { sd, ed, ts }。sheetId 仅含 MM-DD（slice(5) 丢了年），故必须存全量 sd/ed。
+  LAST_QUARTER_SHEET_KEY: 'wb_stocktake_last_quarter_sheet',
   // 🟢 v227.12：季度盘点「轮次」计数器 —— 同一批次可开多轮（首轮盘点后管理员开下一轮复核）。
   //   key = sheetId；value = 当前轮次号（默认 1）。结束本轮只关当前轮闸门，开下一轮 +1 并解闸。
   ROUND_NO_KEY: 'wb_stocktake_round_no',
+  // 🟢 v228.37：季度盘点「轮次命名」—— 开下一轮时由管理员命名（如「2026年第3季度」）。
+  //   结构 { [sheetId]: { round, label, namedAt } }。仅展示层别名：基线/概览/闸门/归档
+  //   仍以数字轮次号关联，命名不参与任何 key 计算；round 不匹配（已开更新轮次）自动回退
+  //   「第 N 轮」。云端合并写，多设备共享命名。
+  ROUND_LABEL_KEY: 'wb_stocktake_round_label',
+  // 🟢 v228.32：季度盘点「基线快照」—— 本轮分派序号的唯一锚点。
+  //   结构 { [roundKey]: { key, sheetId, round, codes[], zeroCodes[], createdAt } }
+  //   roundKey = sheetId + '#r' + roundNo（开下一轮自动换新快照）。
+  //   生成规则：开局对 stock 去重聚合，剔除「任一行现存数量都不是有效非零数」的编码，
+  //   剩余编码升序连续重排 1..N；一经写入不再重算 —— 库存后续怎么变都不动序号。
+  BASELINE_KEY: 'wb_stocktake_quarter_baseline',
+  // 🟢 v228.40（一-1/一-2）：「批次号映射」的云端共享副本。
+  //   历史实现 no_map 只存本机 localStorage，完全没有云端同步 —— 这是跨端不一致的核心根因之一：
+  //   移动端与 PC 端各自在本机生成批次号（jd20260916-2 vs jd20260916）与批次归属，
+  //   谁也看不见对方，于是同一账户两端「批次号不同、任务行不同、进度不同」。
+  //   结构 { [sheetId]: { no, type, finished, date, updatedAt } }，逐键取「updatedAt 较新者」合并。
+  NO_MAP_KEY: 'wb_stocktake_no_map',
+  // 🟢 v228.48：当前季度**批次身份**的跨端共享锚点。
+  //
+  //   语义纠正：季度盘点 = 对「现存量快照」做一次多人分片盘点，**不存在日期区间概念**。
+  //   旧版（v228.45）把这个键当"区间协商器"，试图让两端协商同一个 sd/ed —— 方向就错了：
+  //   只要批次身份还是日期推导值，两端就永远有"各自推导"的路径；补丁越多，覆盖竞争越多。
+  //
+  //   本版改为：**sheetId = 开盘时间戳**，在此键上持有唯一权威身份。
+  //     · 开盘端生成一次，此后永不变；
+  //     · 另一端只读不生成 → 两端必然读到同一个 sheetId（时钟不同步也无影响）；
+  //     · sd/ed 降级为显示字段（最近 30 天），不参与任何一致性判定。
+  //   结构 { sheetId, openedAt, sd, ed, updatedAt }
+  ACTIVE_QUARTER_KEY: 'wb_stocktake_active_quarter',
 
   sheet: null,      // { sheetId, batchNo, sheetType:'daily'|'quarter', startDate, endDate }
   allRows: [],      // 本次应盘全集（按存货编码升序，序号稳定）
@@ -57,18 +95,24 @@ const StocktakeModule = {
     this._pullQuarterOverviews();
     this._pullRoundClosed();
 
+    // 🟢 v228.64（P0-2 修复同步黑洞）：常驻守护提前到「进入模块」即启动。
+    //   旧版 _startGlobalSync() 全库唯一启动点在 startQuarter() 末尾（用户点了「🗓️ 季度盘点」之后），
+    //   于是「停在本模块但没进季度选择器」时同步完全停摆：实测 App.go('stocktake') 后
+    //   _globalSyncTimer=false、7 秒内 0 次网络请求。修复只需在此补一次幂等启动
+    //   （_startGlobalSync 自带单例保护，重复调用安全），代价是首次进入多一次 _pollOnce。
+    if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) this._startGlobalSync();
+
     // 🟢 v227.5+：注册 BroadcastChannel + storage 事件「实时同步」通道
     //   即使其它标签/窗口没有打开 picker，也能立即感知到概览更新
     this._ensureOverviewChannel();
 
-    if (!this.query.startDate || !this.query.endDate) {
-      const today = new Date();
-      const pad = n => String(n).padStart(2, '0');
-      const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-      // 🟢 v228.03：开始日期默认【当日】（原为「当日-29天」的近30天区间，与界面直觉不符）
-      this.query.startDate = ymd(today);
-      this.query.endDate = ymd(today);
-    }
+    // 🟢 v228.47（方案 2 根因修复）：这里**不再**无条件把 query 填成【本机当天】。
+    //   旧实现（v228.03~v228.46）在此处落下的当天值，会把下游 _pullBatchCommonState 的
+    //   `hasExplicitRange` 判定"喂"成 true，使云端批次锚点被整段跳过（机制详见
+    //   _resolveActiveQuarterRange 的注释）。改为交给统一解析器：
+    //   「最近有活动且未结束」的批次优先，全无历史才落到本机当天。
+    //   注意：这里只做「空缺填充」，续盘/用户选定/其它入口已写入的区间不受影响。
+    this._ensureDefaultRange();
 
     // 🟢 v227.3：识别「从其他模块切回盘点模块」—— 不再弹"新分配任务"/"未结束盘点"，
     //   避免反复进/出模块被连续弹窗骚扰。仅在「真首次进入盘点模块」时弹。
@@ -101,6 +145,11 @@ const StocktakeModule = {
       return;
     }
     content.innerHTML = this._rootHtml();
+    // 🟢 v228.47：contentArea 重建后 stArea 是**新节点**，此前打的视图标记（data-st-view）随之丢失，
+    //   而 _refreshQuarterPickerIfShown / _refreshQuarterPickerLight 的守卫正是读这个属性 ——
+    //   标记一丢，后续 3s 轮询的轻量重渲全部静默失效（界面停止跟随云端，用户以为"不同步了"）。
+    //   这里按内存中的视图状态补回标记：有盘点现场 → 'sheet'，否则回到季度选择器语义。
+    this._setStocktakeView(this.sheet && this.sheet.sheetType === 'quarter' ? 'sheet' : 'quarter-picker');
 
     // 🟢 v225.2 / v227.35：进入模块后再后台同步「他人分派给我的任务」（云端 settings 通道）。
     //   带超时、不阻塞首屏；同步完成后刷新任务栏（反映管理员分派给我的任务）。
@@ -141,9 +190,23 @@ const StocktakeModule = {
       if (!s || !s.sheetType) return '';
       const typeCn = s.sheetType === 'daily' ? '日常' : '季度';
       const no = s.batchNo || s.sheetId || '';
+      // 🟢 v228.35（P2）：横幅带出进度与上次暂存时间。
+      //   旧版只播报「你有 1 次未结束的盘点」，用户没有判断依据，容易误点「放弃」把工作丢掉。
+      //   这里读一次草稿统计已填条数（同步、纯本地，无网络开销），把"盘了多少"说到字面上。
+      let prog = '';
+      try {
+        const counter = String((s && s.counter) || '').trim();
+        const d = this.loadDraft(counter, s.sheetId);
+        const n = Object.keys((d && d.qty) || {}).length;
+        const at = this._draftSavedAt(d);
+        const hhmm = at && at.length >= 16 ? at.slice(11, 16) : '';
+        if (n > 0) prog += ` 已暂存 <b>${n}</b> 条`;
+        if (hhmm) prog += (prog ? ' · ' : ' ') + `上次暂存 ${hhmm}`;
+      } catch (e) { /* 忽略：进度拿不到就只显示基本提示 */ }
       return `<div class="st-unfinished-banner" role="alert">
         <span class="st-ub-icon">⏸️</span>
-        <span class="st-ub-text">你有 1 次<b>未结束</b>的${typeCn}盘点（盘点号 <b>${esc(no)}</b>）。<b>未点【盘点结束】不算完成</b>，不会写入盘点记录、也不会同步云端。</span>
+        <span class="st-ub-text">你有 1 次<b>未结束</b>的${typeCn}盘点（盘点号 <b>${esc(no)}</b>）。${prog}<br>
+          <span style="font-size:12px;opacity:.85;">数据仍在，点「继续盘点」即可接着盘；<b>未点【结束本次盘点】不算完成</b>，不会写入盘点记录、也不会同步云端。</span></span>
         <span class="st-ub-actions">
           <button class="btn--primary" onclick="StocktakeModule.resumeOpenSession()">▶ 继续盘点</button>
           <button class="danger-3d" onclick="StocktakeModule.dismissOpenSession()">放弃本次</button>
@@ -175,13 +238,30 @@ const StocktakeModule = {
     try { document.querySelectorAll('.st-unfinished-banner').forEach(el => el.remove()); } catch (e) { /* 忽略 */ }
   },
 
+  /**
+   * 🟢 v228.36：记录「#stArea 当前处于哪种视图」。
+   *   背景：轻量重渲的守卫原先靠正则匹配页面文案，而所匹配的那句话全库从未渲染，
+   *   守卫恒为 false → 轻量重渲从未生效 → 点「开下一轮」后界面不更新（线上反馈根因）。
+   *   改为结构标记后，文案改动不再影响刷新链路；清除由本方法统一负责，
+   *   避免每个 innerHTML 重写点各写一遍而漏掉。
+   *   取值：'quarter-picker' | 'daily-picker' | 'sheet' | ''（空态/其他）
+   */
+  _setStocktakeView(view) {
+    try {
+      const area = document.getElementById('stArea');
+      if (!area) return;
+      if (view) area.setAttribute('data-st-view', view);
+      else area.removeAttribute('data-st-view');
+    } catch (e) { /* 忽略：标记只服务于重渲优化，失败不影响功能 */ }
+  },
+
   async loadData(token) {
     if (token !== undefined && token !== App._goToken) return;
     const area = document.getElementById('stArea');
     if (!area) return;
     // 已有盘点数据则渲染表格（切换模块回来时保留现场），否则空态
     if (this.allRows && this.allRows.length) this.renderTable();
-    else area.innerHTML = this.renderEmptyState();
+    else { this._setStocktakeView(''); area.innerHTML = this.renderEmptyState(); }
   },
 
   setRange(key, val) { this.query[key] = val || ''; },
@@ -209,66 +289,952 @@ const StocktakeModule = {
     await this._renderDailySetup();
   },
 
-  /** 日期区间兜底：默认当日（v227：初始界面无日期控件，此处统一给默认值） */
+  /**
+   * 🟢 v228.48：批次身份的解析器 —— **大幅简化**（旧版 60 行 → 现在 25 行）。
+   *
+   *   旧版（v228.47「方案 2 最近活跃批次优先」）为什么要按「日期区间」做排序和权威判定？
+   *   因为那时批次身份 = 日期推导出的 sheetId，两端各推各的，只能靠"看谁的日期更活跃"
+   *   来猜对方在哪一批。**这个前提已经不存在了**：批次身份现在是开盘时间戳，
+   *   全球唯一、不含日期语义，他端只可能读到同一个。
+   *
+   *   现在的语义：**批次身份由锚点决定，不需要"解算"。**
+   *     · 本机未结束会话（用户正在盘的那一批）→ 最强意图，直接用它的身份
+   *     · 本机/云端批次锚点 → 权威身份
+   *     · 都不存在 → 返回 null，交给 _ensureActiveQuarter() **开盘**
+   *
+   *   sd/ed 仅作为显示字段随身份一起带出，不再参与任何比较。
+   *
+   *   @returns {{sheetId:string, sd:string, ed:string, from:string}|null}
+   */
+  _resolveActiveQuarterRange() {
+    // a. 本机未结束会话（用户正在盘的那一批）
+    try {
+      const sess = this._getOpenSession();
+      if (sess && sess.sheetType === 'quarter' && sess.sheetId) {
+        if (!this.isQuarterRoundClosed(sess.sheetId)) {
+          return { sheetId: sess.sheetId, sd: sess.startDate || '', ed: sess.endDate || '', from: 'open-session' };
+        }
+      }
+    } catch (e) { /* 忽略 */ }
+    // b. 当前批次锚点（本机缓存；云端副本由 _pullBatchCommonState 先行合并到本机）
+    try {
+      const aq = this._getActiveQuarter();
+      if (aq && aq.sheetId) {
+        return { sheetId: aq.sheetId, sd: aq.sd || '', ed: aq.ed || '', from: 'active-quarter' };
+      }
+    } catch (e) { /* 忽略 */ }
+    // c. 跨端任务里的批次身份（任务 batchKey 是分派人写入并跨端同步的，天然一致）
+    try {
+      const tasks = DataStore.getStocktakeTasks() || {};
+      let best = null;
+      Object.keys(tasks).forEach(k => {
+        const t = tasks[k];
+        if (!t || t.sheetType !== 'quarter' || t.deleted || !t.batchKey) return;
+        if (t.status === 'closed') return;
+        const ts = Date.parse(t.updatedAt || t.createdAt || '') || 0;
+        if (!best || ts > best.ts) best = { ts: ts, t: t };
+      });
+      if (best && best.t) {
+        return { sheetId: best.t.batchKey, sd: best.t.startDate || '', ed: best.t.endDate || '', from: 'task' };
+      }
+    } catch (e) { /* 忽略 */ }
+    // d. 全无 → null（调用方负责开盘）
+    return null;
+  },
+
+  /** 日期区间兜底：仅填充**显示**字段（批次身份已与日期解耦，见 _displayRange） */
   _ensureDefaultRange() {
-    if (this.query.startDate && this.query.endDate) return;
-    const today = new Date();
-    const pad = n => String(n).padStart(2, '0');
-    const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-    // 🟢 v228.03：开始日期默认【当日】（原为「当日-29天」）
-    if (!this.query.startDate) this.query.startDate = ymd(today);
-    if (!this.query.endDate) this.query.endDate = ymd(today);
+    // 🟢 v228.48：批次身份走锚点，这里只负责把 query 的显示区间对齐到锚点/最近 30 天。
+    //   旧版在这里做「最近活跃批次优先」的复杂解算，现在已无必要 —— 身份不由日期推导。
+    const pick = this._resolveActiveQuarterRange();
+    if (pick && pick.sd && pick.ed) {
+      this.query.startDate = pick.sd;
+      this.query.endDate = pick.ed;
+      return;
+    }
+    if (this.query.startDate && this.query.endDate) return;   // 已有显示区间，不覆盖
+    this._syncQuarterRangeFromActive();
   },
 
   /**
-   * 🟢 v227.8：跨天续盘锚定 —— 修「昨天保存、今天进去全部重新盘点」。
-   *   季度批次标识 sheetId 由查询区间算出（quarter_MM-DD_MM-DD），而默认区间是
-   *   「今天−29天 ~ 今天」，每过一天整体平移一格。后果：昨天保存但没点【盘点结束】的
-   *   现场，今天进来 sheetId 就变了 → 续盘检测（_detectUnfinished）查不到会话、
-   *   草稿（按 sheetId 匹配）也对不上 → 表面上任务还在，一进去却是空表，
-   *   等于让用户从头重盘一遍。
-   *   只要存在未结束的季度会话（未点【盘点结束】/【放弃本次】），就把区间锚回它，
-   *   保证 sheetId 跨天稳定；会话被结束或放弃后自动回到今天的默认区间。
-   *   ⚠️ 超过 90 天的陈旧会话不锚定 —— 否则用户忘了处理就被永久锁死在老批次里。
+   * 🟢 v228.48：续盘锚定 —— **简化为"只认身份，不再管日期"**。
+   *
+   *   旧版（v227.8）解决的是「跨天续盘」：sheetId 由区间推导，隔一天区间平移、sheetId 就变，
+   *   于是昨天没结束的现场今天进来看不到。**这个问题的前提已经消失** —— 现在 sheetId 是
+   *   开盘时间戳，跨天永远不变，会话天然能被认出来。
+   *   本方法现在只做一件事：若存在未结束的季度会话，把本机批次身份与显示区间对齐到它。
    */
   _anchorRangeToOpenSession() {
     try {
       const s = this._getOpenSession();
-      if (!s || s.sheetType !== 'quarter' || !s.startDate || !s.endDate) return;
+      if (!s || s.sheetType !== 'quarter') return;
       if (s.startedAt) {
         const age = Date.now() - new Date(s.startedAt).getTime();
-        if (isFinite(age) && age > 90 * 86400000) return;
+        if (isFinite(age) && age > 90 * 86400000) return;   // 陈旧会话不锚定
       }
-      this.query.startDate = s.startDate;
-      this.query.endDate = s.endDate;
+      const sSheetId = s.sheetId
+        || (this._isTimestampSheetId(s.startDate) ? s.startDate : null);   // 兼容旧会话字段
+      if (!sSheetId) return;
+      if (this.isQuarterRoundClosed(sSheetId)) return;      // 已收口的不锚定
+      // 身份 + 显示区间一起对齐
+      const aq = this._getActiveQuarter();
+      if (!aq || aq.sheetId !== sSheetId) {
+        this._saveActiveQuarter({
+          sheetId: sSheetId, openedAt: s.openedAt || this._openedAtFromSheetId(sSheetId),
+          sd: s.startDate || '', ed: s.endDate || '', updatedAt: new Date().toISOString()
+        });
+      }
+      if (s.startDate && s.endDate) {
+        this.query.startDate = s.startDate;
+        this.query.endDate = s.endDate;
+      }
     } catch (e) { /* 忽略 */ }
   },
 
-  /** 本地日期 YYYY-MM-DD（❗不能用 toISOString().slice(0,10) —— 那是 UTC，GMT+8 凌晨会偏一整天） */
+  /**
+   * 🟢 v228.48：批次连续性兜底 —— 同样简化为"只认身份"。
+   *   旧版是为了让「重进工作台」不要落到一个由当天推导出的空批次；现在身份由锚点持有，
+   *   本方法只剩一个作用：**无未结束会话时，确保本机身份等于"上次批次"**（若它还在）。
+   *   有未结束会话时交给 _anchorRangeToOpenSession，本方法不覆盖。
+   */
+  _anchorQuarterToLastSheet() {
+    try {
+      const sess = this._getOpenSession();
+      if (sess && sess.sheetType === 'quarter') return;   // 未结束会话优先
+      const last = this._getLastQuarterSheet();
+      if (!last || !last.sheetId) return;
+      const aq = this._getActiveQuarter();
+      if (aq && aq.sheetId) return;                        // 本机已有身份（含云端拉回的）→ 不覆盖
+      if (!this._isTimestampSheetId(last.sheetId)) {
+        // 旧日期型历史批次：仅作为显示兜底，不继承为新身份
+        if (last.sd && last.ed) { this.query.startDate = last.sd; this.query.endDate = last.ed; }
+        return;
+      }
+      if (last.ts) {
+        const age = Date.now() - new Date(last.ts).getTime();
+        if (isFinite(age) && age > 180 * 86400000) return;
+      }
+      this._saveActiveQuarter({
+        sheetId: last.sheetId, openedAt: last.openedAt || this._openedAtFromSheetId(last.sheetId),
+        sd: last.sd || '', ed: last.ed || '', updatedAt: new Date().toISOString()
+      });
+      if (last.sd && last.ed) { this.query.startDate = last.sd; this.query.endDate = last.ed; }
+    } catch (e) { /* 忽略 */ }
+  },
+
+  /**
+   * 🟢 v228.40（一-1/一-2/一-3）：季度盘点「跨端共享状态」统一协调器。
+   *
+   *   问题背景（线上反馈）：
+   *     · 移动端与 PC 端同一账户进度不一致（已盘数、任务行、区间各说各话）；
+   *     · PC 端「结束/重开」后与移动端仍不一致（批次号也不同：jd20260916-2 vs jd20260916）；
+   *     · 管理员视图两端不一致（1-103 vs 1-5）。
+   *
+   *   根因：轮次号、结束闸门、命名、批次号映射（no_map）、任务、基线、概览
+   *   分散在 7 个 key 上，且各端「开局前只读本机 localStorage」，无人负责把云端最新态拉齐。
+   *   任意一端在本地推进轮次/生成批次号后，另一端毫不知情 → 永久分叉。
+   *
+   *   本方法：开局前一次性把上述共享 key 从云端拉回并合并到本地，且**先拉后算**。
+   *   合并规则一律「不倒退」：轮次逐键取 max、结束闸门取并集、命名取较新、批次号取较新，
+   *   保证慢端追平快端，而不是把快端抹回慢端。
+   *
+   *   @returns {Promise<boolean>} 是否有变更落到本地
+   *
+   *   🟢 v228.61（去掉轮询重复读）：内部 ⑤ 那次任务拉取的变更数写入
+   *   `this._lastCommonTaskChanged`，供 _pollOnce 直接复用 —— 旧版 _pollOnce 在调用
+   *   本方法后又显式调了一次 pullStocktakeTasksFromCloud，导致每轮同一张任务表被下载两遍。
+   *   返回值仍保持布尔语义不变（不能改成对象：调用方用 `if (result)` 判断，
+   *   对象恒为真会让 _pullRoundClosed 每轮都触发，属于行为回退）。
+   */
+  async _pullBatchCommonState() {
+    // 🟢 v228.51（P0 读解耦）：浏览器未明确离线即允许拉取，避免移动端 isOnline 误判冻结同步
+    const _online = (typeof SyncManager === 'undefined') ? false
+      : (SyncManager.isOnline || (typeof navigator !== 'undefined' && navigator.onLine !== false));
+    if (!_online) return false;
+    if (typeof SyncManager.getSettings !== 'function') return false;
+    // 🟢 v228.61（P0-A 读放大根治）：本方法只需要 6 个键，旧版 await getSettings() 却读整包
+    //   （settings.json + list + 14 个分键 = 15 请求）。改用 getSettingsKeys 并发单键直读：
+    //   6 个键 = 6 请求（其中若干可能命中 2s 单键缓存进一步降为 0）。
+    let remote = null;
+    try {
+      if (typeof SyncManager.getSettingsKeys === 'function') {
+        remote = await SyncManager.getSettingsKeys([
+          this.ROUND_NO_KEY, this.ROUND_CLOSED_KEY, this.ROUND_LABEL_KEY,
+          this.NO_MAP_KEY, this.ACTIVE_QUARTER_KEY
+        ]);
+      } else {
+        remote = await SyncManager.getSettings();   // 老版本兜底
+      }
+    } catch (e) { return false; }
+    if (!remote || typeof remote !== 'object') return false;
+    let changed = false;
+    try {
+      // ① 轮次号：逐键取 max（与 _setRoundNo / _pullRoundClosed 同源规则，杜绝回跳）
+      const rno = remote[this.ROUND_NO_KEY];
+      if (rno && typeof rno === 'object') {
+        let local = {};
+        try { local = JSON.parse(localStorage.getItem(this.ROUND_NO_KEY) || '{}') || {}; } catch (e) { local = {}; }
+        const merged = Object.assign({}, local);
+        Object.keys(rno).forEach(k => {
+          const rv = parseInt(rno[k], 10), lv = parseInt(merged[k], 10);
+          if (!isNaN(rv) && (isNaN(lv) || rv > lv)) { merged[k] = rv; changed = true; }
+        });
+        if (changed) localStorage.setItem(this.ROUND_NO_KEY, JSON.stringify(merged));
+      }
+      // ② 结束闸门：并集，且云端 truthy 覆盖本地缺失（已结束不可被拉回进行中）
+      const rc = remote[this.ROUND_CLOSED_KEY];
+      if (rc && typeof rc === 'object') {
+        const local = this._getRoundClosed();
+        const merged = Object.assign({}, local);
+        Object.keys(rc).forEach(k => { if (rc[k] && typeof rc[k] === 'object') { merged[k] = rc[k]; changed = true; } });
+        if (changed) this._saveRoundClosed(merged);
+      }
+      // ③ 轮次命名：较新（namedAt/round 大者）胜，保证两端显示同一名字
+      const rl = remote[this.ROUND_LABEL_KEY];
+      if (rl && typeof rl === 'object') {
+        let local = {};
+        try { local = JSON.parse(localStorage.getItem(this.ROUND_LABEL_KEY) || '{}') || {}; } catch (e) { local = {}; }
+        const merged = Object.assign({}, local);
+        Object.keys(rl).forEach(k => {
+          const r = rl[k], l = merged[k];
+          if (!r) return;
+          const rRound = parseInt(r.round, 10) || 0, lRound = l ? (parseInt(l.round, 10) || 0) : -1;
+          if (!l || rRound > lRound) { merged[k] = r; changed = true; }
+        });
+        if (changed) localStorage.setItem(this.ROUND_LABEL_KEY, JSON.stringify(merged));
+      }
+      // ④ 批次号映射（no_map）：本轮修复重点 —— 逐键取「updatedAt 较新者」合并，终结两端各自生成。
+      const nm = remote[this.NO_MAP_KEY];
+      if (nm && typeof nm === 'object') {
+        let local = {};
+        try { local = JSON.parse(localStorage.getItem(this.NO_MAP_KEY) || '{}') || {}; } catch (e) { local = {}; }
+        const merged = Object.assign({}, local);
+        Object.keys(nm).forEach(k => {
+          const r = nm[k], l = merged[k];
+          if (!r || !r.no) return;
+          const rTs = Date.parse(r.updatedAt || '') || 0;
+          const lTs = l ? (Date.parse(l.updatedAt || '') || 0) : -1;
+          if (!l || rTs > lTs) { merged[k] = r; changed = true; }
+        });
+        if (changed) localStorage.setItem(this.NO_MAP_KEY, JSON.stringify(merged));
+      }
+      // ⑤ 任务：走既有合并（本地较新者胜 + 墓碑），不重复实现
+      //   🟢 v228.61：变更数记到实例字段，供 _pollOnce 复用（避免它再拉一次同一张表）
+      this._lastCommonTaskChanged = 0;
+      try { this._lastCommonTaskChanged = await DataStore.pullStocktakeTasksFromCloud(); } catch (e) { /* 忽略 */ }
+      // ⑥ 基线：本机已有则本机优先（绝不覆盖），缺失时补齐
+      try { await this._pullQuarterBaseline(); } catch (e) { /* 忽略 */ }
+      // ⑦ 概览：数值 + 状态合并（含 roundClosed 同步）
+      //   🟢 v228.64（去掉第二轮重复读）：变更结果记到实例字段，供 _pollOnce 复用。
+      //   v228.61 的注释声称「已去掉重复读」，但只处理了 tasks（⑤），概览这一路漏了 ——
+      //   _pollOnce 里仍旧 `await this._pullQuarterOverviews()`，导致每轮概览被完整下载两次
+      //   （实测同一轮 _pullQuarterOverviews 成对出现，t 间隔 0~1ms）。现在与 ⑤ 同款收口。
+      this._lastCommonOverviewChanged = false;
+      try { this._lastCommonOverviewChanged = await this._pullQuarterOverviews(); } catch (e) { /* 忽略 */ }
+      // ⑧ 🟢 v228.48：当前季度**批次身份**（sheetId / openedAt / 显示用 sd,ed）。
+      //   跨端一致的关键，但实现已从「43 行日期协商」压缩为「3 行直接采用」——
+      //   因为批次身份不再是本机日期推导值，云端锚点就是唯一权威，不存在"该不该跟"的判定。
+      //
+      //   为何旧版必须写那么复杂：那时 sheetId 由本机日期算出，两端可能各算各的，
+      //   于是要比较"谁更活跃"、判断"用户是否显式选定过"、防止"本机当天覆盖云端真实批次"…
+      //   现在这些判定**全部失效**：身份不含日期语义，他端只可能读到同一个 sheetId。
+      //
+      //   规则（三条）：
+      //     ① 本机会话绑定的批次 ≠ 云端当前批次（被新一轮取代）→ 清掉本机会话、跟随云端
+      //     ② 云端有身份且本机无未结束现场 → 直接采用（身份 + 显示区间一起跟）
+      //     ③ 本机已有相同身份 → 只补齐可能缺失的显示区间
+      //
+      //   🟢🔴 v228.48-fix1：**真机实测暴露的严重缺陷**修复。
+      //     缺陷现象（用户实测）：PC 端「开下一轮」并分派任务后，手机端**批次和视图都不变**；
+      //       PC 端「结束季度盘点」后，手机端**收不到结束指令**；两端彻底各跑各的。
+      //     根因：`endQuarterRound` 收尾时只在**本机**清 open session（localStorage 是设备本地的），
+      //       手机端的 `wb_stocktake_open_session` 没人清 → 手机端 `hasLiveSession` 恒为 true
+      //       → 云端锚点怎么变它都拒绝跟随 → 永久分叉。
+      //     为何自动化测试没抓到：测试用的都是干净环境，两端都没有残留会话，
+      //       而本缺陷恰恰**只在"手机端进过盘点、留下了残留会话"时触发**。
+      //     修复语义：本系统一个时刻只有**一批**活跃季度盘点（active quarter 是单例），
+      //       云端 ACTIVE_QUARTER_KEY 里那个 sheetId 就是"活着"的批次。本机会话只要绑定在**别的**
+      //       批次上，就一定是陈旧的（被新一轮取代），直接清会话放行跟随，无需判断旧批次是否已结束。
+      //       若本机会话绑定 == 云端当前批次，则本端就是"在场"的那一个，保留（同端续盘不丢现场）。
+      const aq = remote[this.ACTIVE_QUARTER_KEY];
+      // 🟢 v228.65：清场保护窗口 —— 挡住「已在飞行中」的陈旧读快照。
+      //   清场（resetQuarterSyncState）会记下刚清掉的 sheetId；本轮的 remote 可能是清场前
+      //   发出的请求带回来的旧值，若照旧跟随，就把刚清掉的批次又写回本机，清场等于白清。
+      //   窗口取 15s（轮询周期 1.5s 的 10 倍，足够覆盖在途请求，又不会长期挡住正常跟随）。
+      if (aq && typeof aq === 'object' && aq.sheetId && this._isJustResetQuarter(aq.sheetId)) {
+        console.log('[stocktake] 忽略清场后回源的陈旧批次快照(' + aq.sheetId + ')，保持未开始状态');
+        try {
+          if (typeof SyncManager !== 'undefined' && SyncManager.isOnline
+              && typeof SyncManager.setSetting === 'function') {
+            SyncManager.setSetting(this.ACTIVE_QUARTER_KEY, null);   // 顺手纠正云端可能残留的旧值
+          }
+        } catch (e) { /* 忽略 */ }
+        changed = true;
+        return changed;
+      }
+      if (aq && typeof aq === 'object' && aq.sheetId) {
+        let sess = this._getOpenSession();
+        // ① 会话绑定的批次 ≠ 云端当前批次 → 陈旧，清掉让位
+        let staleSession = sess && sess.sheetType === 'quarter' && sess.sheetId
+                            && sess.sheetId !== aq.sheetId;
+        // ①' 🟢 v228.48-fix2：会话绑定的批次**就是**云端当前批次，但该批次**云端已结束** → 同样陈旧。
+        //    这是真机第二个症状（「PC 点了结束季度盘点，手机仍收不到结束指令」）的直接根因：
+        //    管理员「结束本批次」后，若**尚未开盘下一轮**，云端 ACTIVE_QUARTER_KEY 里的 sheetId
+        //    **没有改变**（锚点只在开盘时才改写）——于是手机端的残留会话与云端锚点"恰好相同"，
+        //    规则①判不出陈旧；而结束标记 ROUND_CLOSED_KEY 属于"状态"而非"身份"，
+        //    本方法早先只知道跟着身份走，于是手机端永远停在「进行中」，两端各跑各的。
+        //    修复：把「云端该批次已收口」也作为陈旧判据 —— 批次都结束了，本机还攥着它的现场
+        //    就没有意义（数据已由管理端强制落库），清会话放行。
+        if (!staleSession && sess && sess.sheetType === 'quarter' && sess.sheetId) {
+          const rc = remote[this.ROUND_CLOSED_KEY];
+          const closedInfo = rc && typeof rc === 'object' ? rc[sess.sheetId] : null;
+          if (closedInfo && typeof closedInfo === 'object') {
+            staleSession = true;
+            console.log('[stocktake] 本机会话所属批次(' + sess.sheetId
+                        + ')云端已结束，清会话让位给结束态');
+          }
+        }
+        if (staleSession) {
+          const staleSid = sess.sheetId;
+          this._clearOpenSession();
+          sess = null;
+          changed = true;
+          console.log('[stocktake] 本机会话所属批次(' + staleSid
+                      + ')已被云端新批次(' + aq.sheetId + ')取代，已清会话并跟随');
+        }
+        const hasLiveSession = sess && sess.sheetType === 'quarter';
+        const localAq = this._getActiveQuarter();
+        if (!hasLiveSession && (!localAq || localAq.sheetId !== aq.sheetId)) {
+          this._saveActiveQuarter(aq);
+          if (aq.sd && aq.ed) { this.query.startDate = aq.sd; this.query.endDate = aq.ed; }
+          this._pendingBatchFollow = true;    // 通知界面重渲，跟随新批次
+          changed = true;
+        }
+      }
+    } catch (e) { console.warn('[stocktake] 拉取跨端共享状态异常(已忽略):', e && e.message); }
+    return changed;
+  },
+
+  // ============================================================
+  // 🟢 v228.48：季度批次身份 —— 「开盘时间戳」
+  //
+  //   产品语义纠正（用户第三次指出，本次是根本性的）：
+  //     季度盘点 = **对当前【工作台 → 现存量】里的存货现存量快照，做一次多人分片盘点**。
+  //     它跟「盘哪几天」毫无关系，日期区间从来不是业务参数。
+  //
+  //   旧设计（v228.45~v228.47）的致命缺陷：
+  //     批次钥匙 sheetId 由**本机日期**推导 —— 'quarter_' + sd.slice(5) + '_' + ed.slice(5)。
+  //     两台设备各自推导，天然可能不同 → 为了让两端"协商同一个区间"，又加了云端锚点
+  //     ACTIVE_QUARTER + _hasDeliberateRange + _setActiveQuarter 的覆盖保护，
+  //     三段逻辑互相打架，最终两端轮流把"本机当天"写成云端权威 → 分叉固化、静默各看各的。
+  //
+  //   本版设计：**批次身份不再由日期推导**。
+  //     sheetId = 'quarter_' + <开盘时间戳 YYYYMMDDTHHmmss>，开盘时生成一次，此后永不变。
+  //     它完全不携带日期语义，因此：
+  //       · 两端不可能"各自推导出不同批次"——另一个只能读云端这一个；
+  //       · 真机两端时钟不同步也无影响——时间戳只在开盘端生成一次；
+  //       · sd/ed 降级为**纯显示字段**（近 30 天），不再参与任何一致性判定。
+  //     这不是"修好了分叉"，是**分叉的路径本身不存在了**。
+  // ============================================================
+
+  // 批次身份生成：开盘时间戳 → quarter_20260917T143022
+  //   openedAt 省略时取当前时刻（即"现在开盘"）
+  _quarterSheetId(openedAt) {
+    const d = openedAt ? new Date(openedAt) : new Date();
+    if (isNaN(d.getTime())) return this._quarterSheetId();
+    const p = n => String(n).padStart(2, '0');
+    return 'quarter_' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate())
+         + 'T' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+  },
+
+  // 是否为「时间戳型」批次 ID（v228.48 起的新格式；区别于更早的日期型 quarter_MM-DD_MM-DD）
+  _isTimestampSheetId(sheetId) {
+    return /^quarter_\d{8}T\d{6}$/.test(String(sheetId || ''));
+  },
+
+  // 时间戳型 sheetId → 开盘时刻（ISO 本地字符串）；非时间戳型返回 ''
+  _openedAtFromSheetId(sheetId) {
+    const s = String(sheetId || '');
+    const m = /^quarter_(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/.exec(s);
+    if (!m) return '';
+    return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6];
+  },
+
+  // 🟢 v228.48：当前季度批次的信息：{ sheetId, openedAt, sd, ed, updatedAt }
+  //   云端副本见 ACTIVE_QUARTER_KEY（结构自本版起以 sheetId 为权威身份）
+  _getActiveQuarter() {
+    try { return JSON.parse(localStorage.getItem(this.ACTIVE_QUARTER_KEY) || 'null') || null; } catch (e) { return null; }
+  },
+  _saveActiveQuarter(aq) {
+    try { localStorage.setItem(this.ACTIVE_QUARTER_KEY, JSON.stringify(aq || {})); } catch (e) {}
+    // storage 事件靠同键名广播，供同浏览器跨标签兜底刷新
+  },
+
+  // 当前批次 ID 的唯一权威读取入口。
+  // 所有需要「本批次是哪一批」的地方都必须走这里，禁止再自行拼接 sheetId。
+  _currentQuarterSheetId() {
+    const aq = this._getActiveQuarter();
+    return (aq && aq.sheetId) ? String(aq.sheetId) : null;
+  },
+
+  // 确保本机已确立批次身份：本机锚点缺失时**开盘**（生成新时间戳并推云端）。
+  //   ⚠️ 只在「本机无锚点」时开盘；已有锚点（含从云端拉回的）一律复用，
+  //      保证同一批次在两端是同一个 sheetId，绝不会各开各的。
+  /**
+   * 🟢🔴 v228.49-fix3：**「擅自开盘」根治** —— 真机第二次反馈的根因。
+   *
+   *   现象（用户真机原话）：
+   *     「pc端结束季度盘点，手机端仍然没有结束」
+   *     「手机端盘点了然后点结束盘点，管理员视图看不到分配的人和进度」
+   *
+   *   根因：本方法旧版只要"本机没有锚点"就**无条件开盘** —— 生成一个新时间戳批次，
+   *   并 `_setCloud(ACTIVE_QUARTER_KEY, entry)` **推上云端覆盖**。
+   *   于是任何一端只要"读不到云端"（离线 / settings 通道拉取失败 / 时序落后），
+   *   就会自作主张开一批，并把云端锚点抢成自己的 —— 两端各自开盘、各自记账。
+   *
+   *   连锁后果（一个根因解释全部现象）：
+   *     · 手机盘的记录落在**另一个 sheetId** 下；
+   *     · 概览 key 是 `counter::sheetId`，管理员端按自己的 sheetId 去取 → **人和进度都看不到**；
+   *     · PC 结束的是**它自己**那个批次 → 手机在自己批次里，永远收不到结束指令。
+   *
+   *   ⚠️ 为什么之前几版没修掉：前面一直在修"拉"（跟随/重渲），而病根在"开"——
+   *     只要任何一端还能凭空开盘，拉得再勤也只是在两个平行世界之间同步。
+   *
+   *   新语义 —— **开盘是有权限的显式动作，不是"没读到就自己开"的兜底**：
+   *     ① 本机已有锚点 → 沿用（补齐显示区间），不开盘；
+   *     ② 读得到云端且云端有锚点 → **跟随**，绝不开盘；
+   *     ③ 读得到云端且云端**确实没有**批次 → 本端是首个开盘者，**可以开盘**；
+   *     ④ 读不到云端（离线 / 拉取失败）→ **不开盘**，返回 null 并给出原因。
+   *        宁可让用户看到"暂时无法确定批次"，也绝不制造一个必然分叉的平行批次。
+   *
+   *   @param {object} opts
+   *     · force          强制开盘（管理员显式点「开下一轮」）
+   *     · allowOfflineOpen 明确允许离线下开盘（仅本端自用，且**不推云端**）
+   *   @returns {object|null} 锚点；无法安全开盘时返回 null
+   */
+  async _ensureActiveQuarter(opts) {
+    opts = opts || {};
+    const cur = this._getActiveQuarter();
+    if (cur && cur.sheetId && !opts.force) {
+      // ① 已有锚点：只补齐可能缺失的显示区间，不动身份
+      if (!cur.sd || !cur.ed) {
+        const r = this._displayRange();
+        this._saveActiveQuarter(Object.assign({}, cur, { sd: r.sd, ed: r.ed }));
+      }
+      return this._getActiveQuarter();
+    }
+
+    // ② / ③ / ④：本机无锚点（或强制重开）→ 先看云端到底有没有批次
+    const cloud = await this._peekCloudActiveQuarter();
+
+    if (cloud.state === 'has') {
+      // ② 云端已有批次 → 跟随，绝不开盘（这是防止分叉最关键的一道闸）
+      const aq = cloud.entry;
+      this._saveActiveQuarter(aq);
+      if (aq.sd && aq.ed) { this.query.startDate = aq.sd; this.query.endDate = aq.ed; }
+      this._pendingBatchFollow = true;
+      console.log('[stocktake] 云端已有批次 ' + aq.sheetId + '，本端跟随（不开新盘）');
+      return this._getActiveQuarter();
+    }
+
+    if (cloud.state === 'unknown') {
+      // ④ 无法确认云端 → 不开盘。离线且调用方明确许可时例外（且不推云端）
+      if (!(cloud.offline && opts.allowOfflineOpen)) {
+        this._lastOpenBlockedReason = cloud.reason;
+        console.warn('[stocktake] 无法确定云端批次（' + cloud.reason + '），已阻止本端擅自开盘');
+        return null;
+      }
+    }
+
+    // ③ 云端确实没有批次（或离线自用许可）→ 本端开盘
+    const openedAt = new Date().toISOString();
+    const sheetId = this._quarterSheetId(openedAt);
+    const r = this._displayRange();
+    const entry = { sheetId: sheetId, openedAt: openedAt, sd: r.sd, ed: r.ed, updatedAt: openedAt };
+    this._saveActiveQuarter(entry);
+    this._syncQuarterRangeFromActive();
+
+    // 推云端前的**让位保护**：再确认一次云端没被别端抢先开盘。
+    //   旧版无条件覆盖 —— 两端同时开局时后写者把先写者的批次抹掉，正是分叉的制造点。
+    const offline = !(typeof SyncManager !== 'undefined' && SyncManager.isOnline);
+    if (!offline) {
+      const recheck = await this._peekCloudActiveQuarter();
+      if (recheck.state === 'has' && recheck.entry.sheetId !== sheetId) {
+        // 别端已先开盘 → 本端让位跟随（本机刚写的锚点作废）
+        this._saveActiveQuarter(recheck.entry);
+        if (recheck.entry.sd && recheck.entry.ed) {
+          this.query.startDate = recheck.entry.sd; this.query.endDate = recheck.entry.ed;
+        }
+        this._pendingBatchFollow = true;
+        console.log('[stocktake] 别端已先开盘 ' + recheck.entry.sheetId + '，本端让位跟随');
+        return this._getActiveQuarter();
+      }
+      try { await this._setCloud(this.ACTIVE_QUARTER_KEY, entry); }
+      catch (e) { try { this._enqueueCloud(this.ACTIVE_QUARTER_KEY, entry); } catch (e2) {} }
+    } else {
+      // 离线：只写本机，**绝不推云端** —— 否则联网后会把本端批次盖到别人头上
+      console.log('[stocktake] 离线开盘 ' + sheetId + '（仅本机，联网后以云端为准）');
+    }
+    return entry;
+  },
+
+  /**
+   * 🟢 v228.49-fix3：探测云端「当前批次锚点」，并**区分「确实没有」与「读不到」**。
+   *   旧代码把这两种情况混为一谈（都当作"没有"），于是"读不到"就变成了"我来开一个"。
+   *
+   *   @returns {{state:'has'|'empty'|'unknown', entry?:object, offline:boolean, reason:string}}
+   */
+  async _peekCloudActiveQuarter() {
+    const offline = !(typeof SyncManager !== 'undefined' && SyncManager.isOnline);
+    if (offline) {
+      return { state: 'unknown', entry: null, offline: true, reason: '离线' };
+    }
+    if (typeof SyncManager === 'undefined' || typeof SyncManager.getSetting !== 'function') {
+      return { state: 'unknown', entry: null, offline: false, reason: '云端通道不可用' };
+    }
+    // 🟢 v228.61（P0-A）：只读 ACTIVE_QUARTER_KEY 一个键（单键直读，1 请求）。
+    //   旧版读整包 getSettings()（15 请求），而「判断云端有没有批次」本就不需要别的键。
+    //   语义仍要区分「确实没有」（→ empty）与「读不到」（→ unknown，绝不当作 empty 盲开批次）：
+    //   这里用 _readSettingFile 的返回 + 缓存是否存在来判断，不依赖任何共享可变标志
+    //   （v228.61-fix2：旧版靠 SyncManager._keyReadTouched，该标志会被并发读互相覆盖）。
+    const TO = Symbol.for('__st_peek_timeout__');
+    let aq;
+    try {
+      aq = await Promise.race([
+        SyncManager.getSetting(this.ACTIVE_QUARTER_KEY),
+        new Promise(res => setTimeout(() => res(TO), 6000))
+      ]);
+    } catch (e) {
+      return { state: 'unknown', entry: null, offline: false, reason: '读取云端超时/异常' };
+    }
+    if (aq === TO) {
+      return { state: 'unknown', entry: null, offline: false, reason: '读取云端超时' };
+    }
+    // 读不到 → 再用整包兜底一次；仍拿不到才判 unknown（宁可晚补，不可错盖）
+    if (aq === undefined) {
+      let fallbackOk = false;
+      try {
+        const all = await Promise.race([
+          SyncManager.getSettings(),
+          new Promise(res => setTimeout(() => res(null), 6000))
+        ]);
+        if (all && typeof all === 'object') { fallbackOk = true; aq = all[this.ACTIVE_QUARTER_KEY]; }
+      } catch (e) { /* 忽略 */ }
+      if (!fallbackOk) {
+        return { state: 'unknown', entry: null, offline: false, reason: '云端返回空' };
+      }
+    }
+    if (aq && typeof aq === 'object' && aq.sheetId) {
+      return { state: 'has', entry: aq, offline: false, reason: '' };
+    }
+    return { state: 'empty', entry: null, offline: false, reason: '' };
+  },
+
+  // 🟢 v228.48：显示用区间 —— 「最近 30 天」，**仅用于记录列表/批次卡片展示**，
+  //   不参与任何批次一致性判定（批次身份已与日期解耦）。
+  _displayRange() {
+    const pad = n => String(n).padStart(2, '0');
+    const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    const end = new Date();
+    const start = new Date(end.getTime() - 29 * 86400000);
+    return { sd: ymd(start), ed: ymd(end) };
+  },
+
+  // 把 query 的显示区间对齐到当前批次锚点（无锚点则用最近 30 天）
+  _syncQuarterRangeFromActive() {
+    const aq = this._getActiveQuarter();
+    if (aq && aq.sd && aq.ed) {
+      this.query.startDate = aq.sd;
+      this.query.endDate = aq.ed;
+      return;
+    }
+    const r = this._displayRange();
+    this.query.startDate = r.sd;
+    this.query.endDate = r.ed;
+  },
+
+  // 🟢 v228.48：确立/切换当前季度批次并回推云端。
+  //   与旧版（v228.45~47）的根本区别：**不再传日期，不再做任何"覆盖保护"判定**。
+  //   批次身份由 openedAt 决定，写入即权威；他端只读不写，因此不存在覆盖竞争。
+  //
+  //   @param {string} [openedAt] 开盘时刻（ISO）；省略 = 现在开盘
+  async _setActiveQuarter(openedAt) {
+    const ts = openedAt || new Date().toISOString();
+    const sheetId = this._quarterSheetId(ts);
+    const r = this._displayRange();
+    const entry = { sheetId: sheetId, openedAt: ts, sd: r.sd, ed: r.ed, updatedAt: new Date().toISOString() };
+    this._saveActiveQuarter(entry);
+    this._syncQuarterRangeFromActive();
+    try {
+      await this._setCloud(this.ACTIVE_QUARTER_KEY, entry);
+    } catch (e) {
+      try { this._enqueueCloud(this.ACTIVE_QUARTER_KEY, entry); } catch (e2) {}
+    }
+    return entry;
+  },
+
+  // ============================================================
+  // 🟢 v228.47：跨端「同步元数据」重置工具
+  //
+  //   背景（用户线上反馈）：
+  //     两端长期各自开局，云端锚点被反复覆盖，历史残留互相纠缠。
+  //     此时再多的"跟随逻辑"也难收敛 —— 需要先把两端拉回同一个干净起点。
+  //
+  //   ⚠️ 安全边界（这是本工具最重要的部分）：
+  //     **只清同步元数据，绝不碰业务数据。** 具体：
+  //
+  //   ┌─ 会清（同步元数据：决定"看哪一批、第几轮、什么名字"）─────────────┐
+  //   │ ACTIVE_QUARTER_KEY     批次锚点（两端串味的核心）                   │
+  //   │ ROUND_CLOSED_KEY       轮次结束闸门                                │
+  //   │ ROUND_NO_KEY           轮次号                                      │
+  //   │ ROUND_LABEL_KEY        轮次命名                                    │
+  //   │ NO_MAP_KEY             批次号映射                                  │
+  //   │ OVERVIEW_KEY           本批次进度概览（跨端串味的另一来源）        │
+  //   │ LAST_QUARTER_SHEET_KEY 本机"上次批次"缓存                          │
+  //   │ OPEN_KEY               本机未结束会话（否则会卡在续盘现场）        │
+  //   │ DRAFT_KEY              本机草稿（防止旧草稿带进新批次）            │
+  //   └────────────────────────────────────────────────────────────────────┘
+  //   注：自 v228.52 起，清场额外写云端 `wb_stocktake_reset_epoch`（时间戳纪元）。
+  //        所有端在 _pollOnce 中比对「云端纪元 > 本端已应用纪元」即自动清本端共享元数据，
+  //        使「清一次 = 两端同时收敛」，根治旧清场「只清本端、另一端继续回推分歧态（清了白清）」。
+  //        正在盘点（未结束 quarter 会话）的远程端保留 OPEN 会话，不打散在盘数据。
+  //
+  //   ┌─ 绝不清（业务数据）────────────────────────────────────────────────┐
+  //   │ stocktakeTasks         分派任务（云端 settings 通道）              │
+  //   │ stocktake_records      盘点记录（IndexedDB，本就不同步）           │
+  //   │ BASELINE_KEY           基线快照（序号锚点，清了会导致序号重排）    │
+  //   │ TOMB_KEY / PENDING_KEY 墓碑与补推队列（清了会"删了又回来"）        │
+  //   │ TASK_SEEN_KEY          已提示过的任务（清了会重复弹窗骚扰）        │
+  //   └────────────────────────────────────────────────────────────────────┘
+  //
+  //   用法：在任一端控制台执行 `await StocktakeModule.resetQuarterSyncState()`，
+  //        或界面点「🧹 清场重置」。自 v228.52 起，清场会写云端 reset 纪元，
+  //        所有端轮询到纪元更新会自动清本端 → **只需在一端点一次，两端即收敛**；
+  //        正在盘点（未结束 quarter 会话）的远程端会保留其 OPEN 会话，不打散在盘数据。
+  // ============================================================
+  QUARTER_SYNC_KEYS_CLEARABLE: [
+    'ACTIVE_QUARTER_KEY', 'ROUND_CLOSED_KEY', 'ROUND_NO_KEY', 'ROUND_LABEL_KEY',
+    'NO_MAP_KEY', 'OVERVIEW_KEY', 'LAST_QUARTER_SHEET_KEY', 'OPEN_KEY', 'DRAFT_KEY'
+  ],
+  QUARTER_SYNC_KEYS_KEEP: [
+    'BASELINE_KEY', 'TOMB_KEY', 'PENDING_KEY', 'TASK_SEEN_KEY'
+  ],
+
+  /** 读取某键的本机原值（用于备份与审计） */
+  _readSyncKey(keyName) {
+    const k = this[keyName];
+    if (!k) return null;
+    try { return localStorage.getItem(k); } catch (e) { return null; }
+  },
+
+  /**
+   * 🟢 v228.47：重置跨端同步元数据。
+   * @param {object} [opt]
+   * @param {boolean} [opt.silent]  不弹确认框（供脚本/自动化调用）
+   * @param {boolean} [opt.dryRun]  只报告将清什么，不实际清（默认 false）
+   * @returns {Promise<object>} 审计报告 { cleared:[], kept:[], backupKey, errors:[] }
+   */
+  async resetQuarterSyncState(opt) {
+    opt = opt || {};
+    const KEEP_PREFIX = 'wb_stocktake_sync_reset_backup_';
+    const report = { at: new Date().toISOString(), dryRun: !!opt.dryRun,
+                     cleared: [], kept: [], errors: [], backupKey: null };
+
+    // ① 安全前置：正在盘点中不重置（会把用户现场打散）
+    try {
+      const sess = this._getOpenSession();
+      if (sess && sess.sheetType === 'quarter' && !opt.silent) {
+        const go = await WBModal.confirm(
+          '本机存在【未结束的季度盘点会话】：\n\n' +
+          '· ' + (sess.batchNo || sess.sheetId || '') + '（' + (sess.startDate || '') + ' ~ ' + (sess.endDate || '') + '）\n\n' +
+          '重置会清除这个未结束现场（已落库的盘点记录与任务不受影响）。\n' +
+          '确认继续？',
+          { title: '⚠️ 重置前确认', okText: '继续重置', cancelText: '取消' });
+        if (!go) { report.aborted = true; return report; }
+      }
+    } catch (e) { /* 忽略：会话读取失败不阻断 */ }
+
+    // ② 备份（可回滚）—— 备份内容只含"要清的键"，供事故回退
+    const backup = {};
+    this.QUARTER_SYNC_KEYS_CLEARABLE.forEach(n => {
+      const raw = this._readSyncKey(n);
+      if (raw !== null) backup[this[n]] = raw;
+    });
+    const backupKey = KEEP_PREFIX + Date.now();
+    try { localStorage.setItem(backupKey, JSON.stringify(backup)); report.backupKey = backupKey; }
+    catch (e) { report.errors.push('备份失败（可能超出配额）：' + (e && e.message)); }
+
+    if (opt.dryRun) {
+      report.cleared = Object.keys(backup);
+      report.kept = this.QUARTER_SYNC_KEYS_KEEP.map(n => this[n]).filter(Boolean);
+      return report;
+    }
+
+    // ②-b 🟢 v228.65：清场保护窗口 —— **必须在清本机之前**就立起来。
+    //   时序坑（实测踩到）：本方法 ③ 清本机是同步的，但 ④ 清云端是 await 循环，
+    //   一让出控制权，轮询就可能插进来把「清场前发出、此刻才返回」的陈旧云端快照写回本机。
+    //   若把守卫放在 ④ 之后，这段窗口就完全没保护 —— 表现是清场点了却没效果。
+    //   故：先记下「即将被清掉的批次」并作废读缓存，再动手清。
+    try {
+      const willClearSid = (JSON.parse(String(backup[this.ACTIVE_QUARTER_KEY] || 'null')) || {}).sheetId;
+      this._resetGuard = { at: Date.now(), sheetIds: willClearSid ? [String(willClearSid)] : [] };
+    } catch (e) { this._resetGuard = { at: Date.now(), sheetIds: [] }; }
+    try {
+      if (typeof SyncManager !== 'undefined') {
+        this.QUARTER_SYNC_KEYS_CLEARABLE.forEach(n => {
+          const k = this[n];
+          if (!k) return;
+          if (SyncManager._settingsKeyCache) SyncManager._settingsKeyCache[k] = null;
+          if (SyncManager._keyTsCache) SyncManager._keyTsCache[k] = 0;
+          if (SyncManager._keyEpochCache) SyncManager._keyEpochCache[k] = -1;
+        });
+      }
+    } catch (e) { /* 忽略：缓存作废失败不影响主流程，还有保护窗口兜底 */ }
+
+    // ③ 清本机
+    this.QUARTER_SYNC_KEYS_CLEARABLE.forEach(n => {
+      const k = this[n];
+      if (!k) return;
+      try {
+        if (localStorage.getItem(k) !== null) { localStorage.removeItem(k); report.cleared.push(k); }
+      } catch (e) { report.errors.push('清本机 ' + k + ' 失败：' + (e && e.message)); }
+    });
+
+    // ④ 清云端（同步元数据在 settings.json 通道）—— 逐键显式置空，
+    //    而不是整包覆盖 settings，避免抹掉其它模块的设置（cloudConfig / 查询历史等）。
+    for (const n of this.QUARTER_SYNC_KEYS_CLEARABLE) {
+      const k = this[n];
+      if (!k) continue;
+      try {
+        if (typeof SyncManager !== 'undefined' && SyncManager.isOnline
+            && typeof SyncManager.setSetting === 'function') {
+          await SyncManager.setSetting(k, null);
+        }
+        // 离线时也入队，联网后补推置空，保证最终一致
+        try { this._enqueueCloud(k, null); } catch (e) {}
+      } catch (e) { report.errors.push('清云端 ' + k + ' 失败：' + (e && e.message)); }
+    }
+
+    // ⑦ 🟢 v228.52：写全局 reset 纪元 —— 让清场跨端生效。
+    //    这一步是「清场没大用」的根治：旧清场只清本端+云端同名键，另一端不清，
+    //    且另一端任何动作都会把分歧态回推云端（_computeQuarterOverview/_closeQuarterTasks
+    //    走 _setCloud(OVERVIEW_KEY,...)），被清端下一轮轮询又把旧态拉回 → 清了白清。
+    //    这里写云端纪元，所有端轮询比对到「纪元更新」即自动把本端元数据清回干净起点。
+    try {
+      if (typeof SyncManager !== 'undefined' && typeof SyncManager.setSetting === 'function') {
+        const epoch = Date.now();
+        if (SyncManager.isOnline) {
+          await SyncManager.setSetting(this.QUARTER_RESET_EPOCH_KEY, epoch);
+        } else {
+          // 离线：入队，联网后 _flushCloudQueue 补广播纪元，保证最终两端都收敛
+          try { this._enqueueCloud(this.QUARTER_RESET_EPOCH_KEY, epoch); } catch (e) {}
+        }
+        try { localStorage.setItem(this.QUARTER_RESET_SEEN_KEY, String(epoch)); } catch (e) {}
+        report.resetEpoch = epoch;
+      }
+    } catch (e) { report.errors.push('写 reset 纪元失败：' + (e && e.message)); }
+
+    // ⑤ 重置内存态（否则界面仍按旧 query 渲染，看起来"没生效"）
+    try {
+      this.query = { startDate: '', endDate: '' };
+      this.sheet = null;
+      this.allRows = [];
+      this.allRowsFull = [];
+      this._sheetTouched = null;
+      this._viewSnapshot = null;
+      this._pendingBatchFollow = false;
+      this.batchNo = '';
+      this._pickerCtx = null;
+      if (typeof this._stopOverviewPolling === 'function') this._stopOverviewPolling();
+    } catch (e) { report.errors.push('重置内存态失败：' + (e && e.message)); }
+
+    // ⑥ 🟢 v228.48：清掉本机 LAST_QUARTER_SHEET 里可能残留的**旧日期型** sheetId。
+    //    批次身份已改为开盘时间戳，日期型 ID 不再有意义；留着会让 _anchorQuarterToLastSheet
+    //    把一个不存在的批次当成"上次批次"。时间戳型 ID 同样清掉 —— 重置的语义就是"回到干净起点"。
+    try {
+      const last = this._getLastQuarterSheet();
+      if (last && last.sheetId && !this._isTimestampSheetId(last.sheetId)) {
+        report.errors.push('已清除旧日期型批次缓存：' + last.sheetId);
+      }
+    } catch (e) { /* 忽略 */ }
+
+    report.kept = this.QUARTER_SYNC_KEYS_KEEP.map(n => this[n]).filter(Boolean);
+    return report;
+  },
+
+  /**
+   * 🟢 v228.65：某批次是否「本机刚清掉的那一批」（清场保护窗口内）。
+   *
+   *   为什么需要它：清场作废了 SyncManager 的读缓存，但**已经在飞行中**的读请求
+   *   仍会带回清场前的快照。_pullBatchCommonState 若照常跟随，就把刚清掉的批次写回本机。
+   *   实测调用栈：_saveActiveQuarter ← _pullBatchCommonState ← _pollOnce（清场后 0.5s 内发生）。
+   *
+   *   窗口 15s = 轮询周期(1.5s) × 10，既覆盖在途请求，又不会长期挡住正常的跨端跟随。
+   */
+  _isJustResetQuarter(sheetId) {
+    try {
+      const g = this._resetGuard;
+      if (!g || !g.at || !sheetId) return false;
+      if (Date.now() - g.at > 15000) return false;
+      return (g.sheetIds || []).indexOf(String(sheetId)) >= 0;
+    } catch (e) { return false; }
+  },
+
+  /**
+   * 🟢 v228.52：全局 reset 纪元收敛 —— 让「清场」真正跨端生效。
+   *
+   *   根因（用户真机反馈「清场好像没有很大作用」）：旧清场只清【本端 + 云端同名键】，
+   *   但【另一端不清】；另一端只要做任何动作（进入任务 / 结束 / 补派）就会把它的分歧态
+   *   回推云端（_computeQuarterOverview / _closeQuarterTasks 走 `_setCloud(OVERVIEW_KEY,...)`），
+   *   被清的那端下一轮轮询又把旧态拉回来 → 「清了白清」。
+   *
+   *   解法：清场额外写云端 `wb_stocktake_reset_epoch`（纪元时间戳）。本方法在每次轮询时比对
+   *   本端已应用的纪元，若云端更新 → 自动把本端共享同步元数据清回干净起点，使两端收敛到同一态。
+   *
+   *   ⚠️ 安全：若本端正处未结束的季度盘点现场（盘点人中途），只清「共享锚点」
+   *   （批次 / 轮次 / 概览 / 命名 …），保留 OPEN 会话，避免把别人正在盘的数据打散——
+   *   清场的二次确认只发生在操作端，远程端无确认框，故此处必须保守。
+   */
+  async _applyGlobalResetIfAny() {
+    try {
+      if (typeof SyncManager === 'undefined' || typeof SyncManager.getSetting !== 'function') return;
+      // 🟢 v228.61（P0-A）：只读 QUARTER_RESET_EPOCH_KEY 一个键，不再读整包。
+      const epoch = await SyncManager.getSetting(this.QUARTER_RESET_EPOCH_KEY);
+      if (epoch == null) return;
+      let seen = 0;
+      try { seen = parseInt(localStorage.getItem(this.QUARTER_RESET_SEEN_KEY) || '0', 10) || 0; } catch (e) {}
+      if (epoch <= seen) return;   // 已应用过，不重复清
+      // 检测到更新纪元 → 清本端共享元数据（不含业务数据、不含正在盘的 OPEN 会话）
+      const sess = this._getOpenSession();
+      const counting = !!(sess && sess.sheetType === 'quarter');
+      this.QUARTER_SYNC_KEYS_CLEARABLE.forEach(n => {
+        if (counting && n === 'OPEN_KEY') return;   // 保护正在盘的现场
+        const k = this[n];
+        if (k) { try { localStorage.removeItem(k); } catch (e) {} }
+      });
+      // 重置内存态（与 resetQuarterSyncState ⑤ 对齐）
+      this.query = { startDate: '', endDate: '' };
+      this.sheet = null; this.allRows = []; this.allRowsFull = [];
+      this._sheetTouched = null; this._viewSnapshot = null; this._pendingBatchFollow = false;
+      this.batchNo = ''; this._pickerCtx = null;
+      try { localStorage.setItem(this.QUARTER_RESET_SEEN_KEY, String(epoch)); } catch (e) {}
+    } catch (e) { /* 忽略：纪元收敛失败不应阻断轮询 */ }
+  },
+
+  /**
+   * 🟢 v228.54（分叉根治②）：批次锚点自愈 —— 锚点静默丢失后自动补推云端。
+   *
+   *   丢失路径（真机实锤：两端同步诊断显示本机各有批次、云端锚点为空）：
+   *     ① 离线开盘：设计上只写本机绝不推云，但联网后【无任何补推路径】；
+   *     ② 在线开盘 _setCloud 失败虽会入队，但 _flushCloudQueue 触发时机不可靠（仅 online 事件/picker 打开）；
+   *     ③ getSettings 一次 list 抖动曾让"云端锚点看起来不存在"（已在 sync.js 修复）。
+   *   本方法在每轮轮询时：本机有锚点 + 云端【确实】没有锚点（state==='empty'，
+   *   区别于"读不到"=unknown）→ 自动补推本机锚点。先到者赢；云端已有批次（含分叉）
+   *   时绝不动 —— 分叉交由诊断面板的【强制对齐云端】人工裁决，避免覆盖他端批次。
+   */
+  _lastAnchorHealTs: 0,
+  async _healActiveQuarterAnchor() {
+    const aq = this._getActiveQuarter();
+    if (!aq || !aq.sheetId) return;                       // 本机无锚点，无可自愈
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline
+        || typeof SyncManager.getSettings !== 'function') return;
+    const now = Date.now();
+    if (now - (this._lastAnchorHealTs || 0) < 60000) return;   // 60s 节流
+    // 🟢 v228.61（P0-B 读放大根治）：旧版在此 `SyncManager._settingsKeyListTs = 0`，
+    //   本意是「绕过 5s 键集缓存，确保这次探锚点读到新鲜数据」——但代价是
+    //   **把全局键集缓存戳清零**，于是本端（以及任何共享该 SyncManager 实例的路径）
+    //   下一轮 getSettings() 必然退化成「list + 并发下载全部 14 个分键文件」的读放大。
+    //   本方法 60s 节流一次，等于每 60s 给全网端各来一次读放大，收益远小于代价。
+    //
+    //   正解：探锚点本来只需读 ACTIVE_QUARTER_KEY 这一个键。
+    //   改走 _peekCloudActiveQuarter → getSetting()（单键直读，1 请求），
+    //   它天然读到的是云端真实值，不受键集缓存影响，根本不需要动那个全局戳。
+    let cloud;
+    try { cloud = await this._peekCloudActiveQuarter(); } catch (e) { return; }
+    if (cloud.state === 'unknown') return;                // 读不到 → 绝不盲推（宁可晚补，不可错盖）
+    this._lastAnchorHealTs = now;                         // has/empty 都记账：60s 内不再探测
+    if (cloud.state !== 'empty') return;                  // 云端已有批次（自己或他人）→ 无需自愈
+    try { await this._setCloud(this.ACTIVE_QUARTER_KEY, aq); } catch (e) { /* 失败已入队 */ }
+  },
+
+  /** 🟢 v228.47：查看当前本机同步元数据快照（排障用，只读） */
+  inspectQuarterSyncState() {
+    const out = { clearedScope: {}, keptScope: {} };
+    this.QUARTER_SYNC_KEYS_CLEARABLE.forEach(n => {
+      out.clearedScope[n] = this._readSyncKey(n);
+    });
+    this.QUARTER_SYNC_KEYS_KEEP.forEach(n => {
+      const raw = this._readSyncKey(n);
+      out.keptScope[n] = raw ? String(raw).slice(0, 80) : null;
+    });
+    // 任务与记录只报数量，不报内容（避免刷屏）
+    try { out.taskCount = Object.keys(DataStore.getStocktakeTasks() || {}).length; } catch (e) { out.taskCount = -1; }
+    out.query = { sd: this.query.startDate, ed: this.query.endDate };
+    return out;
+  },
+
+  /**
+   * 🟢 v228.40（一-1/一-2）：把本机协调后的批次归属（no_map）回推云端，供他端开局时拉齐。
+   *   只推本批次的条目，避免整包覆盖他端批次。失败静默（下次开局/轮询会再推）。
+   */
+  async _pushBatchCommonState(sheetId, batchNo) {
+    if (!sheetId || !batchNo) return;
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
+    try {
+      let local = {};
+      try { local = JSON.parse(localStorage.getItem(this.NO_MAP_KEY) || '{}') || {}; } catch (e) { local = {}; }
+      const entry = Object.assign({}, local[sheetId] || {}, {
+        no: batchNo, type: 'quarter', updatedAt: new Date().toISOString()
+      });
+      local[sheetId] = entry;
+      localStorage.setItem(this.NO_MAP_KEY, JSON.stringify(local));
+      // 云端：先读-合并（只覆盖本 sheetId 键），再整体写回，避免抹掉他端批次
+      // 🟢 v228.61（P0-A）：只读 NO_MAP_KEY 一个键，不再读整包。
+      let remoteMap = {};
+      try {
+        const rm = await SyncManager.getSetting(this.NO_MAP_KEY);
+        if (rm && typeof rm === 'object') remoteMap = Object.assign({}, rm);
+      } catch (e) { /* 忽略 */ }
+      remoteMap[sheetId] = entry;
+      await this._setCloud(this.NO_MAP_KEY, remoteMap);
+    } catch (e) { console.warn('[stocktake] 推送批次号失败(已忽略):', e && e.message); }
+  },
+
+
   _ymdLocal(d) {
     const pad = n => String(n).padStart(2, '0');
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   },
 
   /**
-   * 🟢 v227.7/227.8：判断一个季度任务是否属于「当前批次」。
-   *   曾经硬卡「任务 startDate/endDate 与当前查询区间完全相等」，一旦区间变了任务就全被
-   *   过滤掉 → 管理员视图空、任务选择器空（线上挂的根因）。现在四级判定：
-   *     ① 区间完全相等 → 命中（精确）
-   *     ② 任务没有 startDate（旧版本写入 / 云端拉回未带）→ 命中
-   *     ③ createdAt 当天落在当前 sd~ed 内 → 命中
-   *     ④ createdAt 距今 30 天内 → 命中（区间锚定到未结束会话后会整体前移，
-   *        今天新分派的任务会落在区间外，这层兜底避免任务凭空消失）
+   * 🟢 v228.48：判断一个季度任务是否属于「当前批次」—— **收敛为两级判定**。
+   *
+   *   旧版有 5 级兜底（区间精确 / batchKey / 无 startDate / createdAt 当天 / 30 天兜底），
+   *   之所以需要这么多层，是因为批次身份 sheetId 由日期推导、两端各推各的，只能靠
+   *   「创建时间落在区间内」这类模糊判据去猜任务属于哪一批 —— 代价是**跨批次串档**
+   *   （30 天内连开两批时，上一批的任务会漏进新批次）。
+   *
+   *   现在批次身份是开盘时间戳，任务分派时写入 `batchKey` = 当时的批次身份，
+   *   因此归属判定可以严格等价于「batchKey 是否等于当前批次 ID」。两级足矣：
+   *     ① `t.batchKey === 当前批次ID` → 命中（严格、唯一）
+   *     ② 无 `batchKey`（v228.38 之前的历史任务）→ 走原有 30 天兜底，仅作兼容读取
+   *
+   *   @param {object} t  任务
+   *   @param {string} sd 当前批次显示区间的开始日（仅兼容分支使用）
+   *   @param {string} ed 当前批次显示区间的结束日（仅兼容分支使用）
    */
   _taskInCurrentBatch(t, sd, ed) {
     if (!t || t.sheetType !== 'quarter') return false;
+    // ① 严格判定：与当前批次身份一致才算本批次
+    const curId = this._currentQuarterSheetId();
+    if (t.batchKey) return curId ? (t.batchKey === curId) : false;
+    // ② 兼容分支：无 batchKey 的历史任务（v228.38 之前分派）
     if (t.startDate == null || t.startDate === '') return true;
-    if (t.startDate === sd && t.endDate === ed) return true;
     try {
       const c = t.createdAt ? new Date(t.createdAt) : null;
       if (c && !isNaN(c.getTime())) {
         const cs = this._ymdLocal(c);
-        if (cs >= sd && cs <= ed) return true;
+        if (sd && ed && cs >= sd && cs <= ed) return true;
         const age = Date.now() - c.getTime();
         if (isFinite(age) && age >= -86400000 && age <= 30 * 86400000) return true;
       }
@@ -283,6 +1249,7 @@ const StocktakeModule = {
   async _renderDailySetup() {
     const area = document.getElementById('stArea');
     if (!area) return;
+    this._setStocktakeView('daily-picker');   // 🟢 v228.36：与季度 picker 同样打标记
     this._ensureDefaultRange();
 
     // 🟢 v227：必须先读再生成——_genBatchNo 有副作用（会把当前号写入 no_map finished:false），
@@ -319,7 +1286,7 @@ const StocktakeModule = {
       : `<button class="btn--primary" onclick="StocktakeModule.beginDaily()" style="height:36px;padding:0 22px;font-size:14px;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">▶ 开始盘点</button>`;
     const histBtn = isHistorical
       ? `<button class="btn--primary" onclick="StocktakeModule._editHistoricalDaily()" style="height:36px;padding:0 18px;font-size:14px;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">✏️ 修改</button>
-         <button class="btn--primary" onclick="StocktakeModule.saveToRecords()" style="height:36px;padding:0 18px;font-size:14px;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">💾 保存</button>`
+         <button class="btn--primary" onclick="StocktakeModule.saveToRecords({ thenBack: true })" title="仅暂存到本机，不计入盘点记录" style="height:36px;padding:0 18px;font-size:14px;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">💾 暂存并退出</button>`
       : '';
     const labelText = isHistorical
       ? (isFinished
@@ -668,7 +1635,7 @@ const StocktakeModule = {
       const isHistorical = (info.count || 0) > 0;
       const html = isHistorical
         ? `<button class="btn--primary" onclick="StocktakeModule._editHistoricalDaily()" style="height:34px;padding:0 16px;">✏️ 修改</button>
-           <button class="btn--primary" onclick="StocktakeModule.saveToRecords()" style="height:34px;padding:0 16px;">💾 保存</button>`
+           <button class="btn--primary" onclick="StocktakeModule.saveToRecords({ thenBack: true })" title="仅暂存到本机，不计入盘点记录" style="height:34px;padding:0 16px;">💾 暂存并退出</button>`
         : `<button class="btn--primary" onclick="StocktakeModule.beginDaily()" style="height:34px;padding:0 18px;">▶ 开始盘点</button>`;
       old.outerHTML = `<div class="ob-field" id="stDailyBtns" style="display:inline-flex;gap:8px;align-items:end;">${html}</div>`;
     }
@@ -763,7 +1730,7 @@ const StocktakeModule = {
     this._markOpenSession(sheetId, 'daily', this.task.counter,
       this.sheet.startDate, this.sheet.endDate);
     this.renderTable();
-    this.toast('已进入往期盘点号 ' + no + ' 的可修改模式：修改【盘点数量】后点【保存】或【盘点结束】');
+    this.toast('已进入往期盘点号 ' + no + ' 的可修改模式：修改【盘点数量】后点【暂存并退出】或【结束本次盘点】');
   },
 
   /** 历史/进行中的日常盘点号列表（含区间、条数与结束状态），最新在前 */
@@ -942,6 +1909,7 @@ const StocktakeModule = {
     this._restoreDraft();
     await this._applyAssignedIfAny();     // v217：登录态自动领用分配给本人的 open 任务
     this.renderTable();
+    this._refreshDraftHint();             // 🟢 v228.35（P1）：续盘恢复草稿后同步提示条显隐
     } catch (e) {
       console.error('[stocktake] 日常盘点取数失败:', e);
       if (area) area.innerHTML = '<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-text">取数失败：' + esc(e.message || e) + '</div></div>';
@@ -1034,16 +2002,91 @@ const StocktakeModule = {
   //   批次标识仍用 query 区间（默认近 30 天，跨设备一致），但不再强制用户先选日期。
   async startQuarter() {
     this._hideUnfinishedBanner();
-    this._anchorRangeToOpenSession();   // 🟢 v227.8：跨天续盘锚定（详见方法注释）
+    // 🟢 v228.48：开局流程 —— **批次身份优先，日期退居显示**。
+    //
+    //   新顺序（旧版那套「解析器→云端→本机锚定」的三段纠葛已随批次身份重构一并消失）：
+    //     ① 读云端批次身份（_pullBatchCommonState 会把云端 ACTIVE_QUARTER 合并到本机）；
+    //     ② 本机锚定（续盘现场 / 上次批次）；
+    //     ③ 若仍无身份 → **开盘**，生成新时间戳并回推云端（他端 3s 内跟随）。
+    //   要点：身份确立后永不改变，因此两端只可能读到同一个 sheetId，不存在协商。
     this._ensureDefaultRange();
-    const sd = this.query.startDate, ed = this.query.endDate;
+    try {
+      await Promise.race([
+        this._pullBatchCommonState(),     // ① 云端批次身份 + 轮次/闸门/命名/号/任务/基线/概览
+        new Promise(res => setTimeout(res, 4000))
+      ]);
+    } catch (e) { console.warn('[stocktake] 开局拉齐跨端状态失败(已忽略):', e && e.message); }
+    this._anchorRangeToOpenSession();     // ② 续盘现场
+    this._anchorQuarterToLastSheet();     // ② 上次批次
+    this._ensureDefaultRange();
     const counter = String(((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? (AppConfig.getCurrentUser() || {}).username : '') || this.task.counter || '').trim();
 
     // 🟢 v225.2：点「季度盘点」时再拉一次云端任务（进模块那次可能超时/当时离线，
     //   或用户在模块内改了日期区间后直接开季度盘点）。任务栏与选择器都依赖它。
     await this._syncAssignedTasks(4000);
 
-    const sheetId = 'quarter_' + sd.slice(5) + '_' + ed.slice(5);
+    // ③ 确立批次身份：已有则复用（含从云端拉回的），确认云端无批次则开盘
+    //   🟢🔴 v228.49-fix3：_ensureActiveQuarter 现在**可能返回 null**（读不到云端时拒绝擅自开盘）。
+    //   旧写法 `this._currentQuarterSheetId() || this._quarterSheetId()` 里的后者会
+    //   **用当前时间现造一个 sheetId** —— 等于把刚堵住的擅自开盘又放开了（换了个地方开）。
+    //   故此处必须显式区分：
+    //     · 拿到锚点 → 正常开局；
+    //     · 拿不到（云端不可确认）→ 提示用户重试，**不进盘点**（进去了也是平行批次，盘完看不到）。
+    //   🟢 v228.49-fix3-修正：离线要**放行**（仓库弱网/离线是常态，用户就是要单机盘）。
+    //     区分对待——
+    //       · 离线            → 允许开盘，但只写本机、**不推云端**（联网后以云端为准），不会污染别端；
+    //       · 在线但读不到云端 → 拒绝开盘（这种读不到往往意味着别端正开着盘，此时开盘必然分叉）。
+    //     首版把两者一律拒绝，导致离线用户根本进不去季度盘点（回归套件 C-6 抓到）。
+    //
+    //   🟢 v228.65（用户反馈：清场后点「季度盘点」直接变「第 1 轮 · 进行中」，预期应是
+    //     「还没开始」）：在线且云端**确实没有**批次时，不再静默自动开盘 —— 先问一句。
+    //     清场的目的就是回到「未开始」状态；若清完一进去就自动开一盘，清场等于白清。
+    //     改后：弹确认框，用户点了「开始新的盘点」才开盘；取消则留在工作台（未开始状态）。
+    //     云端已有批次（state='has'）或读不到（'unknown'）时不弹，走原逻辑。
+    try {
+      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
+        const peek = await this._peekCloudActiveQuarter();
+        if (peek && peek.state === 'empty') {
+          let go = false;
+          try {
+            go = await WBModal.confirm(
+              '当前没有进行中的季度盘点。\n\n要现在开始新的一轮吗？',
+              { title: '🗓️ 季度盘点', okText: '开始新的盘点', cancelText: '暂不开始' });
+          } catch (e) { go = false; }
+          if (!go) return;   // 用户选择「还没开始」→ 留在工作台
+        }
+      }
+    } catch (e) { /* 探测失败不拦原流程 */ }
+    let aqEntry = null;
+    try { aqEntry = await this._ensureActiveQuarter({ allowOfflineOpen: true }); }
+    catch (e) { /* 忽略：下方判空处理 */ }
+    if (!aqEntry || !aqEntry.sheetId) {
+      const why = this._lastOpenBlockedReason || '无法确定云端当前批次';
+      this._lastOpenBlockedReason = null;
+      try {
+        await WBModal.alert(
+          '能连上云端，但读不到当前批次：' + why + '\n\n' +
+          '这种情况通常是另一端正在开盘。此时本端另起一批会导致：' +
+          '你盘的数据在管理员视图里看不到，管理员结束的也不是你这一批。\n\n' +
+          '已阻止本端开盘。请稍后重试，或先确认另一端是否已结束上一轮。',
+          { title: '⚠️ 未能进入季度盘点' });
+      } catch (e) { this.toast('无法确定云端批次（' + why + '），请联网后重试'); }
+      return;
+    }
+    const sheetId = this._currentQuarterSheetId() || aqEntry.sheetId;
+    // 身份确立后，把显示区间对齐（若锚点带了区间）
+    this._syncQuarterRangeFromActive();
+    const sd = this.query.startDate, ed = this.query.endDate;
+    // 🟢 v228.48：记住本次批次（身份 + 显示区间），重进工作台优先落回。
+    this._setLastQuarterSheet(sd, ed);
+    // 🟢 v228.32：进入季度盘点即刻锁定本轮基线（剔除 0/空存量后的连续序号空间）。
+    //   本机/云端已有则不重算 → 之后库存怎么变本轮序号都不动，分派出来的区间始终指同一批货。
+    try {
+      await Promise.race([
+        this._ensureQuarterBaseline(sheetId),
+        new Promise(res => setTimeout(res, 5000))     // 弱网兜底：超时不阻断开局
+      ]);
+    } catch (e) { console.warn('[stocktake] 生成季度基线失败(已忽略):', e && e.message); }
     // 续盘检测（同批次+同作业身份 草稿未清 或 任务 open 且未完成）
     // 🟢 v227.5：保存后点【返回】→ 不自动续盘，直接渲染季度初始界面（要能看见「本次盘点概览」）
     const skipQuarterResume = !!this._skipResumePrompt; this._skipResumePrompt = false;
@@ -1069,6 +2112,9 @@ const StocktakeModule = {
 
     // 🟢 v226：盘点号在「批次」层面生成（jd + 当日日期），本批次所有领取人共用同一个号
     this.batchNo = this._genBatchNo('quarter', sheetId);
+    // 🟢 v228.40（一-1/一-2）：把本机协调后的批次号回推云端，他端开局时即可拉齐到同一个号。
+    //   并行化（不 await 阻塞渲染）：推送失败也不影响本轮界面。
+    try { this._pushBatchCommonState(sheetId, this.batchNo); } catch (e) { /* 忽略 */ }
 
     // 🟢 v227.5：实时拉取云端「本次盘点概览」（其他盘点人刚完成的盘点数也会同步过来，
     //   让管理员视图/我的概览的数字保持一致）
@@ -1088,6 +2134,13 @@ const StocktakeModule = {
   _renderQuarterTaskPicker(sd, ed, sheetId, myTasks, allBatch, counter, myClosed, batchNo) {
     const area = document.getElementById('stArea');
     if (!area) return;
+    // 🟢 v228.36 修复：打「当前停在季度任务选择器」的结构标记，供轻量重渲判定视图状态。
+    //   旧实现靠正则匹配页面文案「季度盘点需由管理员分派」——而这句话**全库从未渲染过**，
+    //   导致 _refreshQuarterPickerLight / _refreshQuarterPickerIfShown 的守卫恒为 false，
+    //   轻量重渲成了死代码：点「开下一轮」后轮次与闸门都已正确解除，界面却永远停在
+    //   「⛔ 第 N 轮已结束」，用户以为没生效而反复点击（本次线上反馈的根因）。
+    //   标记的清除统一由 _setStocktakeView() 负责，避免遗漏某个 innerHTML 重写点。
+    this._setStocktakeView('quarter-picker');
     // 🟢 v227.68：记录当前作业视图上下文，供「刷新任务」重渲染本区（我的任务/分派/补盘）
     this._pickerCtx = { sd, ed, sheetId, counter, batchNo };
     const escA = (s) => typeof escAttr === 'function' ? escAttr(s) : String(s);
@@ -1097,18 +2150,60 @@ const StocktakeModule = {
     // 🟢 v227.12：当前轮次 + 已结束轮次（用于「第 N 轮」展示与「开下一轮」）
     const roundNo = this._getRoundNo(sheetId);
     const closedRound = this._getClosedRound(sheetId);
-    const roundBadge = roundClosed
-      ? `<span class="st-pill-error" style="margin-left:8px;font-size:12px;padding:2px 8px;border-radius:6px;">⛔ 第 ${closedRound || roundNo} 轮已结束</span>`
-      : `<span class="st-pill-success" style="margin-left:8px;font-size:12px;padding:2px 8px;border-radius:6px;">🟢 第 ${roundNo} 轮 · 进行中</span>`;
+    // 🟢 v228.37：轮次徽标显示管理员命名（如「2026年第3季度」），未命名回退「第 N 轮」
+    // 🟢 v228.65：改走 _roundBadgeHtml —— 无批次时显示「⚪ 未开始季度盘点」，
+    //   不再因 roundClosed=false 被误渲染成「🟢 第 1 轮 · 进行中」。
+    const roundBadge = this._roundBadgeHtml(sheetId, roundClosed, roundNo, closedRound);
 
+    // 🟢 v228.35（P5）：改用统一判定 isTaskEntryBlocked —— 与 _claimQuarterTask 的逻辑闸门严格同源。
+    //   旧版这里写的是 `roundClosed && !replenishAssigned && !isReplenish`，虽然条件等价，
+    //   但两处各写一遍，任何一侧漏改就会出现「显示能点、点了没用」的错位。
+    const blocked = (t) => this.isTaskEntryBlocked(t);
+    // 🟢 v228.41（优化项-4）：合并行用的「该盘点人全部段编码合集」计算器（闭包内复用）
+    const allSegCodesOf = (counter) => {
+      try { return this._codesForCounterSegments(counter, sd, ed); } catch (e) { return []; }
+    };
     const myRows = myTasks.map(t => `
-      <div class="st-banner-warning" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;margin-bottom:6px;">
-        <span style="font-size:13px;"><b>${escH(t.counter)}</b> · 序号 ${t.noStart}-${t.noEnd} · ${(t.codes || []).length} 项</span>
-        <span style="margin-left:auto;font-size:11px;color:var(--text-secondary);">${t.createdAt ? escH(String(t.createdAt).slice(0,10)) : ''}</span>
-        ${(roundClosed && !t.replenishAssigned)
-          ? '<span style="font-size:12px;color:#dc2626;padding:4px 12px;">⛔ 已结束</span>'
-          : `<button class="btn--primary" onclick="StocktakeModule._claimQuarterTask('${escA(t.taskId)}')" style="padding:4px 12px;font-size:12px;">${t.replenishAssigned ? '🔧 补盘' : '进入盘点'}</button>`}
-      </div>`).join('') || `<div style="display:flex;align-items:center;gap:10px;padding:14px 8px;color:var(--text-secondary);font-size:13px;">
+      <div class="st-banner-warning" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;margin-bottom:6px;flex-wrap:wrap;">
+        ${/* 🟢 v228.47：主文本在**窄屏**下独占一行，宽屏保持紧凑单行。
+              修复前该行是「主文本 + 日期 + 进入盘点 + 放弃任务」四个 flex 子项挤在 390px 内，
+              日期上的 margin-left:auto 把所有剩余空间吸走，主文本被压到近乎零宽 →
+              浏览器逐字降列，"管理员 · 序号 1-5 · 5 项" 竖成 12 行（线上截图病根）。
+              ⚠️ 不能用无条件 flex:1 1 100% —— 那会让 PC 宽屏也变成两行、卡片白白变高。
+              故用 min-width:0 + 断点：窄屏强制换行，宽屏允许收缩不换行。 */ ''}
+        <span class="st-my-task-main" style="font-size:13px;"><b>${escH(t.counter)}</b> · ${(() => {
+          // 🟢 v228.41（优化项-4）：同一位盘点人的多段任务在同一行内「逗号串联」展示，
+          //   与管理员视图（v228.40 二-2c）口径统一 —— 用户拿到 1-5、11-18 两段时，
+          //   旧实现拆成两行（各带一个「进入盘点」按钮），既占空间又让人以为要分两次进入。
+          //   改为：同 counter 的段合并成一行，区间逗号串联 + 项数合计 + 单一入口。
+          const segs = (myTasks || []).filter(x => x.counter === t.counter)
+            .map(x => [x.noStart, x.noEnd]).filter(p => p[0] != null && p[1] != null);
+          const uniqSegs = segs.filter((p, i) => segs.findIndex(q => q[0] === p[0] && q[1] === p[1]) === i)
+            .sort((a, b) => a[0] - b[0]);
+          const totalN = (myTasks || []).filter(x => x.counter === t.counter)
+            .reduce((s, x) => s + ((x.codes || []).length || 0), 0);
+          const segTxt = uniqSegs.length > 1
+            ? (uniqSegs.map(p => p[0] + '-' + p[1]).join('、') + ' · ' + uniqSegs.length + ' 个区间')
+            : ('序号 ' + t.noStart + '-' + t.noEnd);
+          return segTxt + ' · ' + totalN + ' 项';
+        })()}${t.isReplenish ? ' · <span style="color:#2563eb;">补派</span>' : ''}</span>
+        ${/* 🟢 v228.47：日期改「MM-DD」+ 标签 + nowrap。
+              修复前是裸值 String(createdAt).slice(0,10)（如 2026-09-01）：
+              ① 无标签，管理员分不清是分派日还是批次起始日；
+              ② 390px 视口下被挤成两行，且折行后的 "09-01" 与下一行首字粘连易误读为编号。
+              nowrap 保证日期整体换行而不是自身断行。 */ ''}
+        <span style="margin-left:auto;font-size:11px;color:var(--text-secondary);white-space:nowrap;" title="任务分派时间">${t.createdAt ? escH('分派于 ' + this._fmtShortDate(t.createdAt)) : ''}</span>
+        ${blocked(t)
+          ? '<span class="st-btn-disabled" role="button" aria-disabled="true" title="本轮已被管理员结束，不能进入盘点；如需补录漏盘请联系管理员指派补盘" style="font-size:12px;color:#dc2626;padding:4px 12px;">⛔ 已结束</span>'
+          : `<button class="btn--primary" data-allseg="${escA(JSON.stringify(allSegCodesOf(t.counter)))}" onclick="StocktakeModule._claimQuarterRow(this,'${escA(t.taskId)}')" style="padding:4px 12px;font-size:12px;">${t.replenishAssigned ? '🔧 补盘' : '进入盘点'}</button>`}
+        <button class="btn--ghost" onclick="StocktakeModule.returnTask('${escA(t.taskId)}')" style="padding:4px 12px;font-size:12px;margin-left:6px;" title="放弃该任务，回退管理员处重新分派">放弃任务</button>
+      </div>`).filter((row, i, arr) => {
+        // 🟢 v228.41（优化项-4）：合并后去重 —— 同 counter 只保留首个（含全部区间汇总的）行。
+        const counters = arr.slice(0, i).map(h => { const m = h.match(/<b>([^<]*)<\/b>/); return m ? m[1] : ''; });
+        const curM = row.match(/<b>([^<]*)<\/b>/);
+        const cur = curM ? curM[1] : '';
+        return cur && counters.indexOf(cur) < 0;
+      }).join('') || `<div style="display:flex;align-items:center;gap:10px;padding:14px 8px;color:var(--text-secondary);font-size:13px;">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 28px;color:var(--text-muted);opacity:0.65;">
           <rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z" fill="currentColor" fill-opacity="0.18"/>
           <line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="13" y2="15"/>
@@ -1153,18 +2248,40 @@ const StocktakeModule = {
 
     // 🟢 v224：已结束任务 → 补盘入口（漏盘补录）
     const closedArr = myClosed || [];
+    // 🟢 v228.40（二-2a）修复：补盘块的展示条件 —— 旧实现只在 roundClosed 时渲染，
+    //   导致「盘点人刚结束盘点、管理员还没结束整轮」这个最需要补盘的窗口里，漏盘补盘入口根本不出现
+    //   （线上反馈图：nx 已结束但有 2 项漏盘，nx 界面仍显示「暂无分配给你的任务」）。
+    //   现改为：只要有「本人已结束且存在漏盘」的任务，就渲染该块（不论轮次是否已关闭）。
+    //   roundClosed=true 时仍保留原本「本批次已被管理员结束」的语义提示。
     const closedRows = closedArr.map(t => `
       <div class="st-banner-info" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;margin-bottom:6px;">
-        <span style="font-size:13px;"><b>${escH(t.counter)}</b> · 序号 ${t.noStart}-${t.noEnd} · ${(t.codes || []).length} 项 · <span style="color:#2563eb;">已结束</span></span>
+        <span style="font-size:13px;"><b>${escH(t.counter)}</b> · 序号 ${t.noStart}-${t.noEnd} · ${(t.codes || []).length} 项 · <span style="color:#2563eb;">已结束</span>${(() => {
+          // 🟢 v228.40（二-2a）：把「漏盘 N 项」显式标在补盘行上 —— 用户视角「有 2 项漏盘却看不到补盘」，
+          //   一是入口不出现（已修），二是即使出现也看不出要补几项。取跨端概览的 unfilledCount。
+          // 🟢 v228.41（优化项-2）：再进一步 —— 悬停即可预览「是哪几项漏盘」。
+          //   漏盘 codes 取本任务的 codes 减去跨端概览已盘数对应的项太脆弱，
+          //   改为直接用概览缺失编码清单（unfilledCodes / leakCodes 任一存在即用），取不到则回退纯计数。
+          try {
+            const ov = this._getAllOverviews()[this._overviewKey(t.counter, t.sheetId || sheetId)] || null;
+            const n = (ov && ov.unfilledCount) || 0;
+            if (!(n > 0)) return '';
+            const leakCodes = (ov && (ov.unfilledCodes || ov.leakCodes)) || [];
+            const titleTxt = leakCodes.length
+              ? ('漏盘编码：' + leakCodes.slice(0, 30).join('、') + (leakCodes.length > 30 ? ' …' : ''))
+              : ('本任务共 ' + n + ' 项未盘，点「补盘」后只会列出这些编码');
+            return ` · <span style="color:#dc2626;font-weight:600;cursor:help;" title="${escA(titleTxt)}">漏盘 ${n} 项</span>`;
+          } catch (e) { return ''; }
+        })()}</span>
         <span style="margin-left:auto;font-size:11px;color:var(--text-secondary);">${t.closedAt ? escH(String(t.closedAt).slice(0, 10)) : ''}</span>
-        ${(roundClosed && !t.replenishAssigned)
-          ? '<span style="font-size:12px;color:#dc2626;padding:4px 12px;">⛔ 已结束</span>'
+        ${blocked(t)
+          ? '<span class="st-btn-disabled" role="button" aria-disabled="true" title="本轮已被管理员结束，不能补盘；如需补录漏盘请联系管理员指派补盘" style="font-size:12px;color:#dc2626;padding:4px 12px;">⛔ 已结束</span>'
           : `<button class="btn--ghost" onclick="StocktakeModule._claimQuarterTask('${escA(t.taskId)}')" style="padding:4px 12px;font-size:12px;">${t.replenishAssigned ? '🔧 补盘（管理员指派）' : '补盘'}</button>`}
+        <button class="btn--ghost" onclick="StocktakeModule.returnLeak('${escA(t.taskId)}')" style="padding:4px 12px;font-size:12px;margin-left:6px;" title="放弃补盘，将漏盘项退回管理员处补派">放弃补盘</button>
       </div>`).join('');
 
-    // 🟢 v227.21：补盘仅限「已结束的轮次」。新轮次（roundClosed=false）下若云端把上一轮的
-    //   closed 任务同步回来，本块一律不渲染，避免上一轮漏盘伪装成本轮「补盘」入口。
-    const closedBlock = (roundClosed && closedRows) ? `
+    // 🟢 v228.40（二-2a）：只要本人有「已结束」任务就渲染补盘块（不再限定 roundClosed）。
+    //   漏盘项自动归本人补盘（无需管理员指派）；本人点「放弃补盘」才退回管理员补派池。
+    const closedBlock = closedRows ? `
         <div style="background:var(--bg-card,#fff);border:1px solid var(--border-color,#e5e7eb);border-radius:10px;padding:14px;margin-bottom:12px;">
           <div style="font-size:13px;font-weight:600;margin-bottom:6px;">🧩 我的补盘（已结束的任务）</div>
           ${(function () {
@@ -1172,7 +2289,7 @@ const StocktakeModule = {
             if (anyAssigned) return '<div style="font-size:12px;color:#2563eb;margin-bottom:6px;">🔧 管理员已指派你补盘 —— 点「补盘」后只会列出尚未盘过的编码。</div>';
             return roundClosed
               ? '<div style="font-size:12px;color:#dc2626;margin-bottom:6px;">本批次已被管理员结束，不可再补盘。</div>'
-              : '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">发现漏盘可点「补盘」继续，系统只会列出你还没盘过的编码。</div>';
+              : '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">发现漏盘可点「补盘」继续，系统只会列出你还没盘过的编码；若无需补录，可点「放弃补盘」退回管理员重派。</div>';
           })()}
           ${closedRows}
         </div>` : '';
@@ -1195,10 +2312,16 @@ const StocktakeModule = {
               <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#16a34a;animation:pulse 2s infinite;"></span>
               实时同步
             </span>
+            ${/* 🟢 v228.48-fix2：把「清场重置」从控制台命令搬进界面。
+                  用户真机反馈：「两边都没有办法清，你不能帮我清一下嘛」「电脑上这样也麻烦」——
+                  原方案要求两端各开 F12 控制台敲 `resetQuarterSyncState()`，仓库场景不现实。
+                  这里给出界面入口（需 stocktakeAssign 权限 + 二次确认），语义与命令完全一致。 */ ''}
+            ${isAdmin ? `<button class="btn--ghost" onclick="StocktakeModule.showSyncDiagnose()" title="查看本机与云端的批次/会话/进度是否一致，分叉时可一键对齐" style="margin-left:auto;padding:2px 8px;font-size:11px;line-height:1.3;opacity:.75;">🩺 诊断</button>` : ''}
+            ${isAdmin ? `<button class="btn--ghost" onclick="StocktakeModule.resetFromUI()" title="把本机的季度批次/轮次/任务/概览缓存清成干净起点（会先备份，可回滚）" style="padding:2px 8px;font-size:11px;line-height:1.3;opacity:.75;">🧹 清场</button>` : ''}
           </div>
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
             <span style="font-size:13px;font-weight:600;">📋 我的任务</span>
-            <button id="stTaskRefresh" class="btn--ghost as-refresh-btn" onclick="StocktakeModule.refreshMyTasks()" title="从云端同步他人（管理员）分派给我的任务" style="padding:3px 9px;font-size:12px;line-height:1.3;">🔄 刷新任务</button>
+            <button id="stTaskRefresh" class="btn--ghost as-refresh-btn" onclick="StocktakeModule.refreshMyTasks()" title="从云端全量刷新：批次身份 / 轮次状态 / 分派给我的任务 / 管理员视图·盘点人进度" style="padding:3px 9px;font-size:12px;line-height:1.3;">🔄 刷新</button>
           </div>
           ${myRows}
         </div>
@@ -1221,6 +2344,22 @@ const StocktakeModule = {
     // 🟢 v227.21：是否「已结束轮次」—— 补盘入口的唯一合法前提（见下方 finished 分支守卫）
     const roundClosed = this.isQuarterRoundClosed(sheetId);
     const escH = (s) => typeof esc === 'function' ? esc(s) : String(s);
+    // 🟢 v228.40（二-1a）：本批次是否存在「已派给某人」的任务。
+    //   存在 → 「上一轮盘点已归档…本轮尚未分派任务」提示条必须整条隐藏（用户已确认口径）：
+    //   该提示只在「上一轮已结束、本轮尚无任务」的阶段才成立；有任务还提示「尚未分派」自相矛盾
+    //   （线上反馈图：明明有「管理员 1-103 · 103 项」任务卡，下面仍说本轮尚未分派）。
+    const batchHasAnyTask = Object.keys(DataStore.getStocktakeTasks() || {}).some(k => {
+      const t = DataStore.getStocktakeTasks()[k];
+      if (!t || t.deleted) return false;
+      if (t.returned || t.leakReturned) return false;   // 已退回/已放弃的不算「有任务」
+      return this._taskInCurrentBatch(t, sd, ed);
+    });
+    // 🟢 v228.35（P11）：本批次已存在任务时不再渲染「本次盘点未开始」。
+    //   旧版会出现「本次盘点未开始 / 尚未开启本批次盘点」与下方「本批次全部任务（已分派 2 人）」
+    //   同时显示的自相矛盾画面，管理员看了会疑惑「到底开始没开始」。
+    if (!ov && !roundClosed) {
+      if (batchHasAnyTask) return '';
+    }
     // 文案与按钮按状态分流
     let head, body, btnLabel, btnClick, btnClass, hint;
     if (!ov) {
@@ -1261,10 +2400,13 @@ const StocktakeModule = {
         //   finished 概览，必是上一轮残留在云端的旧概览被同步回来（弱网/时序），绝不能当成
         //   本轮补盘入口 —— 否则「开下一轮」后上一轮漏盘会伪造成本轮补盘。
         if (!roundClosed) {
+          // 🟢 v228.40（二-1a）：本批次已有任务 → 该提示整条隐藏（已派任务 ≠ 尚未分派）。
+          if (batchHasAnyTask) return '';
+          // 🟢 v228.34：同 in_progress 分支 —— 归档提示不拼 stats，避免展示上一轮的漏盘数字误导用户。
           head = '上一轮盘点已归档';
           btnLabel = ''; btnClick = ''; btnClass = 'primary';
-          hint = '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">本轮为进行中的新轮次，上一轮概览不适用。开始新一轮后请由管理员重新分派任务。</div>';
-          body = `<div style="font-size:13px;margin-top:4px;">盘点号 <b>${escH(batchNo)}</b> 上一轮已结束并归档，本新一轮请重新分派后再盘点。</div>` + stats;
+          hint = '';
+          body = `<div style="font-size:13px;margin-top:4px;color:var(--text-secondary);">盘点号 <b>${escH(batchNo)}</b> 的上一轮已结束并归档。本新一轮尚未分派任务，请由管理员分派后再盘点。</div>`;
         } else if (hasClosed) {
           // 已有「🧩 我的补盘」区块提供补盘入口 → 概览块不出重复按钮
           head = '本次盘点已结束，发现漏盘！请及时补盘';
@@ -1282,24 +2424,66 @@ const StocktakeModule = {
           body = `<div style="font-size:13px;margin-top:4px;">盘点号 <b>${escH(batchNo)}</b> 已结束，但仍有 <b style="color:#dc2626;">${unfilled}</b> 项未盘点。</div>` + stats;
         }
       } else {
-        head = '本次盘点未结束！请继续';
-        btnLabel = '继续盘点';
-        btnClick = `StocktakeModule._resumeFromMyOverview('${escH(counter)}','${escH(sheetId)}')`;
-        btnClass = 'primary';
-        hint = '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">已盘点数据已保存为草稿，可直接继续；点【继续盘点】恢复现场。</div>';
-        body = `<div style="font-size:13px;margin-top:4px;">盘点号 <b>${escH(batchNo)}</b> 进度：</div>` + stats;
+        // 🟢 v228.34：新轮次（roundClosed=false）时不应该出现 in_progress 概览，
+        //   若出现则是上一轮残留（云端异步回灌 / 多设备竞争 / 清概览 push 未及时生效）。
+        //   与上方 finished 分支（line 1314）保持一致的轮次防御：新轮次一律按"上一轮已归档"处理。
+        if (!roundClosed) {
+          // 🟢 v228.40（二-1a）：本批次已有任务 → 该提示整条隐藏（已派任务 ≠ 尚未分派）。
+          if (batchHasAnyTask) return '';
+          // 🟢 v228.34：不再拼 stats —— 「上一轮已归档」却展示上一轮的 0/5 进度会误导用户，
+          //   让人以为本轮有 5 项待盘。新轮次下只保留归档说明，数字一律不显示。
+          head = '上一轮盘点已归档';
+          btnLabel = ''; btnClick = ''; btnClass = 'primary';
+          hint = '';
+          body = `<div style="font-size:13px;margin-top:4px;color:var(--text-secondary);">盘点号 <b>${escH(batchNo)}</b> 的上一轮已结束并归档。本新一轮尚未分派任务，请由管理员分派后再盘点。</div>`;
+        } else {
+          head = '本次盘点未结束！请继续';
+          btnLabel = '继续盘点';
+          btnClick = `StocktakeModule._resumeFromMyOverview('${escH(counter)}','${escH(sheetId)}')`;
+          btnClass = 'primary';
+          hint = '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">已盘点数据已保存为草稿，可直接继续；点【继续盘点】恢复现场。</div>';
+          body = `<div style="font-size:13px;margin-top:4px;">盘点号 <b>${escH(batchNo)}</b> 进度：</div>` + stats;
+        }
       }
     }
     const btn = btnLabel
       ? `<button class="${btnClass}" onclick="${btnClick}" style="padding:6px 14px;font-size:13px;">${btnLabel}</button>`
       : '';
     return `
-      <div style="background:var(--bg-card,#fff);border:1px solid var(--border-color,#e5e7eb);border-radius:10px;padding:14px;margin-bottom:12px;">
+      <div id="stMyOverviewBlock" style="background:var(--bg-card,#fff);border:1px solid var(--border-color,#e5e7eb);border-radius:10px;padding:14px;margin-bottom:12px;">
         <div style="font-size:13px;font-weight:600;margin-bottom:6px;">📊 ${head}</div>
         ${body}
         ${hint}
         ${btn ? '<div style="margin-top:8px;">' + btn + '</div>' : ''}
       </div>`;
+  },
+
+  // 🟢 v228.47：相对时间文案 —— 「我的任务」与「本批次全部任务」两处共用。
+  //   修复前同一屏里并存两种时间表达（我的任务给绝对日期「2026-09-01」、管理员视图给
+  //   相对时长「最后活动 14 天前」），用户读同一类信息要切换心智；且裸值无标签，
+  //   管理员无从判断 2026-09-01 是"分派日"还是"批次起始日"。
+  _fmtRelativeTime(ms) {
+    if (!ms) return '';
+    const diff = Date.now() - ms;
+    if (diff < 0) return '刚刚';          // 时钟漂移/未来时间：不显示"负几分钟前"
+    const min = Math.floor(diff / 60000);
+    if (min < 1) return '刚刚';
+    if (min < 60) return min + ' 分钟前';
+    if (min < 1440) return Math.floor(min / 60) + ' 小时前';
+    return Math.floor(min / 1440) + ' 天前';
+  },
+
+  // 🟢 v228.47：把 ISO 时间转成「MM-DD」（去掉年份）。
+  //   同一批次的任务日期必然同年，年份占位却最宽 —— 截图里正是 "2026-09-01" 在
+  //   390px 视口被挤成 "2026-" / "09-01" 两行，且 "09-01" 与新行首字粘连易误读为编号。
+  //   解析失败回退原始字符串前 10 位，保证不渲染出 "Invalid Date"。
+  _fmtShortDate(iso) {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return String(iso).slice(0, 10);
+      return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    } catch (e) { return String(iso).slice(0, 10); }
   },
 
   /**
@@ -1314,27 +2498,61 @@ const StocktakeModule = {
     // 🟢 v227.12：本函数内用到的轮次变量（picker 里另有同名局部，这里独立计算避免未定义）
     const roundNo = this._getRoundNo(sheetId);
     const closedRound = this._getClosedRound(sheetId);
-    const roundBadge = roundClosed
-      ? `<span class="st-pill-error" style="margin-left:8px;font-size:12px;padding:2px 8px;border-radius:6px;">⛔ 第 ${closedRound || roundNo} 轮已结束</span>`
-      : `<span class="st-pill-success" style="margin-left:8px;font-size:12px;padding:2px 8px;border-radius:6px;">🟢 第 ${roundNo} 轮 · 进行中</span>`;
+    // 🟢 v228.37：管理员视图徽标同 picker —— 命名优先，未命名回退「第 N 轮」
+    // 🟢 v228.65：同上改走 _roundBadgeHtml（三态：未开始 / 进行中 / 已结束）。
+    const roundBadge = this._roundBadgeHtml(sheetId, roundClosed, roundNo, closedRound);
     const grouped = {};  // counter -> { counter, noStart, noEnd, count, codesLen, taskIds }
     (allBatch || []).forEach(t => {
       if (!t || !t.counter) return;
       const c = t.counter;
-      if (!grouped[c]) grouped[c] = { counter: c, noStart: t.noStart, noEnd: t.noEnd, count: 0, codesLen: 0, taskIds: [], status: 'open', replenishAssigned: false };
+      if (!grouped[c]) grouped[c] = { counter: c, noStart: t.noStart, noEnd: t.noEnd, count: 0, codesLen: 0, taskIds: [], status: 'open', replenishAssigned: false,
+                                      lastActiveAt: '', claimedAt: '', started: false, intervals: [] };
       grouped[c].count++;
       grouped[c].codesLen += (t.codes || []).length;
       grouped[c].taskIds.push(t.taskId);
       if (t.replenishAssigned) grouped[c].replenishAssigned = true;
       if (t.status === 'closed') grouped[c].status = grouped[c].status === 'open' ? 'closed' : grouped[c].status;
-      // 取最小 noStart / 最大 noEnd
+      // 🟢 v228.35（P6）：汇总「最后活动时间」与「是否已开工」，用于三态徽标
+      if (t.started) grouped[c].started = true;
+      const ts = t.claimedAt || t.updatedAt || t.createdAt || '';
+      if (ts && String(ts) > String(grouped[c].lastActiveAt || '')) grouped[c].lastActiveAt = String(ts);
+      if (t.claimedAt && String(t.claimedAt) > String(grouped[c].claimedAt || '')) grouped[c].claimedAt = String(t.claimedAt);
+      // 取最小 noStart / 最大 noEnd（兜底展示用）
       if (grouped[c].noStart == null || t.noStart < grouped[c].noStart) grouped[c].noStart = t.noStart;
       if (grouped[c].noEnd == null || t.noEnd > grouped[c].noEnd) grouped[c].noEnd = t.noEnd;
+      // 🟢 v228.40（二-2c）：保留「每段区间」原样 —— 旧实现只存 min/max，管理员 1-5 补派 11-18 后
+      //   被合并显示成「1-18」，掩盖了两段独立分配的事实。这里收集真实区间，展示时逐段列出。
+      if (t.noStart != null && t.noEnd != null) grouped[c].intervals.push([t.noStart, t.noEnd]);
     });
     // 用户（counter）概览填充
     const rows = Object.keys(grouped).map(c => {
       const g = grouped[c];
       const ov = ovMap[this._overviewKey(c, sheetId)] || null;
+      // 🟢 v228.35（P6）：三态开工徽标 —— 未开工 / 盘点中 / 已结束。
+      //   旧版只显示「已盘 x/y」，管理员分不清「没开工」「进来看了眼就走了」「暂存了 2 项」，
+      //   只能打电话问「你盘了吗」，监控面板形同虚设。
+      //   started/claimedAt 字段本来就有，只是从未渲染 —— 这里把它用起来。
+      const lastAtMs = g.lastActiveAt ? new Date(g.lastActiveAt).getTime() : 0;
+      const idleMs = lastAtMs ? (Date.now() - lastAtMs) : 0;
+      const idleText = this._fmtRelativeTime(lastAtMs);
+      // 「盘点中」= 有开工痕迹（认领过）且任务未全部结束
+      const inProgress = !roundClosed && g.status !== 'closed' && (g.started || !!g.claimedAt);
+      const isFinished = g.status === 'closed';
+      let stateBadge;
+      if (roundClosed) {
+        stateBadge = '<span class="st-state st-state--closed">⛔ 本轮已结束</span>';
+      } else if (isFinished) {
+        stateBadge = '<span class="st-state st-state--done">✅ 已结束</span>';
+      } else if (inProgress) {
+        // 🟢 超 30 分钟无活动 → 转橙色预警，提示管理员跟进（仓库里「人走单未结」是常态）
+        stateBadge = idleMs > 30 * 60000
+          ? `<span class="st-state st-state--idle" title="已 ${idleText || '较长时间'}无操作，建议跟进">🟠 盘点中 · 停滞</span>`
+          : '<span class="st-state st-state--ing">🟡 盘点中</span>';
+      } else {
+        stateBadge = '<span class="st-state st-state--todo">⚪ 未开工</span>';
+      }
+      const idleHtml = (lastAtMs && !isFinished && !roundClosed)
+        ? `<span style="color:var(--text-muted);font-size:11px;white-space:nowrap;">最后活动 ${escH(idleText)}</span>` : '';
       let statsHtml = '';
       if (ov && ov.totalCount) {
         const counted = (ov.realCount || 0) + (ov.zeroCount || 0);
@@ -1345,7 +2563,8 @@ const StocktakeModule = {
         const diffHtml = (ov.diffCount > 0) ? ` <span style="color:#dc2626;font-weight:700;">· 差异 ${ov.diffCount}</span>` : '';
         statsHtml = ` <span style="color:${color};">已盘 ${ov.realCount || 0}/${ov.totalCount}（${ov.completionRate || 0}%${ov.unfilledCount ? ' · 漏 ' + ov.unfilledCount : ''}${diffHtml}${ov.status === 'finished' ? ' · 已结束' : ''}）</span>`;
       } else {
-        statsHtml = ` <span style="opacity:.6;">尚未开启</span>`;
+        statsHtml = inProgress ? ' <span style="opacity:.6;">已开工，暂无落库记录</span>'
+                               : ' <span style="opacity:.6;">尚未开启</span>';
       }
       // 🟢 v227.14：有漏盘 → 管理员可「指派补盘」（原盘点人本人补，归属不变）
       const unfilledN = (ov && ov.unfilledCount) || 0;
@@ -1358,15 +2577,35 @@ const StocktakeModule = {
           : ''));
       return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px dashed var(--border-color,#eee);font-size:13px;flex-wrap:wrap;">
         <span style="min-width:90px;"><b>${escH(g.counter)}</b></span>
-        <span style="color:var(--text-secondary);">${g.noStart || '-'}–${g.noEnd || '-'} · ${g.count} 个区间 · ${g.codesLen} 项</span>
+        <span style="color:var(--text-secondary);">${(() => {
+          // 🟢 v228.40（二-2c）：按真实分派区间逐段展示（同行逗号串联），不再用 min-max 合并成一段。
+          //   去重 + 排序，保证多端展示稳定；无区间信息时回退旧的 min-max。
+          const iv = (g.intervals || []).slice()
+            .map(p => [Number(p[0]), Number(p[1])])
+            .filter(p => isFinite(p[0]) && isFinite(p[1]))
+            .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+          const uniq = [];
+          iv.forEach(p => { const last = uniq[uniq.length - 1]; if (!last || last[0] !== p[0] || last[1] !== p[1]) uniq.push(p); });
+          const txt = uniq.length
+            ? uniq.map(p => p[0] + '–' + p[1]).join('、')
+            : ((g.noStart || '-') + '–' + (g.noEnd || '-'));
+          return escH(txt) + ' · ' + uniq.length + ' 个区间 · ' + g.codesLen + ' 项';
+        })()}</span>
+        ${stateBadge}
         ${statsHtml}
-        <span style="margin-left:auto;color:var(--text-secondary);font-size:11px;">${roundClosed ? '⛔ 已结束' : (g.status === 'closed' ? '✅ 已完成' : '🟡 进行中')}</span>
+        <span style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;">${idleHtml}${roundClosed && !isFinished ? '' : ''}</span>
         ${replenishBtn}
       </div>`;
     }).join('');
     const endBatchBtn = roundClosed
-      ? `<span style="font-size:12px;color:#dc2626;">⛔ 第 ${closedRound || roundNo} 轮已结束（${escH(batchNo)}）</span>`
+      ? `<span style="font-size:12px;color:#dc2626;">⛔ ${escH(this._roundDisplay(sheetId, closedRound || roundNo))} 已结束（${escH(batchNo)}）</span>`
       : `<button class="btn--danger" onclick="StocktakeModule.endQuarterRound('${escA(sheetId)}')" style="padding:6px 14px;font-size:13px;">结束季度盘点</button>`;
+    // 🟢 v228.35（P5）：紧急结束入口 —— 只锁入口、不结算，处理「有人一直不交、必须马上锁盘」。
+    //   与「结束季度盘点」并排但视觉降级为 ghost，避免误点把正常结算流程绕过去。
+    const emergencyBtn = roundClosed ? ''
+      : `<button class="btn--ghost" onclick="StocktakeModule.emergencyCloseRound('${escA(sheetId)}')" `
+        + `title="紧急锁盘：立即关闭盘点人入口，不归档未提交数据。适合有人长期未提交、必须马上停止盘点的场景" `
+        + `style="padding:6px 14px;font-size:13px;">🚨 紧急结束本轮</button>`;
     // 🟢 v227.12：已结束 → 提供「开下一轮」入口（解闸 + 重置任务），解决「结束后再也开不了下一轮」
     const nextRoundBtn = roundClosed
       ? `<button class="btn--primary" onclick="StocktakeModule.startNextRound('${escA(sheetId)}')" style="padding:6px 14px;font-size:13px;">🔄 开下一轮盘点</button>`
@@ -1380,8 +2619,13 @@ const StocktakeModule = {
            点其所在行最右侧的 <b>🔧 指派补盘（漏 N）</b> 按钮，即可指定该盘点人回来补录未盘编码（归属不变、不产生重复行）。
          </div>`
       : '';
+    // 🟢 v228.34：退回待分配池 + 补盘人员监控（实时取基线序号，复用现有概览）
+    const _baselineCodes = (this._peekQuarterBaseline(sheetId) || {}).codes || [];
+    const _serialOf = new Map(_baselineCodes.map((c, i) => [c, i + 1]));
+    const returnedBlock = this._renderReturnedPoolBlock(this._returnedPool(sheetId, sd, ed, _serialOf), sheetId);
+    const monitorBlock = this._renderReplenishMonitorBlock(sheetId, sd, ed, ovMap, _serialOf);
     return `
-      <div style="background:var(--bg-card,#fff);border:1px solid var(--border-color,#e5e7eb);border-radius:10px;padding:14px;">
+      <div id="stAdminBatchBlock" style="background:var(--bg-card,#fff);border:1px solid var(--border-color,#e5e7eb);border-radius:10px;padding:14px;">
         <div style="font-size:13px;font-weight:600;margin-bottom:6px;">👑 本批次全部任务（管理员视图）${roundBadge}</div>
         ${leakHint}
         ${rows || `<div style="display:flex;align-items:center;gap:10px;padding:14px 8px;color:var(--text-secondary);font-size:13px;">
@@ -1394,10 +2638,98 @@ const StocktakeModule = {
           </div>
         </div>`}
         <div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <button class="btn--primary" onclick="StocktakeModule.openAssignDialog()" style="padding:6px 14px;font-size:13px;">➕ 分派任务</button>
+          ${roundClosed
+            // 🟢 v228.65（用户反馈）：本轮已结束、还没开下一轮时，「分派任务」不该能点 ——
+            //   此时派的活没有归属的轮次。置灰禁用；补盘不受影响（走行内「指派补盘」/「补派任务」）。
+            ? `<button class="btn--primary" disabled title="本轮已结束，点「🔄 开下一轮盘点」后再分派"
+                 style="padding:6px 14px;font-size:13px;opacity:.45;cursor:not-allowed;">➕ 分派任务</button>`
+            : `<button class="btn--primary" onclick="StocktakeModule.openAssignDialog()" style="padding:6px 14px;font-size:13px;">➕ 分派任务</button>`}
           ${endBatchBtn}
+          ${emergencyBtn}
           ${nextRoundBtn}
         </div>
+        ${returnedBlock}
+      </div>
+      ${monitorBlock}`;
+  },
+
+  // 🟢 v228.34：退回待分配池（放弃任务 + 放弃补盘 的未重派编码）—— 同步取基线序号
+  _returnedPool(sheetId, sd, ed, serialOf) {
+    const allTasks = DataStore.getStocktakeTasks() || {};
+    const out = [];
+    Object.keys(allTasks).forEach(k => {
+      const t = allTasks[k];
+      if (!t || (!t.returned && !t.leakReturned)) return;
+      if (!this._taskInCurrentBatch(t, sd, ed)) return;
+      const all = (t.returned ? (t.codes || []) : (t.returnedLeakCodes || [])).filter(Boolean);
+      const replenished = new Set(t.replenishedCodes || []);
+      const availCodes = all.filter(c => !replenished.has(c));
+      if (!availCodes.length) return;
+      const availSerials = availCodes.map(c => serialOf ? serialOf.get(c) : null).filter(Boolean).sort((a, b) => a - b);
+      out.push({ taskId: t.taskId, from: t.returned ? 'task' : 'leak', originCounter: t.counter, availCodes, availSerials });
+    });
+    return out;
+  },
+
+  // 🟢 v228.34：渲染「📥 退回待分配」卡片（纯展示列表 + 一个「补派任务」按钮，无每行按钮）
+  //   卡片始终渲染（即使无退回项也保留「补派任务」按钮），满足「管理员视图增加补派任务按钮」要求。
+  _renderReturnedPoolBlock(pool, sheetId) {
+    const escH = (s) => typeof esc === 'function' ? esc(s) : String(s);
+    const items = (pool && pool.length) ? pool.map(p => {
+      const serials = p.availSerials;
+      const rangeTxt = serials.length ? (serials[0] + (serials.length > 1 ? '–' + serials[serials.length - 1] : '')) : '-';
+      const fromLabel = p.from === 'task' ? '放弃任务' : '放弃补盘';
+      const origin = p.originCounter ? escH(p.originCounter) : '（无）';
+      const codesPreview = p.availCodes.slice(0, 8).map(escH).join('、') + (p.availCodes.length > 8 ? ' …' : '');
+      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 10px;border-bottom:1px dashed var(--border-color,#eee);font-size:12.5px;">
+        <span><b>${fromLabel}</b> · 原负责人 ${origin} · 可补派 <b>${serials.length}</b> 项（序号 ${rangeTxt}）</span>
+        <span style="margin-left:auto;color:var(--text-secondary);font-size:11px;">编码：${codesPreview}</span>
+      </div>`;
+    }).join('') : `<div style="font-size:12px;color:var(--text-secondary);padding:4px 0;">当前没有退回待分配项。</div>`;
+    return `
+      <div style="margin-top:12px;background:var(--bg-card,#fff);border:1px solid var(--border-color,#e5e7eb);border-radius:10px;padding:14px;">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px;">📥 退回待分配（放弃任务 / 放弃补盘）</div>
+        ${items}
+        <div style="margin-top:8px;">
+          <button class="btn--primary" onclick="StocktakeModule.openReplenishDialog()" style="padding:5px 14px;font-size:12.5px;">📥 补派任务</button>
+        </div>
+      </div>`;
+  },
+
+  // 🟢 v228.34：渲染「📥 补盘人员监控」卡片 —— 复用现有 per-counter 概览 + 颜色/差异逻辑
+  _renderReplenishMonitorBlock(sheetId, sd, ed, ovMap, serialOf) {
+    const allTasks = DataStore.getStocktakeTasks() || {};
+    const mon = Object.keys(allTasks).map(k => allTasks[k])
+      .filter(t => this._taskInCurrentBatch(t, sd, ed) && (t.isReplenish === true || t.replenishAssigned === true));
+    if (!mon.length) return '';
+    const escH = (s) => typeof esc === 'function' ? esc(s) : String(s);
+    const rows = mon.map(t => {
+      const ov = ovMap[this._overviewKey(t.counter, sheetId)] || null;
+      let statsHtml = '';
+      if (ov && ov.totalCount) {
+        const color = ov.status === 'finished' && ov.unfilledCount === 0 ? '#16a34a'
+                    : ov.status === 'finished' ? '#b45309'
+                    : (ov.completionRate >= 100 ? '#2563eb' : '#6b7280');
+        const diffHtml = (ov.diffCount > 0) ? ` <span style="color:#dc2626;font-weight:700;">· 差异 ${ov.diffCount}</span>` : '';
+        statsHtml = ` <span style="color:${color};">已盘 ${ov.realCount || 0}/${ov.totalCount}（${ov.completionRate || 0}%${ov.unfilledCount ? ' · 漏 ' + ov.unfilledCount : ''}${diffHtml}${ov.status === 'finished' ? ' · 已结束' : ''}）</span>`;
+      } else {
+        statsHtml = ` <span style="opacity:.6;">尚未开启</span>`;
+      }
+      const fromLabel = t.isReplenish ? '补派' : '漏盘补派';
+      const serials = (t.codes || []).map(c => serialOf ? serialOf.get(c) : null).filter(Boolean).sort((a, b) => a - b);
+      const rangeTxt = serials.length ? (serials[0] + (serials.length > 1 ? '–' + serials[serials.length - 1] : '')) : '-';
+      const statusLabel = (t.status === 'closed' || (ov && ov.status === 'finished')) ? '✅ 已完成' : '🟡 补盘中';
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px dashed var(--border-color,#eee);font-size:13px;flex-wrap:wrap;">
+        <span style="min-width:80px;"><b>${escH(t.counter)}</b></span>
+        <span style="color:var(--text-secondary);">${fromLabel} · 序号 ${rangeTxt} · ${(t.codes || []).length} 项</span>
+        ${statsHtml}
+        <span style="margin-left:auto;font-size:11px;color:var(--text-secondary);">${statusLabel}</span>
+      </div>`;
+    }).join('');
+    return `
+      <div style="margin-top:12px;background:var(--bg-card,#fff);border:1px solid var(--border-color,#e5e7eb);border-radius:10px;padding:14px;">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px;">📥 补盘人员监控</div>
+        ${rows}
       </div>`;
   },
 
@@ -1414,7 +2746,7 @@ const StocktakeModule = {
       const s = this._getOpenSession();
       if (s && s.sheetType === 'quarter' && (!s.counter || s.counter === counter)) effectiveSheetId = s.sheetId || effectiveSheetId;
     } catch (e) { /* 忽略 */ }
-    if (!effectiveSheetId) effectiveSheetId = 'quarter_' + sd.slice(5) + '_' + ed.slice(5);
+    if (!effectiveSheetId) effectiveSheetId = this._currentQuarterSheetId() || this._quarterSheetId();
 
     const info = await this._detectUnfinished(effectiveSheetId, 'quarter', counter);
     if (info) {
@@ -1442,12 +2774,13 @@ const StocktakeModule = {
   async _replenishClosedQuarterFor(counter) {
     this._ensureDefaultRange();
     const sd = this.query.startDate, ed = this.query.endDate;
-    const sheetId = 'quarter_' + sd.slice(5) + '_' + ed.slice(5);
+    const sheetId = this._currentQuarterSheetId() || this._quarterSheetId();
     const tasks = DataStore.getStocktakeTasks() || {};
     const myClosed = Object.keys(tasks)
       .map(k => tasks[k])
       .filter(t => t && t.sheetType === 'quarter' && t.counter === counter &&
-        (t.startDate == null || (t.startDate === sd && t.endDate === ed)) && t.status === 'closed');
+        (t.batchKey ? t.batchKey === sheetId : (t.startDate == null || (t.startDate === sd && t.endDate === ed)))
+        && t.status === 'closed');
     if (!myClosed.length) {
       // 没有 closed 任务 → 可能从未分配过；尝试新建一个补盘会话
       const ov = (this._getAllOverviews())[this._overviewKey(counter, sheetId)];
@@ -1478,19 +2811,57 @@ const StocktakeModule = {
     this.toast(counter + ' · 本批次已全部完成，无需补盘');
   },
 
+  /**
+   * 🟢 v228.35（P5）：本轮是否「禁止进入盘点」的唯一判定入口。
+   *   问题：旧版把闸门判断散落在 3 处（picker 渲染、_claimQuarterTask、_claimFirstOpenTask），
+   *        各处条件写法不同，导致「UI 显示 ⛔ 已结束」与「逻辑仍放行」有机会不一致 ——
+   *        用户看到还能点、点了还能进，盘完却不生效，比不让点更伤信任。
+   *   方案：收敛为单一函数，UI 与逻辑共用，杜绝两套判断漂移。
+   *   规则：本轮已结束 且 该任务不是管理员指派的补盘/补派任务 → 禁止。
+   */
+  isTaskEntryBlocked(task) {
+    if (!task) return false;
+    // 🟢 v228.48：批次身份优先取 task.batchKey（分派时写入，跨端一致）
+    const sid = task.batchKey
+      || (this._isTimestampSheetId(task.sheetId) ? task.sheetId : null)
+      || this._currentQuarterSheetId();
+    if (!sid) return false;
+    return this.isQuarterRoundClosed(sid) && !task.replenishAssigned && !task.isReplenish;
+  },
+
+  // 🟢 v228.41（优化项-4）：合并行入口 —— 从按钮 data 属性取「全部段编码」，一次性载入。
+  //   单段场景下 allSegCodes 与单任务 codes 等价，行为与旧版完全一致（向后兼容）。
+  _claimQuarterRow(btn, taskId) {
+    let allSeg = null;
+    try {
+      const raw = btn && btn.getAttribute && btn.getAttribute('data-allseg');
+      if (raw) { const arr = JSON.parse(raw); if (Array.isArray(arr) && arr.length) allSeg = arr; }
+    } catch (e) { /* 解析失败 → 退回单任务模式 */ }
+    return this._claimQuarterTask(taskId, allSeg);
+  },
+
   // 🟢 v224 重写：领取某个季度盘点任务 → 建 sheet + 拉全库 + 按任务固化的编码清单过滤 + 渲染。
   //   原实现误调 claimRange(...)，而 claimRange 不接受参数、只从 DOM 读 #stNoStart/#stNoEnd，
   //   任务选择器渲染后这些输入框并不存在 → 点「进入盘点」静默无反应，季度盘点完全进不去。
-  async _claimQuarterTask(taskId) {
+  async _claimQuarterTask(taskId, allSegCodes) {
     const t = (DataStore.getStocktakeTasks() || {})[taskId];
     if (!t) { this.toast('任务不存在或已撤销'); this._refreshTaskBar(); return; }
     // 🟢 v227.9：批次已强制结束 → 盘点人不能再进入盘点（管理员视角的【本次季度盘点结束】）
-    const _sd0 = t.startDate || this.query.startDate, _ed0 = t.endDate || this.query.endDate;
-    const _sid0 = t.sheetId || ('quarter_' + _sd0.slice(5) + '_' + _ed0.slice(5));
+    // 🟢 v228.48：批次身份优先取 task.batchKey（分派时写入的跨端一致标识）
+    const _sid0 = t.batchKey
+      || (this._isTimestampSheetId(t.sheetId) ? t.sheetId : null)
+      || this._currentQuarterSheetId() || this._quarterSheetId();
     // 🟢 v227.14：被管理员「指派补盘」的任务例外放行 —— 否则批次一结束就永远补不了漏盘。
     //   未带标记的任务行为完全不变（照样拦住）。
-    if (this.isQuarterRoundClosed(_sid0) && !t.replenishAssigned) {
-      WBModal.alert('本次季度盘点已被管理员强制结束，不可再进入盘点。\n\n盘点号：' + (this.batchNo || _sid0));
+    // 🟢 v228.35（P5）：改走统一判定 isTaskEntryBlocked，与 UI 的 ⛔ 显示严格同源；
+    //   同时把提示写清楚「为什么不能进、找谁处理」，避免用户反复点击试错。
+    if (this.isTaskEntryBlocked(t)) {
+      const _round = this._getClosedRound(_sid0) || this._getRoundNo(_sid0);
+      // 🟢 v228.37：提示带轮次命名（如「2026年第3季度」），未命名回退「第 N 轮」
+      WBModal.alert('本次季度盘点（' + this._roundDisplay(_sid0, _round) + '）已由管理员结束，不能再进入盘点。\n\n'
+        + '盘点号：' + (this.batchNo || _sid0) + '\n\n'
+        + '如需继续盘点，请联系管理员「开始下一轮」；若确认本轮仍有漏盘需要补录，请管理员在「分派任务」中指派补盘。',
+        { title: '⛔ 本轮已结束' });
       return;
     }
     // 🟢 v224：任务已结束仍允许进入，走「补盘」模式（漏盘补录）。
@@ -1498,7 +2869,9 @@ const StocktakeModule = {
     //    这里重建 sheet/行集后，_applyResumeFilter() 会自动剔除本人已盘编码，只留没盘过的。
     // 🟢 v227.14：管理员指派补盘的任务（可能仍是 open，因为是被强制结束、本人没点过结束）
     //   同样走补盘模式 —— 只列未盘编码，而不是把完整区间再摊一遍。
-    const replenish = t.status === 'closed' || t.replenishAssigned === true;
+    // 🟢 v228.34：补派任务（isReplenish）同样走「仅列未盘编码」模式——其 codes 本就是退回子集，
+    //   再次进入应排除已盘项，避免把已确认的编码又摊一遍。
+    const replenish = t.status === 'closed' || t.replenishAssigned === true || t.isReplenish === true;
 
     // 🟢 v227：季度盘点不需要筛选日期 → 区间只作批次标识，缺失时自动兜底（不再阻断）
     this._ensureDefaultRange();
@@ -1516,16 +2889,21 @@ const StocktakeModule = {
     if (area) area.innerHTML = '<div class="empty-state"><div class="empty-text">正在加载全库存货…</div></div>';
     try {
       const stock = await DataStore.getRows('stock');
-      // 🟢 v226：复用本批次（sheetId）的盘点号 —— 同一批次所有领取人共用一个号
-      const _qSheetId = 'quarter_' + sd.slice(5) + '_' + ed.slice(5);
+      // 🟢 v228.48：复用本批次（sheetId）的盘点号 —— 同一批次所有领取人共用一个号
+      const _qSheetId = t.batchKey || this._currentQuarterSheetId() || this._quarterSheetId();
       this.batchNo = this._genBatchNo('quarter', _qSheetId);
+      // 🟢 v228.40（一-1/一-2）：进入盘点也把批次号回推云端，保证其他端同一批次号
+      try { this._pushBatchCommonState(_qSheetId, this.batchNo); } catch (e) { /* 忽略 */ }
     this.sheet = { sheetId: _qSheetId, batchNo: this.batchNo, sheetType: 'quarter', startDate: sd, endDate: ed };
+      this._frozen = false;   // 🟢 v228.39（P4）：进入新一轮/新会话 → 清除上一次的远程冻结锁
       this._sheetTouched = null;   // 🟢 v227.5：领取/续盘季度任务 = 新开一轮 → 清空痕迹
       this._markOpenSession(_qSheetId, 'quarter', t.counter || cur, sd, ed);
       // 🟢 v227.5：记住入口类型（quarter）—— 返回按钮 / 结束盘点回到季度任务选择器
       this._entrySheetType = 'quarter';
       // 🟢 v224：季度盘点 = 全库清点（不经出库筛选，也不显示出入库列）
       this.allRowsFull = this.buildRows(stock || [], {}, {}, null);
+      // 🟢 v228.32：收敛到本轮基线 —— 表格序号与分派时用的序号严格同源、同样剔除 0 存量
+      await this._applyBaselineRows(_qSheetId);
       this.allRows = this.allRowsFull.slice();
       this.showInOut = false;
       this.task.started = false;
@@ -1548,10 +2926,24 @@ const StocktakeModule = {
         await this._setAssignedRowsReplenish(t);
       } else {
         await this._applyResumeFilter();          // 先：剔除本人已盘的（基于全库，序号沿用全集编号）
-        this._setAssignedRows(t);                // 后：按任务固化编码清单过滤（覆盖上面结果，最终生效）
+        this._setAssignedRows(t, allSegCodes);   // 后：按任务固化编码清单过滤（v228.41：多段合并行传全集编码）
       }
       this._restoreDraft();
       this.renderTable();
+      this._refreshDraftHint();   // 🟢 v228.35（P1）：续盘恢复草稿后同步提示条显隐
+      // 🟢 v228.40（二-1b）修复：盘点人「进入盘点」即视为开工 —— 管理员视图的三态徽标
+      //   （未开工/盘点中/已结束）依赖 task.started || claimedAt。旧实现只在 claimRange 里置位，
+      //   而季度任务是分派制（不经过 claimRange），导致「已盘 23/103 却仍显示 ⚪ 未开工」。
+      //   这里在成功进入填表后落库 started/claimedAt，并随任务推云端，各端视图立即一致。
+      try {
+        if (!t.started || !t.claimedAt) {
+          const _nowIso = new Date().toISOString();
+          t.started = true;
+          t.claimedAt = t.claimedAt || _nowIso;
+          t.updatedAt = _nowIso;
+          await DataStore.saveStocktakeTask(t);   // 自动推云端（settings 通道，跨设备同步）
+        }
+      } catch (e) { console.warn('[stocktake] 标记开工失败(已忽略):', e && e.message); }
       // 🟢 v227.5：进入任务后立即更新概览（status 仍 in_progress，但 entrySheetType 已定）
       try { await this._publishQuarterOverview({ finished: false }); } catch (e) { /* 忽略 */ }
       // 🟢 v227.5+：离开 picker 进入填表 → 停止轮询（填表内靠保存/结束广播 + 退出时拉一次即可）
@@ -1653,35 +3045,47 @@ const StocktakeModule = {
    *   返回后 sheet 清空，进入【日常盘点】工作台。
    */
   async goBackFromSheet() {
-    const saved = !!(this._sheetTouched && this._sheetTouched.saved);
     const finished = !!(this._sheetTouched && this._sheetTouched.finished);
     const abandoned = !!(this._sheetTouched && this._sheetTouched.abandoned);
-    const touched = saved || finished || abandoned;
-    // 🟢 v227.5：已保存过的盘点，用户明确确认过保存意图 → 不弹提示，直接返回初始界面
-    //   （"未改动"隐含由 saved 标记保证：保存后无改动触发不到输入事件，行状态不会变）
-    if (this.sheet && saved && !finished && !abandoned) {
-      // 🟢 v227.5：已保存 → 不弹提示、也不自动续盘；直接回季度初始界面（展示本次盘点概览）
+    if (!this.sheet || finished || abandoned) { this._backToWorkbench(); return; }
+    // 🟢 v228.40（二-5）按用户确认口径重构返回语义：
+    //   · 一律弹「⚠ 自动保存并返回」（保存并返回 / 直接返回）；
+    //   · 保存并返回 → 直接保存草稿并回初始界面；
+    //   · 直接返回  → 分两种情况：
+    //       ① 从未保存过草稿 → 清空本次输入、不保存，直接回初始界面（丢弃现场）；
+    //       ② 之前保存过草稿 → 丢弃本次新填，仅保留上次草稿（即不覆盖旧草稿），回初始界面。
+    //   实现要点：在「直接返回」分支里，若存在旧草稿（loadDraft 有内容且 _sheetTouched.saved 为真），
+    //   绝对不能调 clearDraft()/saveDraft()，否则会把上次草稿一起清掉或被本次新填覆盖。
+    const all = this.visibleRows ? this.visibleRows() : [];
+    const n = (all || []).filter(r => r.盘点数量 !== '' && r.盘点数量 != null).length;
+    const ok = await WBModal.confirm(
+      '返回将自动保存当前进度（' + n + ' 条未结束的盘点数量），下次进入可继续盘点。',
+      { title: '⚠ 自动保存并返回', okText: '保存并返回', cancelText: '直接返回' }
+    );
+    if (ok) {
+      // 🟢 v228.41 修复（返回失效 bug）：saveToRecords → saveDraft() 内部会调 _markOpenSession()
+      //   重建「未结束会话」标记，导致随后的 startQuarter() 又被 _detectUnfinished 的 ①b 分支
+      //   （open session 命中）拽回盘点表 —— 表现就是「点保存并返回却退不出去」。
+      //   这里在导航前显式置 _skipResumePrompt=true：返回的语义就是「回到初始界面、不自动续盘」。
       this._skipResumePrompt = true;
+      await this.saveToRecords({ skipConfirm: true });
+      this._backToWorkbench();          // 保存并返回：保存草稿后回初始界面
+      return;
+    }
+    // 「直接返回」分支
+    const hadDraft = !!(this._sheetTouched && this._sheetTouched.saved);
+    // 🟢 v228.41 修复（返回失效 bug）：两条分支都必须保证「回到初始界面且不被续盘检测拽回」。
+    //   旧实现只在 hadDraft 分支置 _skipResumePrompt；而 clearDraft() 并不清 OPEN_KEY 会话标记，
+    //   无草稿分支清完草稿后仍会被 ①b 命中 → 同样退不出去。这里统一在导航前置位。
+    this._skipResumePrompt = true;
+    if (hadDraft) {
+      // ② 保留上次草稿：不写、不清，直接回初始界面（本次新填随内存现场丢弃）
       this._backToWorkbench();
       return;
     }
-    // 🟢 v227.3→v227.11：未保存过 → 单次确认即自动保存并返回（合并原「提示保存」+「确认暂停保存」两次弹窗为一次）。
-    //   选择「直接返回」才丢弃现场；默认「保存并返回」安全不丢数。
-    if (this.sheet && !touched) {
-      const all = this.visibleRows ? this.visibleRows() : [];
-      const n = (all || []).filter(r => r.盘点数量 !== '' && r.盘点数量 != null).length;
-      const ok = await WBModal.confirm(
-        '返回将自动保存当前进度（' + n + ' 条未结束的盘点数量），下次进入可继续盘点。',
-        { title: '⚠ 自动保存并返回', okText: '保存并返回', cancelText: '直接返回' }
-      );
-      if (ok) {
-        await this.saveToRecords({ skipConfirm: true });
-        this._backToWorkbench();  // 保存并返回：真正导航回工作台（展示本次盘点概览）
-        return;
-      }
-      // 用户选择「直接返回」→ 丢弃现场
-    }
-    // 🟢 v227.3：返回工作台前清空现场（不调 finish/abandon —— 它们会写记录/同步云端）
+    // ① 无草稿：清空本次输入 + 清掉未结束会话标记（否则 OPEN_KEY 残留会让续盘检测再次命中）
+    this.clearDraft();
+    try { this._clearOpenSession(); } catch (e) { /* 忽略 */ }
     this._backToWorkbench();
   },
 
@@ -1708,12 +3112,260 @@ const StocktakeModule = {
   },
 
   // ===== v217 任务分派 / 领取（固化编码清单）=====
-  // 全库存货编码升序（与 buildRows 同排序，保证多设备序号一致）
-  async _allStockCodesSorted() {
+  // ===== v228.32 季度盘点基线快照 =====
+  // 为什么必须存在：季度盘点只盘「账上有量」的存货，而任务分派是按序号切段的。
+  //   若直接拿当前全库存货当序号空间，① 存量 0 的编码白白占号；② 库存一有增减序号就整体漂移，
+  //   今天分派的 1-100 明天就可能指向另一批编码（正是用户否掉的「今天一个量明天一个量」）。
+  //   故：本轮开局对 stock 拍一张快照，剔除 0/空存量后连续重排，本轮之内恒定不变。
+
+  // 「任一行 > 0 即纳入」聚合：空白 / null / ' ' / NaN / 0 一律剔除；负库存属异常但确实有账，纳入兜底。
+  _buildBaselineCodes(stock) {
+    const seen = new Set();        // 全库出现过的有效编码（去重）
+    const nonZero = new Set();     // 至少有一行 现存数量 是有限非零数
+    (stock || []).forEach(s => {
+      const code = String(s.存货编码 == null ? '' : s.存货编码).trim();
+      if (!code) return;
+      seen.add(code);
+      const n = parseFloat(s.现存数量);
+      if (isFinite(n) && n !== 0) nonZero.add(code);
+    });
+    const cmp = (a, b) => (a < b ? -1 : (a > b ? 1 : 0));
+    const codes = Array.from(seen).filter(c => nonZero.has(c)).sort(cmp);
+    // 被剔除的 0 存量编码留档备查（本期不做 UI，仅随快照存下来）
+    const zeroCodes = Array.from(seen).filter(c => !nonZero.has(c)).sort(cmp);
+    return { codes, zeroCodes };
+  },
+
+  _baselineRoundKey(sheetId) {
+    return String(sheetId || '') + '#r' + this._getRoundNo(sheetId);
+  },
+  // 🟢 v228.44（P1）：当前盘点区间对应的基线键（供轮询短路判断「本机是否已有本轮基线」）。
+  //   取不到日期区间时返回 null → 调用方不做短路，退回原有下载逻辑（保守、不丢功能）。
+  _currentBaselineRoundKey() {
+    try {
+      const sid = this._currentQuarterSheetId();
+      if (!sid) return null;
+      return this._baselineRoundKey(sid);
+    } catch (e) { return null; }
+  },
+  _getBaselineMap() {
+    try { return JSON.parse(localStorage.getItem(this.BASELINE_KEY) || '{}') || {}; }
+    catch (e) { return {}; }
+  },
+  // 🟢 v228.44：云端「基线独立文件是否存在」的本地记忆（避免每轮开局都白探一次 404）。
+  //   file   = 云端已有 baseline.json（本机写过或读到过非空）→ 优先读它，快且小；
+  //   legacy = 云端尚无独立文件（旧版数据还在 settings.json）→ 直接走旧路径，零额外请求；
+  //   负缓存带 TTL（10 分钟）到期后重新探一次，保证「别的设备先迁移了」也能被感知。
+  BASELINE_FILE_STATE_KEY: 'wb_stocktake_baseline_file_state',
+  BASELINE_FILE_NEG_TTL: 10 * 60 * 1000,
+  _baselineFileState() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this.BASELINE_FILE_STATE_KEY) || '{}') || {};
+      if (raw.s === 'file') return 'file';
+      if (raw.s === 'legacy' && Date.now() - (raw.t || 0) < this.BASELINE_FILE_NEG_TTL) return 'legacy';
+    } catch (e) { /* 忽略 */ }
+    return 'unknown';
+  },
+  _markBaselineFileState(s, moved) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this.BASELINE_FILE_STATE_KEY) || '{}') || {};
+      raw.s = s; raw.t = Date.now();
+      if (moved) raw.moved = 1;
+      localStorage.setItem(this.BASELINE_FILE_STATE_KEY, JSON.stringify(raw));
+    } catch (e) { /* 忽略 */ }
+  },
+  // 旧基线是否已从 settings.json 迁走（只需做一次）
+  _baselineSettingsMoved() {
+    try { return !!(JSON.parse(localStorage.getItem(this.BASELINE_FILE_STATE_KEY) || '{}') || {}).moved; }
+    catch (e) { return false; }
+  },
+  _saveBaselineMap(map) {
+    return this._lsWrite(this.BASELINE_KEY, JSON.stringify(map || {}));
+  },
+  // 云端拉取其他设备已生成的基线（本机已有则本机优先，绝不覆盖）
+  // 🟢 v228.44（P1）：改读独立文件 baseline.json —— 不再为「每轮只读一次的静态基线」
+  //   去下载 189KB 的 settings.json。兼容旧云端：独立文件为空时回退读 settings.json 里的
+  //   旧基线（wb_stocktake_quarter_baseline），保证升级前已生成的基线不丢。
+  async _pullQuarterBaseline(opts) {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return 0;
+    // 🟢 v228.44（P1 核心降载）：**先判后拉** —— 本机已有「当前批次本轮」基线时直接跳过网络请求。
+    //   旧实现是「先下载 182KB 再逐键判 local[k] 已存在则跳过」，即本机明明已有、仍为不变数据买单；
+    //   3s 轮询 × 182KB ≈ 3.8MB/分钟/设备。改为先查本机、命中即短路（0 网络开销）。
+    //   仅当本机**缺失**本轮基线时才真正下载（开局/换轮/换设备场景，一轮最多一次）。
+    const curKey = (opts && opts.roundKey) || this._currentBaselineRoundKey();
+    if (curKey) {
+      const have = this._getBaselineMap()[curKey];
+      if (have && Array.isArray(have.codes) && have.codes.length) return 0;
+    }
+    let rmap = null;
+    // ① 优先：独立基线文件（已知云端没有时直接跳过，省掉一次 404 往返）
+    if (this._baselineFileState() !== 'legacy') {
+      try {
+        if (typeof SyncManager.getBaseline === 'function') {
+          const b = await SyncManager.getBaseline();
+          if (b && typeof b === 'object' && Object.keys(b).length) {
+            rmap = b;
+            this._markBaselineFileState('file');
+          } else {
+            this._markBaselineFileState('legacy');   // 未迁移：本轮起走旧路径
+          }
+        }
+      } catch (e) { rmap = null; }
+    }
+    // ② 兜底：旧版 settings.json 里的基线（升级兼容）
+    // 🟢 v228.61（P0-A）：只读 BASELINE_KEY 一个键，不再读整包。
+    if ((!rmap || !Object.keys(rmap).length) && typeof SyncManager.getSetting === 'function') {
+      try {
+        const old = await SyncManager.getSetting(this.BASELINE_KEY);
+        if (old && typeof old === 'object') rmap = old;
+      } catch (e) { /* 忽略 */ }
+    }
+    if (!rmap || typeof rmap !== 'object') return 0;
+    const local = this._getBaselineMap();
+    let n = 0;
+    Object.keys(rmap).forEach(k => {
+      const r = rmap[k];
+      if (!r || !Array.isArray(r.codes) || !r.codes.length) return;
+      if (local[k]) return;                 // 先写胜：同一轮的基线只认第一份
+      local[k] = r; n++;
+    });
+    if (n) this._saveBaselineMap(local);
+    return n;
+  },
+  // 推云端：读-合并-写（v227.67 同款防护，避免整包覆盖抹掉其他设备/其他轮次的基线）
+  // 🟢 v228.44（P1）：改写独立文件 baseline.json（不再把 182KB 基线塞进 settings.json，
+  //   否则每次 3s 轮询仍要为它买单）。离线/无该方法时回退原 settings 通道，保证不丢数据。
+  async _setBaselineCloud(map) {
+    let merged = Object.assign({}, map || this._getBaselineMap());
+    try {
+      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
+        if (typeof SyncManager.getBaseline === 'function') {
+          const rb = await SyncManager.getBaseline();
+          if (rb && typeof rb === 'object') merged = Object.assign({}, rb, merged);
+        } else if (typeof SyncManager.getSetting === 'function') {
+          // 🟢 v228.61（P0-A）：只读 BASELINE_KEY 一个键
+          const rmap = await SyncManager.getSetting(this.BASELINE_KEY);
+          if (rmap && typeof rmap === 'object') merged = Object.assign({}, rmap, merged);
+        }
+      }
+    } catch (e) { /* 忽略，回退本机并集 */ }
+    this._saveBaselineMap(merged);
+    // 优先写独立文件
+    if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.setBaseline === 'function') {
+      try {
+        const ok = await SyncManager.setBaseline(merged);
+        if (ok) {
+          this._markBaselineFileState('file');
+          // 🟢 v228.44：首次迁移成功后，把 settings.json 里那份 181.9KB 的旧基线清空。
+          //   不做这一步的话拆分等于白拆——轮询仍会下载 189KB 的 settings.json，降载收益归零。
+          //   安全性：内容已在上方并入 merged 并写进 baseline.json，且 setBaseline 内部
+          //   有「回读校验」确认写入生效；这里再确认一次云端独立文件里确实有这批键，才清。
+          this._purgeLegacyBaselineInSettings(Object.keys(merged));
+          return true;
+        }
+      } catch (e) { /* 落到下方 settings 兜底 */ }
+    }
+    await this._setCloud(this.BASELINE_KEY, merged);
+  },
+  // 🟢 v228.44：把 settings.json 里的旧基线清空（内容已迁至 baseline.json）。
+  //   ——不清则降载收益为零（轮询仍要下 189KB），清了才是真正的 -96%。
+  //   三重保护：①仅在云端独立文件确实已含这批键后才清；②失败/异常一律不动云端；
+  //   ③只做一次（本地 moved 标记）；本机 localStorage 快照不受影响，功能不回归。
+  async _purgeLegacyBaselineInSettings(expectedKeys) {
+    if (this._baselineSettingsMoved()) return false;
+    try {
+      if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+      if (typeof SyncManager.getBaseline !== 'function' || typeof SyncManager.setSetting !== 'function') return false;
+      const onFile = await SyncManager.getBaseline();
+      if (!onFile || typeof onFile !== 'object') return false;
+      const missing = (expectedKeys || []).filter(k => k !== '_updatedAt' && !onFile[k]);
+      if (missing.length) return false;                 // 云端独立文件不全 → 保守不动
+      // 🟢 v228.61（P0-A）：只读 BASELINE_KEY 一个键
+      const old = await SyncManager.getSetting(this.BASELINE_KEY);
+      if (!old || typeof old !== 'object' || !Object.keys(old).length) {
+        this._markBaselineFileState('file', true); return false;
+      }
+      const ok = await SyncManager.setSetting(this.BASELINE_KEY, {});
+      if (ok) this._markBaselineFileState('file', true);
+      return !!ok;
+    } catch (e) { return false; }
+  },
+  // 只读取：有就返回，没有就返回 null —— 绝不新建（供「有基线才收敛」的场景使用）
+  _peekQuarterBaseline(sheetId) {
+    const key = this._baselineRoundKey(sheetId);
+    const b = this._getBaselineMap()[key];
+    return (b && Array.isArray(b.codes) && b.codes.length) ? b : null;
+  },
+  // 取（必要时生成）本轮基线。已存在则原样返回 —— 这就是「快照不可变」的落点。
+  async _ensureQuarterBaseline(sheetId, opts) {
+    const sid = String(sheetId || '').trim();
+    if (!sid) return null;
+    const cached = this._peekQuarterBaseline(sid);
+    if (cached && !(opts && opts.force)) return cached;
+    if (!(opts && opts.force)) { try { await this._pullQuarterBaseline(); } catch (e) { /* 忽略 */ } }
+    if (!(opts && opts.force)) {
+      const got = this._peekQuarterBaseline(sid);
+      if (got) return got;              // 云端已有 → 直接用，不再本地另拍
+    }
+    const key = this._baselineRoundKey(sid);
     const stock = await DataStore.getRows('stock');
-    const codes = (stock || []).map(s => String(s.存货编码 == null ? '' : s.存货编码).trim()).filter(Boolean);
-    codes.sort((a, b) => (a < b ? -1 : (a > b ? 1 : 0)));
-    return codes;
+    const { codes, zeroCodes } = this._buildBaselineCodes(stock);
+    const ts = new Date().toISOString();
+    const b = { key, sheetId: sid, round: this._getRoundNo(sid), codes, zeroCodes, createdAt: ts, updatedAt: ts };
+    const map = this._getBaselineMap();
+    map[key] = b;
+    this._saveBaselineMap(map);
+    try { await this._setBaselineCloud(map); } catch (e) { /* 离线入队，联网补推 */ }
+    return b;
+  },
+  // 本轮季度盘点的序号锚点（编码数组，下标 0 = 序号 1）
+  async _quarterBaselineCodes(sheetId) {
+    try {
+      const b = await this._ensureQuarterBaseline(sheetId);
+      return (b && Array.isArray(b.codes)) ? b.codes : null;
+    } catch (e) {
+      console.warn('[stocktake] 取季度基线失败(已忽略):', e && e.message);
+      return null;
+    }
+  },
+  // 把已构建的行集收敛到本轮基线：剔除非基线编码，并把序号换成基线的连续序号。
+  // 只读语义 —— 取不到基线就原样放行（等于旧行为），绝不在这里临时拍快照，
+  // 否则「管理员已分派、本机首次进入」时会以本机当时库存生成一个不一致的锚点。
+  async _applyBaselineRows(sheetId) {
+    const b = this._peekQuarterBaseline(sheetId);
+    const codes = b ? b.codes : null;
+    if (!codes || !codes.length) return -1;
+    const idx = new Map();
+    codes.forEach((c, i) => idx.set(c, i + 1));
+    const rows = [];
+    (this.allRowsFull || []).forEach(r => {
+      const no = idx.get(String(r.存货编码 == null ? '' : r.存货编码).trim());
+      if (!no) return;
+      r.no = no;
+      rows.push(r);
+    });
+    rows.sort((a, b) => a.no - b.no);
+    this.allRowsFull = rows;
+    return rows.length;
+  },
+
+  // 全库存货编码升序（与 buildRows 同排序，保证多设备序号一致）
+  // 🟢 v228.32：quarter 走「本轮基线」—— 剔除空白/0 存量后连续重排的序号空间，本轮内恒定。
+  //   顺带修掉历史缺陷：原实现直接 map 全部 stock 行、没有去重，而 buildRows 是按编码聚合的，
+  //   同一编码多行时这里的序号会与表格显示的序号错位（原 bug）。现统一去重后排序。
+  async _allStockCodesSorted(sheetType) {
+    if (sheetType === 'quarter') {
+      const codes = await this._quarterBaselineCodes(
+        this._currentQuarterSheetId() || this._quarterSheetId());
+      if (codes && codes.length) return codes;
+    }
+    const stock = await DataStore.getRows('stock');
+    const set = new Set();
+    (stock || []).forEach(s => {
+      const c = String(s.存货编码 == null ? '' : s.存货编码).trim();
+      if (c) set.add(c);
+    });
+    return Array.from(set).sort((a, b) => (a < b ? -1 : (a > b ? 1 : 0)));
   },
   // 登录态下自动领用分配给本人的第一个 open 任务
   async _applyAssignedIfAny() {
@@ -1740,30 +3392,440 @@ const StocktakeModule = {
       return 0;   // 离线/异常都不影响进入模块
     }
   },
-  // v225.2：任务栏手动刷新（网络慢导致进入模块那次超时时的自愈入口）
+  // 🟢 v228.48-fix2：手动刷新 —— 从「只刷任务」升级为「一次点击，全量拉齐云端」。
+  //
+  //   用户诉求（真机实测提出）：
+  //     「大家都是一个云端通道，另外一端为什么不直接从云端拉取下来？」
+  //     「把刷新任务按钮附加一个刷新状态的功能，我点击就可以手动刷新，
+  //       不只是刷新云端任务，还可以同时把云端保存的批次、状态和管理员视图监控
+  //       盘点人进度等信息同步拉取下来。」
+  //
+  //   为什么原来做不到：并非通道不通，而是**自动拉取链路上有两个"死结"**，
+  //   它们让云端数据虽然在本地、却始终套不进界面：
+  //     死结① `_pullQuarterPickerLight()` 与 `_refreshQuarterPickerIfShown()` 开头都写着
+  //             `if (this.sheet && this.sheet.sheetType === 'quarter') return false;`
+  //           —— 只要本机"正处于盘点现场"，任何自动重渲一律短路返回。
+  //           而手机端恰恰常常停在现场里 → 云端批次、概览全都拉下来了，界面一动不动。
+  //     死结② `_pullBatchCommonState()` 的批次跟随规则①只清"批次被取代"的会话，
+  //           若**旧批次已结束、新一轮尚未开盘**，云端锚点仍是旧 sheetId，
+  //           手机端残留会话与之相同 → 判定"非陈旧" → 不清会话、不跟随，
+  //           于是管理员结束了盘点，手机端继续显示"进行中"。
+  //
+  //   本方法的作用：**一个人工触发的、绕过上述全部守卫的确定性"强制对齐"入口。**
+  //   它不是"再试一次"，而是明确告诉系统：现在，以云端为准。
+  //
+  //   ⚠️ 安全边界（守住，否则会误伤用户正在填的数据）：
+  //     · 绝不丢弃当前录入：现场内刷新前先 `saveDraft()` 把已填数量落进本地草稿；
+  //     · 绝不静默清历史职责：强制结束旧会话时，先核对云端「批次已结束」证据，
+  //       无证据绝不清（避免把"本机正在盘"误判成"陈旧残留"）；
+  //     · 只读不写：除本地缓存合并外，不向云端写任何业务数据。
   async refreshMyTasks(silent) {
     const btn = document.getElementById('stTaskRefresh');
-    if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 刷新中'; }
     try {
       if (typeof SyncManager !== 'undefined' && !SyncManager.isOnline) {
-        if (!silent) this.toast('当前离线，无法从云端同步任务');
+        if (!silent) this.toast('当前离线，无法从云端刷新；恢复连接后请再点一次');
         return;
       }
-      const n = await this._syncAssignedTasks(8000);
-      this._refreshTaskBar();
-      const my = (AppConfig.getCurrentUser() || {}).username;
-      const cnt = my ? (DataStore.getMyOpenTasks(my) || []).length : 0;
+      // ① 现场保护：先把当前录入落进本地草稿，刷新绝不会丢已填数量
+      const inSheet = !!(this.sheet && this.sheet.sheetId);
+      if (inSheet) { try { this.saveDraft(); } catch (e) { /* 忽略 */ } }
+
+      // ② 全量拉云端：批次身份 + 轮次号 + 结束闸门 + 轮次命名 + 批次号 + 任务 + 基线 + 概览
+      let batchFollowed = false;
+      try { batchFollowed = await this._pullBatchCommonState(); } catch (e) { /* 忽略 */ }
+      let taskChanged = 0;
+      try { taskChanged = await DataStore.pullStocktakeTasksFromCloud(); } catch (e) { /* 忽略 */ }
+      let ovChanged = false;
+      try { ovChanged = await this._pullQuarterOverviews(); } catch (e) { /* 忽略 */ }
+      try { await this._pullRoundClosed(); } catch (e) { /* 忽略 */ }
+      try { await this._pullQuarterBaseline(); } catch (e) { /* 忽略 */ }
+      this._lastTaskSyncAt = Date.now();
+
+      // ③ 清「已完成批次的残留会话」—— 解死结②。
+      //    仅当云端存在与本机会话同 sheetId 的**结束证据**（ROUND_CLOSED 闸门）时才动手，
+      //    且不清草稿（用户已填数量保留，可经盘点记录找回）。
+      let sessionCleared = false;
+      try {
+        const sess = this._getOpenSession();
+        if (sess && sess.sheetType === 'quarter' && sess.sheetId
+            && this.isQuarterRoundClosed(sess.sheetId)) {
+          this._clearOpenSession();
+          sessionCleared = true;
+          console.log('[stocktake] 手动刷新：批次 ' + sess.sheetId + ' 云端已结束，清除本机残留会话以对齐');
+        }
+      } catch (e) { /* 忽略 */ }
+
+      // ④ 强制重渲 —— 解死结①。
+      //    现场内（inSheet）也必须刷新：这里的语义是「把云端的任务/概览/状态套进当前界面」，
+      //    不是把用户弹走。只有当批次身份真的变了（batchFollowed）才回到选择器，避免现场失联。
+      let rerendered = false;
+      try {
+        const user = (typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? (AppConfig.getCurrentUser() || {}) : {};
+        const counter = String(user.username || this.task.counter || '').trim();
+        if (inSheet && !batchFollowed) {
+          // 同批次现场：就地重渲任务表 + 进度条，用户停在原处，数据换成最新的
+          try { this.renderTable(); } catch (e) { /* 忽略 */ }
+          rerendered = true;
+        } else {
+          // 不在现场，或批次已被他端取代 → 走选择器重渲（会带上新批次身份与概览）
+          if (batchFollowed) this._pendingBatchFollow = true;
+          await this._refreshQuarterPickerIfShown();
+          if (!rerendered) this._refreshTaskBar();
+          rerendered = true;
+        }
+        // ⑤ 概览/监控区独立重渲一次 —— 管理员视图的盘点人进度就在这一块
+        try { this._renderOverviewBlocksOnly(counter); } catch (e) { /* 忽略 */ }
+      } catch (e) { console.warn('[stocktake] 刷新重渲失败(已忽略):', e && e.message); }
+
+      // ⑥ 如实汇报这一次到底刷新到了什么（不夸大，用户才知道该不该再点）
       if (!silent) {
-        this.toast(n > 0 ? ('已同步 ' + n + ' 项任务变更，你有 ' + cnt + ' 个待办任务')
-                         : (cnt ? ('云端无新变更，你有 ' + cnt + ' 个待办任务') : '云端暂无分配给你的任务'));
+        const cnt = this._myOpenTaskCount();
+        const aq = this._getActiveQuarter();
+        const bits = [];
+        if (taskChanged > 0) bits.push('任务 ' + taskChanged + ' 项变更');
+        if (batchFollowed) bits.push('已跟随云端最新批次');
+        if (ovChanged) bits.push('盘点进度已更新');
+        if (sessionCleared) bits.push('已清除上一轮残留现场');
+        const head = bits.length ? ('已从云端刷新：' + bits.join('、')) : '云端无新变更';
+        this.toast(head + '；当前批次 ' + ((aq && aq.sheetId) || '未开盘')
+                   + '，你有 ' + cnt + ' 个待办任务');
       }
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '🔄 刷新任务'; }
+      if (btn) { btn.disabled = false; btn.textContent = '🔄 刷新'; }
     }
   },
+
+  /**
+   * 🟢 v228.48-fix2：界面版「清场重置」—— 免开控制台。
+   *
+   *   背景（用户真机反馈原话）：
+   *     「两边都没有办法清，你不能帮我清一下嘛」
+   *     「电脑上这样也麻烦」
+   *   旧方案的清场入口只有控制台命令 `await StocktakeModule.resetQuarterSyncState()`，
+   *   要求用户在 PC 按 F12、在手机远程调试 —— 仓库现场根本做不到。
+   *
+   *   本方法把同一套语义（resetQuarterSyncState）接到界面上：
+   *     · 权限门：仅具备分派权限者可见入口（与其它管理操作一致）；
+   *     · 二次确认：明确列出会被清除的内容，并说明「已落库记录不受影响」；
+   *     · 自动备份：resetQuarterSyncState 内部已写 backup 键，可回滚；
+   *     · 收尾：清完直接回到工作台重新开局，不留半吊子状态。
+   *
+   *   ⚠️ 这是**破坏性操作**（清本机缓存，非清云端业务数据）。故：
+   *     不自动调用、不放进常规流程，只在用户显式点击 + 确认后执行。
+   */
+  async resetFromUI() {
+    try {
+      const u = (typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? (AppConfig.getCurrentUser() || {}) : {};
+      const can = !!(u && (u.isAdmin || u.role === 'admin' || (u.perms && u.perms.stocktakeAssign)));
+      if (!can) { this.toast('无权限执行清场（需分派权限）'); return; }
+    } catch (e) { /* 权限取不到则继续走确认弹窗 */ }
+
+    let go = false;
+    try {
+      // 🟢 v228.65（用户反馈：弹窗太复杂）：精简为 3 句话（旧版同一句话重复出现两次）。
+      go = await WBModal.confirm(
+        '将清除所有设备的季度盘点进度：批次、轮次、任务分派、概览统计。\n\n' +
+        '· 已盘的盘点记录保留，不会丢；\n' +
+        '· 清场前自动备份，清错可回滚。\n\n' +
+        '确定清场？清场后需重新开始新的季度盘点。',
+        { title: '🧹 清场', okText: '确定清场', cancelText: '取消' });
+    } catch (e) { return; }
+    if (!go) return;
+
+    try {
+      // 🟢 v228.65：silent —— 上方确认框已明确告知后果，内部不再对「未结束现场」二次弹窗
+      //   （用户反馈弹窗太多；会话保护仍由 _applyGlobalResetIfAny 的保守规则兜底）。
+      const report = await this.resetQuarterSyncState({ silent: true });
+      if (report && report.aborted) { this.toast('已取消清场'); return; }
+      const n = (report && report.cleared && report.cleared.length) || 0;
+      const errs = (report && report.errors) || [];
+      this.toast(errs.length
+        ? ('清场完成，但有 ' + errs.length + ' 项未清干净，建议再点一次')
+        : ('✅ 已清场。现在回到「未开始季度盘点」的状态；要开始新一轮请再点【🗓️ 季度盘点】'));
+      if (typeof App !== 'undefined' && App.go) App.go('stocktake');
+    } catch (e) {
+      this.toast('清场失败：' + (e && e.message ? e.message : '未知错误'));
+    }
+  },
+
+  /**
+   * 🟢 v228.49-fix3：跨端同步诊断 —— 真机排障用。
+   *
+   *   为什么需要它：前面几轮修复都在"猜"真机上到底断了哪一步，而开发者看不到用户设备。
+   *   本方法把**两端一致性有关的全部关键事实**一次性摊开：在线状态、云端锚点、本机锚点、
+   *   会话、结束闸门、任务与概览的数量和 key。管理员点一下就能把结论贴给开发者。
+   *
+   *   它不修改任何数据（只读），因此可以放心在盘点进行中点。
+   */
+  async syncDiagnose() {
+    const out = { at: new Date().toISOString() };
+    try {
+      const online = !!(typeof SyncManager !== 'undefined' && SyncManager.isOnline);
+      out.online = online;
+      out.localActiveQuarter = this._getActiveQuarter();
+      out.localSession = this._getOpenSession();
+      out.localRoundClosed = this._getRoundClosed();
+      try {
+        const ov = this._getAllOverviews() || {};
+        out.localOverviewKeys = Object.keys(ov);
+      } catch (e) { out.localOverviewKeys = []; }
+      try {
+        const ts = DataStore.getStocktakeTasks() || {};
+        out.localTaskCount = Object.keys(ts).length;
+      } catch (e) { out.localTaskCount = -1; }
+
+      // 云端侧
+      out.cloudReadable = false;
+      if (online && typeof SyncManager !== 'undefined' && typeof SyncManager.getSetting === 'function') {
+        try {
+          // 🟢 v228.61（P0-A）：诊断需要 5 个键 → 批量单键直读（5 请求），不再读整包（15 请求）。
+          //   诊断面板本身是低频人工入口，但走的仍是同一条读取路径，一并根治。
+          const keys = [this.ACTIVE_QUARTER_KEY, this.ROUND_CLOSED_KEY, this.OVERVIEW_KEY,
+                        'stocktakeTasks', 'wb_stocktake_tasks'];
+          if (typeof SyncManager.getSettingsKeys === 'function') {
+            remote = await Promise.race([
+              SyncManager.getSettingsKeys(keys),
+              new Promise(res => setTimeout(() => res(null), 8000))
+            ]);
+          } else {
+            remote = await Promise.race([
+              SyncManager.getSettings(),
+              new Promise(res => setTimeout(() => res(null), 8000))
+            ]);
+          }
+          if (remote && typeof remote === 'object') {
+            out.cloudReadable = true;
+            out.cloudActiveQuarter = remote[this.ACTIVE_QUARTER_KEY] || null;
+            out.cloudRoundClosed = remote[this.ROUND_CLOSED_KEY] || null;
+            const cov = remote[this.OVERVIEW_KEY];
+            out.cloudOverviewKeys = cov && typeof cov === 'object' ? Object.keys(cov) : [];
+            // 🟢 v228.54：键名对齐 —— 任务实际写入键为 'stocktakeTasks'（db.js syncStocktakeTasksToCloud），
+            //   旧诊断读 'wb_stocktake_tasks' 永远 miss → 显示 -1 误导排障。两个键名都兼容读。
+            const ct = (remote['stocktakeTasks'] !== undefined) ? remote['stocktakeTasks'] : remote['wb_stocktake_tasks'];
+            out.cloudTaskCount = ct && typeof ct === 'object' ? Object.keys(ct).length : -1;
+          } else {
+            out.cloudError = '云端返回空（settings 通道不可用或被 CDN 缓存）';
+          }
+        } catch (e) { out.cloudError = '读取云端异常：' + (e && e.message); }
+      } else {
+        out.cloudError = online ? 'SyncManager.getSettings 不可用' : '离线';
+      }
+
+      // 结论
+      const lSid = (out.localActiveQuarter || {}).sheetId || null;
+      const cSid = (out.cloudActiveQuarter || {}).sheetId || null;
+      out.localSheetId = lSid;
+      out.cloudSheetId = cSid;
+      if (!out.cloudReadable) {
+        out.verdict = '❌ 读不到云端 —— 本端无法跟随任何批次。先查：① 网络 ② 云端是否已连接（顶部状态）③ settings.json 是否可读';
+      } else if (cSid && lSid && cSid !== lSid) {
+        out.verdict = '❌ 批次分叉：本机 ' + lSid + ' ≠ 云端 ' + cSid + '。本机盘的数据会记在本机批次下，管理员看不到；管理员结束的也是云端那批，本机收不到。可用【强制对齐云端】修复。';
+      } else if (cSid && !lSid) {
+        out.verdict = '⚠️ 云端有批次但本机没有 —— 本机还没跟随，点【🔄 刷新】或重进【季度盘点】';
+      } else if (!cSid) {
+        out.verdict = 'ℹ️ 云端暂无批次锚点（尚未开盘，或锚点被清过）';
+      } else {
+        out.verdict = '✅ 两端批次一致：' + cSid;
+      }
+      const sessSid = (out.localSession || {}).sheetId || null;
+      if (sessSid && cSid && sessSid !== cSid) {
+        out.verdict += ' ｜ ⚠️ 本机残留会话绑定在另一批次 ' + sessSid + '（陈旧会话，会阻止跟随）';
+      }
+    } catch (e) {
+      out.error = '诊断异常：' + (e && e.message);
+    }
+    return out;
+  },
+
+  /** 🟢 v228.49-fix3：把上面这份诊断渲染成人类可读的文本 */
+  _syncDiagnoseText(d) {
+    // 🟢 v228.65（用户反馈：弹窗信息太复杂）：只保留「结论 + 必要信息」，纯中文。
+    //   技术明细（sheetId / 闸门项数 / 概览键数）移到 _syncDiagnoseDetailText，仅进控制台。
+    const L = [];
+    const same = d.cloudReadable && d.cloudSheetId && d.localSheetId === d.cloudSheetId;
+    if (!d.online) {
+      L.push('⛔ 当前离线，无法读取云端');
+      L.push('请恢复网络后再试');
+    } else if (!d.cloudReadable) {
+      L.push('⛔ 读不到云端数据');
+      L.push((d.cloudError ? '原因：' + d.cloudError : '请检查网络后重试'));
+    } else if (same) {
+      L.push('✅ 两端一致，同步正常');
+      L.push('批次任务：本机 ' + d.localTaskCount + ' 个 / 云端 ' + d.cloudTaskCount + ' 个');
+    } else if (d.cloudSheetId && !d.localSheetId) {
+      L.push('⚠️ 云端已开始盘点，本机还没跟上');
+      L.push('点下方「一键对齐」即可跟上，已盘记录不受影响');
+    } else if (d.cloudSheetId) {
+      L.push('⚠️ 本机与云端的批次不一致');
+      L.push('这会导致：你盘的数据管理员看不到，管理员结束的你收不到');
+      L.push('点下方「一键对齐」换到云端批次，已盘记录不受影响');
+    } else {
+      L.push('✅ 云端当前没有进行中的批次');
+    }
+    if (d.error) L.push('（异常：' + d.error + '）');
+    return L.join('\n');
+  },
+
+  /** 🟢 v228.65：诊断的技术明细 —— 不再进弹窗，只进控制台（showSyncDiagnose 已 console.log）。 */
+  _syncDiagnoseDetailText(d) {
+    const L = [];
+    const sid = x => (x && x.sheetId) ? x.sheetId : '（无）';
+    L.push('同步诊断  ' + (d.at || ''));
+    L.push('在线: ' + (d.online ? '是' : '否') + '  云端可读: ' + (d.cloudReadable ? '是' : '否' + (d.cloudError ? '（' + d.cloudError + '）' : '')));
+    L.push('本机批次: ' + sid(d.localActiveQuarter));
+    L.push('云端批次: ' + sid(d.cloudActiveQuarter));
+    L.push('本机残留会话: ' + (d.localSession ? (sid(d.localSession) + '（' + (d.localSession.counter || '') + '）') : '无'));
+    L.push('结束闸门 本机/云端: ' + Object.keys(d.localRoundClosed || {}).length + ' / ' + Object.keys(d.cloudRoundClosed || {}).length + ' 项');
+    L.push('概览键 本机/云端: ' + (d.localOverviewKeys || []).length + ' / ' + (d.cloudOverviewKeys || []).length + ' 个');
+    L.push('任务数 本机/云端: ' + d.localTaskCount + ' / ' + d.cloudTaskCount);
+    L.push('结论: ' + (d.verdict || '—'));
+    if (d.error) L.push('异常: ' + d.error);
+    return L.join('\n');
+  },
+
+  /**
+   * 🟢 v228.49-fix3：强制对齐到云端批次 —— 「已分叉」状态的急救。
+   *
+   *   与 resetFromUI（清场）的区别：
+   *     · 清场 = 清成本机干净起点，两端都要重开；
+   *     · 本方法 = **保留本机已盘记录**，只把「身份」换到云端批次，并清掉陈旧会话。
+   *   适合「手机盘了一批、发现管理员看不到」时救数据：记录还在，重进即可被管理员看到。
+   *
+   *   ⚠️ 仅对齐身份，不动盘点记录；原批次记录仍在库中（按原 sheetId 存），
+   *      如需并入云端批次，走盘点记录的历史查看。
+   *
+   * @param {boolean} [skipConfirm] 🟢 v228.65：跳过内部确认框。诊断弹窗已让用户点过
+   *   「一键对齐」，再弹一次属于重复确认（用户反馈「诊断要点 2 次弹窗，麻烦」）；
+   *   控制台直调等无确认入口时省略该参数，保留原确认。
+   */
+  async forceAlignToCloud(skipConfirm) {
+    let d = null;
+    try { d = await this.syncDiagnose(); } catch (e) { this.toast('诊断失败，无法对齐'); return; }
+    if (!d || !d.cloudReadable || !d.cloudSheetId) {
+      this.toast('读不到云端批次，无法对齐。请先恢复网络');
+      return;
+    }
+    if (d.localSheetId === d.cloudSheetId) { this.toast('两端批次已一致，无需对齐'); return; }
+    let go = true;
+    if (!skipConfirm) {
+      try {
+        go = await WBModal.confirm(
+          '本机批次：' + (d.localSheetId || '（无）') + '\n' +
+          '云端批次：' + d.cloudSheetId + '\n\n' +
+          '对齐会把本机的「批次身份」换成云端那一个，并清除绑定在旧批次上的残留会话。\n\n' +
+          '· 已写入的盘点记录**保留**（仍按原批次存放，可在盘点记录里查看）；\n' +
+          '· 之后本端盘的新数据会记在云端批次下 → 管理员视图能看到人和进度；\n' +
+          '· 管理员结束云端批次时，本端也能收到。\n\n' +
+          '确认对齐？',
+          { title: '🔗 强制对齐云端批次', okText: '确认对齐', cancelText: '取消' });
+      } catch (e) { return; }
+    }
+    if (!go) return;
+    try {
+      const aq = d.cloudActiveQuarter;
+      this._saveActiveQuarter(aq);
+      if (aq.sd && aq.ed) { this.query.startDate = aq.sd; this.query.endDate = aq.ed; }
+      // 清陈旧会话（绑定在别的批次上）
+      const sess = this._getOpenSession();
+      if (sess && sess.sheetId && sess.sheetId !== aq.sheetId) this._clearOpenSession();
+      this._pendingBatchFollow = true;
+      this._setLastQuarterSheet(this.query.startDate, this.query.endDate);
+      this.toast('已对齐到云端批次 ' + aq.sheetId + '，请重进【季度盘点】');
+      if (typeof App !== 'undefined' && App.go) App.go('stocktake');
+    } catch (e) {
+      this.toast('对齐失败：' + (e && e.message ? e.message : '未知错误'));
+    }
+  },
+
+  /** 🟢 v228.49-fix3：诊断面板入口（界面按钮） */
+  async showSyncDiagnose() {
+    this.toast('正在读取云端…');
+    const d = await this.syncDiagnose();
+    // 🟢 v228.65（用户反馈：诊断弹窗太复杂、夹杂英文 ID、点两次麻烦）：
+    //   弹窗只给「结论 + 下一步」，完整技术明细仍 console.log 供排查。
+    //   旧版流程 = confirm「是否对齐」→ forceAlignToCloud 内再 confirm「确认对齐」→
+    //   同一件事要确认两次；现 forceAlignToCloud 支持 skipConfirm，一步到位。
+    const txt = this._syncDiagnoseText(d);
+    console.log('[stocktake] 同步诊断（明细）\n' + this._syncDiagnoseDetailText(d));
+    try {
+      const needAlign = d.cloudReadable && d.cloudSheetId && d.localSheetId !== d.cloudSheetId;
+      if (needAlign) {
+        // 🟢 v228.65：不再追加引导句 —— _syncDiagnoseText 里已经写了「点下方「一键对齐」…」，
+        //   再补一句就是同一件事说两遍（实机抓到文案重复，正是「太复杂」的观感来源）。
+        const go = await WBModal.confirm(txt,
+          { title: '🩺 诊断', okText: '一键对齐', cancelText: '关闭' });
+        if (go) { await this.forceAlignToCloud(true); return; }
+      } else {
+        await WBModal.alert(txt, { title: '🩺 诊断' });
+      }
+    } catch (e) {
+      this.toast(txt.split('\n').slice(-1)[0] || '诊断完成（详见控制台）');
+    }
+  },
+
+  /** 🟢 v228.48-fix2：本人当前批次的待办任务数（刷新反馈用，纯本地读取） */
+  _myOpenTaskCount() {
+    try {
+      const my = ((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser)
+        ? ((AppConfig.getCurrentUser() || {}).username || '') : String(this.task.counter || '')).trim();
+      if (!my) return 0;
+      const sd = this.query.startDate, ed = this.query.endDate;
+      return (DataStore.getMyOpenTasks(my) || [])
+        .filter(t => !t || this._taskInCurrentBatch(t, sd, ed)).length;
+    } catch (e) { return 0; }
+  },
+
+  /**
+   * 🟢 v228.48-fix2：只重渲「概览 / 已结束 / 管理员监控」三块，不动上方的「我的任务」区与标题栏。
+   *   用途：手动刷新后让**管理员视图的盘点人进度**立即反映云端最新数字，而不重建整个 picker
+   *   （重建会重置折叠状态、滚动位置，也会打断正在进行的操作）。
+   *   实现：借助 _renderMyOverviewBlock / _renderAdminBatchBlock 已生成好的 DOM，按 id 就地替换；
+   *   若当前不在 picker，则静默返回（交给 ④ 的整块重渲）。
+   *
+   *   🟢 v228.61（P0-A′ 修复空转）：
+   *     本函数依赖 `#stMyOverviewBlock` / `#stAdminBatchBlock` 两个 id 定位 DOM，
+   *     但这两个 id **此前从未写进 picker 的 innerHTML**（模板里是裸插值 ${overviewBlock}），
+   *     于是 querySelector 永远 miss → 本函数一直等价于空操作，
+   *     「刷新后管理员视图·盘点人进度就地更新」这个优化实际从未生效（一直是靠整块重渲兜的）。
+   *     已在两个渲染函数的根 div 上补 id；此处同时补「块不存在时新建插入」的兜底：
+   *     _renderMyOverviewBlock 在本批次无任务时会返回 ''（该块本就不该显示），
+   *     但返回非空而 DOM 缺失（如管理员视图刚被打开）时应能补上，而不是静默丢弃。
+   */
+  _renderOverviewBlocksOnly(counter) {
+    try {
+      const area = document.getElementById('stArea');
+      if (!area) return false;
+      if (area.getAttribute('data-st-view') !== 'quarter-picker') return false;
+      const ctx = this._pickerCtx;
+      if (!ctx) return false;
+      const sheetId = ctx.sheetId;
+      const sd = ctx.sd, ed = ctx.ed;
+      const allTasks = DataStore.getStocktakeTasks() || {};
+      const sameBatchAll = Object.keys(allTasks).map(k => allTasks[k])
+        .filter(t => this._taskInCurrentBatch(t, sd, ed));
+      const blocks = [
+        { id: 'stMyOverviewBlock', html: this._renderMyOverviewBlock(counter, ctx.batchNo, sheetId, sd, ed) },
+        { id: 'stAdminBatchBlock', html: this._renderAdminBatchBlock(sheetId, sd, ed, counter, sameBatchAll, ctx.batchNo) }
+      ];
+      let touched = 0;
+      blocks.forEach(b => {
+        if (!b.html) return;
+        const tmp = document.createElement('div');
+        tmp.innerHTML = b.html;
+        const nu = tmp.firstElementChild;
+        if (!nu) return;
+        const cur = area.querySelector('#' + b.id);
+        if (cur) { cur.replaceWith(nu); touched++; }
+      });
+      return touched > 0;
+    } catch (e) { return false; }
+  },
   // 仅设置数据（不渲染），供自动领用复用
-  _setAssignedRows(task) {
-    const codes = (task.codes || []).filter(Boolean);
+  _setAssignedRows(task, codesOverride) {
+    // 🟢 v228.41（优化项-4）：支持 codesOverride —— 多段任务合并成一行展示后，
+    //   点该行「进入盘点」应载入该盘点人「全部段」的编码，而非仅首个 taskId 的那一段。
+    const codes = (codesOverride && codesOverride.length ? codesOverride : (task.codes || [])).filter(Boolean);
     if (codes.length && this.allRowsFull && this.allRowsFull.length) {
       const map = {};
       this.allRowsFull.forEach(r => { map[r.存货编码] = r; });
@@ -1775,6 +3837,18 @@ const StocktakeModule = {
     this.task.noEnd = task.noEnd;
     this.task.started = true;
     this.task.assignedTaskId = task.taskId;
+  },
+  // 🟢 v228.41（优化项-4）：某盘点人在本批次的「全部段」编码合集（去重、按顺序）——
+  //   供合并行「进入盘点」一次性载入全部区间，避免合并展示后又只盘到一段。
+  _codesForCounterSegments(counter, sd, ed) {
+    const out = [];
+    const seen = new Set();
+    const all = DataStore.getStocktakeTasks() || {};
+    Object.keys(all).map(k => all[k])
+      .filter(t => t && t.counter === counter && this._taskInCurrentBatch(t, sd, ed))
+      .sort((a, b) => (a.noStart || 0) - (b.noStart || 0))
+      .forEach(t => (t.codes || []).forEach(c => { if (c && !seen.has(c)) { seen.add(c); out.push(c); } }));
+    return out;
   },
   // 🟢 v227.5：补盘专用的「按任务编码 + 已盘编码过滤」 —— 只保留任务清单中、本人尚未盘过的编码
   //   （确保补盘入口进入后不会再次呈现已盘项，避免重复盘点）
@@ -1829,12 +3903,14 @@ const StocktakeModule = {
 
 
   /**
-   * 🟢 v227：进入盘点模块时，若有新分派给自己的季度盘点任务 → 弹窗提示。
-   *   已提示过的 taskId 记入 localStorage，避免每次进模块重复弹。
+   * 🟢 v227：进入盘点模块时，若有新分派给自己的季度盘点任务 → 轻提示。
+   * 🟢 v228.35（P12）：模态弹窗改 toast。
+   *   旧版每批新任务都弹一个必须点「确定」的模态框 —— 管理员连续给 5 个人分派就要点 5 次，
+   *   而"有人给你分派了任务"本身并不是需要用户决策的事（任务卡片上已经能看到），
+   *   用模态打断是过度打扰。改为 4 秒自动消失的 toast，信息量不减。
    */
   _notifyNewTasks() {
     try {
-      if (typeof WBModal === 'undefined' || typeof WBModal.alert !== 'function') return;
       if (typeof AppConfig === 'undefined' || !AppConfig.getCurrentUser) return;
       const u = AppConfig.getCurrentUser();
       const c = u ? u.username : '';
@@ -1849,10 +3925,11 @@ const StocktakeModule = {
       if (!fresh.length) return;
       try { localStorage.setItem(this.TASK_SEEN_KEY, JSON.stringify(seen.concat(fresh.map(t => t.taskId)))); } catch (e) { /* 忽略 */ }
 
-      const lines = fresh.map(t => `· ${t.counter} · 序号 ${t.noStart}-${t.noEnd} · ${(t.codes || []).length} 项`).join('\n');
-      WBModal.alert('你有新分配季度盘点任务：\n\n' + lines +
-        '\n\n请在季度盘点「我的任务」中点击该任务，即可直接进入季度盘点。',
-        { title: '🔔 新分配任务' });
+      const total = fresh.reduce((n, t) => n + ((t.codes || []).length || Math.max(0, (t.noEnd - t.noStart + 1))), 0);
+      const brief = fresh.length === 1
+        ? `序号 ${fresh[0].noStart}-${fresh[0].noEnd} · ${(fresh[0].codes || []).length || ''} 项`
+        : `${fresh.length} 个任务 · 共 ${total} 项`;
+      this.toast('🔔 你有新的季度盘点任务（' + brief + '），请在「我的任务」中进入盘点');
     } catch (e) { console.warn('[stocktake] 新任务提示失败(已忽略):', e && e.message); }
   },
 
@@ -1872,8 +3949,8 @@ const StocktakeModule = {
       //   这里原写的是 '你有<b>未结束</b>的…'，用户会直接看到裸的 <b> 标签。改为纯文本强调。
       WBModal.alert(
         '你有「未结束」的' + typeCn + '盘点（盘点号 ' + esc(s.batchNo || s.sheetId) + '）。\n\n' +
-        '· 点【保存】= 暂停，数据只存本地草稿，下次可继续；\n' +
-        '· 全部盘完请点【盘点结束】才算完成，并写入盘点记录、同步云端。',
+        '· 点【暂存并退出】= 暂停，数据只存本地草稿（不计入盘点记录），下次可继续；\n' +
+        '· 全部盘完请点【结束本次盘点】才算完成，并写入盘点记录、同步云端。',
         { title: '⏸ 未结束的盘点' });
     } catch (e) { console.warn('[stocktake] 未结束提醒失败(已忽略):', e && e.message); }
   },
@@ -1992,9 +4069,29 @@ const StocktakeModule = {
         // 🟢 v227.67：ROUND_CLOSED_KEY 是聚合态，离线回放整包覆盖会抹掉其他设备已结束轮次 → 先与云端并集
         if (it.key === this.ROUND_CLOSED_KEY && value && typeof value === 'object') {
           try {
-            const remote = await SyncManager.getSettings();
-            const rmap = (remote && remote[this.ROUND_CLOSED_KEY]) || null;
+            // 🟢 v228.61（P0-A）：只读该键
+            const rmap = await SyncManager.getSetting(this.ROUND_CLOSED_KEY);
             if (rmap && typeof rmap === 'object') value = Object.assign({}, rmap, value);
+          } catch (e) { /* 忽略 */ }
+        }
+        // 🟢 v228.45：任务队列项同理 —— 离线期间攒下的任务，回放时若直接整包覆盖，
+        //   会抹掉「离线窗口内对端（在线设备）已分派/已结束」的任务，造成「回放反而丢任务」。
+        //   规则与在线路径一致：先拉云端合并（updatedAt 较新者胜 + 墓碑），再整包推并集。
+        if (it.key === 'stocktakeTasks' && value && typeof value === 'object') {
+          try {
+            await DataStore.pullStocktakeTasksFromCloud();
+            value = DataStore._tasksRaw();
+          } catch (e) { /* 合并失败则退回原值，仍尽力推送 */ }
+        }
+        // 🟢 v228.45：当前批次区间（ACTIVE_QUARTER_KEY）也是聚合态 —— 回放时以「较新者胜」，
+        //   避免离线旧值覆盖对端刚切换的新批次。
+        if (it.key === this.ACTIVE_QUARTER_KEY && value && typeof value === 'object') {
+          try {
+            // 🟢 v228.61（P0-A）：只读该键
+            const ra = await SyncManager.getSetting(this.ACTIVE_QUARTER_KEY);
+            const vTs = Date.parse((value && value.updatedAt) || '') || 0;
+            const rTs = Date.parse((ra && ra.updatedAt) || '') || 0;
+            if (ra && rTs > vTs) value = ra;   // 云端更新 → 丢弃本机陈旧项
           } catch (e) { /* 忽略 */ }
         }
         const ok = await SyncManager.setSetting(it.key, value); if (ok) n++; else remain.push(it);
@@ -2153,11 +4250,24 @@ const StocktakeModule = {
 
   /** 从云端拉概览，合并到本地（最新 updatedAt 胜出）。返回 true 表示有变更 */
   async _pullQuarterOverviews() {
-    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
-    if (typeof SyncManager.getSettings !== 'function') return false;
+    // 🟢 v228.51（P0 读解耦）：浏览器未明确离线即允许拉取，避免移动端 isOnline 误判冻结同步
+    const _online = (typeof SyncManager === 'undefined') ? false
+      : (SyncManager.isOnline || (typeof navigator !== 'undefined' && navigator.onLine !== false));
+    if (!_online) return false;
+    if (typeof SyncManager.getSetting !== 'function') return false;
     try {
-      const remote = await SyncManager.getSettings();
-      const rmap = (remote && remote[this.OVERVIEW_KEY]) || null;
+      // 🟢 v228.61（P0-A）：只读 OVERVIEW_KEY / ROUND_CLOSED_KEY 两个键，不再读整包。
+      //   本方法在 _pollOnce 里每轮都被调用，是读放大的主要贡献者之一。
+      let rmap, rcMap;
+      if (typeof SyncManager.getSettingsKeys === 'function') {
+        const got = await SyncManager.getSettingsKeys([this.OVERVIEW_KEY, this.ROUND_CLOSED_KEY]);
+        rmap = got[this.OVERVIEW_KEY] || null;
+        rcMap = got[this.ROUND_CLOSED_KEY] || null;
+      } else {
+        const remote = await SyncManager.getSettings();
+        rmap = (remote && remote[this.OVERVIEW_KEY]) || null;
+        rcMap = (remote && remote[this.ROUND_CLOSED_KEY]) || null;
+      }
       if (!rmap || typeof rmap !== 'object') return false;
       const local = this._getAllOverviews();
       // 🟢 v227.5+：判定「是否有新变更」—— 比较远端每个 key 的 updatedAt 与本地
@@ -2173,11 +4283,12 @@ const StocktakeModule = {
       });
       if (hasNew) {
         this._saveOverviews(merged);
-        // 同步批次结束标记
-        const rcMap = (remote && remote[this.ROUND_CLOSED_KEY]) || null;
+        // 同步批次结束标记 —— 🟢 v228.33：本地 closed 记录优先（localRc 在后），
+        //   云端只「增补」未结束轮次，绝不把本机已结束的批次覆盖回「进行中」（修复更新后重进被云拉回进行中）。
+        // 🟢 v228.61：rcMap 已在函数开头随 OVERVIEW_KEY 一并读出，此处不再二次读云端。
         if (rcMap && typeof rcMap === 'object') {
           const localRc = this._getRoundClosed();
-          const mergedRc = Object.assign({}, localRc, rcMap);
+          const mergedRc = Object.assign({}, rcMap, localRc);
           this._saveRoundClosed(mergedRc);
         }
       }
@@ -2206,6 +4317,23 @@ const StocktakeModule = {
       if (typeof BroadcastChannel === 'undefined') return;
       const ch = new BroadcastChannel('wb_stocktake_overview');
       ch.onmessage = async (ev) => {
+        const data = ev && ev.data;
+        // 🟢 v228.39（P4）：冻结协议 —— 管理员结束本轮前广播 freeze，
+        //   打开中的盘点表收到后 flush 草稿 + 锁输入，避免「正在输入未失焦」的最后一条草稿丢失。
+        if (data && data.type === 'freeze') { try { await this._onRemoteFreeze(data); } catch (e) {} return; }
+        // 🟢 v228.39（P4）：本端已被冻结且管理员已结束本轮 → 锁定横幅切换为「已结束」
+        if (data && data.type === 'overviewUpdated' && data.forceClosed && this._frozen) {
+          try { this._onRoundForceClosed(data); } catch (e) {}
+          return;
+        }
+        // 🟢 v228.45：任务变更广播 —— 同浏览器另一标签分派/认领/放弃/结束任务后，
+        //   本标签立即重渲（无需等 3s 轮询）。任务数据在 localStorage，两标签共享同一份，
+        //   故先拉云端合并（在线时）再重渲。
+        if (data && data.type === 'tasksUpdated') {
+          try { if (typeof DataStore !== 'undefined' && DataStore.pullStocktakeTasksFromCloud) await DataStore.pullStocktakeTasksFromCloud(); } catch (e) {}
+          this._schedulePickerRefresh();
+          return;
+        }
         // 🟢 收到其他标签的广播 → 拉云端（在线时）+ 本地轻量重渲
         //   离线也要重渲：同浏览器多标签共享 localStorage，本机进度照样能同步
         try { await this._refreshQuarterPickerIfShown(); } catch (e) { /* 忽略 */ }
@@ -2216,6 +4344,22 @@ const StocktakeModule = {
         window.addEventListener('storage', (ev) => {
           if (ev && (ev.key === this.OVERVIEW_KEY || ev.key === this.ROUND_CLOSED_KEY)) {
             try { this._refreshQuarterPickerIfShown(); } catch (e) {}
+          }
+          // 🟢 v228.45：任务表 / 当前批次区间变更也要触发重渲 ——
+          //   否则同浏览器另一标签分派了任务、切换了批次，本标签完全无感（只能等 3s 轮询）。
+          //   注意：wb_stocktake_tasks 由 DataStore 写入，storage 事件只在「其他标签」触发，
+          //   写标签自身不会收到，故不会造成自触发死循环。
+          //   一次任务变更可能同时改动 wb_stocktake_tasks 与哨兵键（→ 触发 2 次），
+          //   故统一走防抖调度 _schedulePickerRefresh，避免重复拉云端与重复重渲。
+          if (ev && (ev.key === 'wb_stocktake_tasks' || ev.key === this.ACTIVE_QUARTER_KEY
+                     || ev.key === this.NO_MAP_KEY || ev.key === this.ROUND_NO_KEY
+                     || ev.key === this.ROUND_LABEL_KEY || ev.key === 'wb_stocktake_tasks_bcast')) {
+            this._schedulePickerRefresh();
+          }
+          // 🟢 v228.39（P4）：freeze 的 storage 兜底（BroadcastChannel 不支持时的跨标签触发）
+          if (ev && ev.key && ev.key.indexOf('wb_stocktake_freeze_') === 0) {
+            const sid = ev.key.replace('wb_stocktake_freeze_', '');
+            try { this._onRemoteFreeze({ sheetId: sid }); } catch (e) {}
           }
         });
         this._overviewStorageBound = true;
@@ -2230,12 +4374,81 @@ const StocktakeModule = {
     } catch (e) { /* 忽略 */ }
   },
 
+  /** 🟢 v228.45：picker 重渲防抖调度 —— 一次任务变更常伴随多个 storage 键变化
+   *  （wb_stocktake_tasks + 哨兵键 + 批次号键），逐次触发会重复拉云端（2 个网络请求/次）。
+   *  合并到 120ms 窗口内的最后一次执行，既保证即时性又避免抖动风暴。 */
+  _schedulePickerRefresh() {
+    try {
+      if (this._pickerRefreshTimer) clearTimeout(this._pickerRefreshTimer);
+      this._pickerRefreshTimer = setTimeout(() => {
+        this._pickerRefreshTimer = null;
+        try { this._refreshQuarterPickerIfShown(); } catch (e) { /* 忽略 */ }
+      }, 120);
+    } catch (e) { /* 忽略 */ }
+  },
+
+  // 🟢 v228.39（P4）：广播冻结 —— 同浏览器多标签走 BroadcastChannel，并写 storage 键做跨标签兜底
+  _broadcastFreeze(sheetId, sd, ed) {
+    try {
+      if (this._overviewChannel) this._overviewChannel.postMessage({ type: 'freeze', sheetId: sheetId, startDate: sd, endDate: ed, at: Date.now() });
+    } catch (e) { /* 忽略 */ }
+    try { localStorage.setItem('wb_stocktake_freeze_' + sheetId, JSON.stringify({ at: Date.now() })); } catch (e) {}
+  },
+
+  // 🟢 v228.39（P4）：接收管理员的冻结广播 —— flush 草稿 + 锁输入 + 横幅，防末条草稿丢失
+  async _onRemoteFreeze(payload) {
+    try {
+      const sid = payload && payload.sheetId;
+      if (!sid) return;
+      // 仅命中「当前正在盘的同一批次」才响应；兼容 sheetId 为 null（早期任务未回填）时用区间兜底
+      if (!this.sheet || this.sheet.sheetType !== 'quarter' || this.sheet.sheetId !== sid) {
+        const psd = payload.startDate, ped = payload.endDate;
+        if (!(psd && ped && this.sheet && this.sheet.sheetType === 'quarter' &&
+              this.sheet.startDate === psd && this.sheet.endDate === ped)) return;
+      }
+      // 先 flush 当前在输入/内存中的草稿（saveDraft 为同步）
+      try { this.saveDraft(); } catch (e) { /* 忽略 */ }
+      if (this._frozen) return;
+      this._frozen = true;
+      this._applyFreezeLockUI();
+      this.toast('本轮盘点已被管理员锁定，进度已自动保存');
+    } catch (e) { /* 忽略 */ }
+  },
+
+  // 🟢 v228.39（P4）：锁定录入表（禁用输入 + 顶部横幅）
+  _applyFreezeLockUI() {
+    try {
+      const area = document.getElementById('stArea');
+      if (!area) return;
+      area.querySelectorAll('input.st-qty, input.st-note').forEach(el => { el.disabled = true; el.style.opacity = '0.6'; });
+      let banner = document.getElementById('stFreezeBanner');
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'stFreezeBanner';
+        area.insertBefore(banner, area.firstChild);
+      }
+      banner.style.cssText = 'padding:10px 14px;margin-bottom:10px;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;border-radius:8px;font-size:13px;';
+      banner.innerHTML = '⚠️ 管理员正在结束本轮盘点，已自动保存你的进度，盘点已锁定，请稍候…';
+    } catch (e) { /* 忽略 */ }
+  },
+
+  // 🟢 v228.39（P4）：管理员结束完成后，把锁定横幅切换为「已结束」
+  _onRoundForceClosed(data) {
+    try {
+      if (!this.sheet || this.sheet.sheetId !== (data && data.sheetId)) return;
+      const banner = document.getElementById('stFreezeBanner');
+      if (banner) banner.innerHTML = '✅ 本轮盘点已结束，进度已保存。可返回【季度盘点】查看归档。';
+    } catch (e) { /* 忽略 */ }
+  },
+
+
   /** 如果当前在季度任务选择器（picker），按最新数据重渲（不刷新整个模块） */
   async _refreshQuarterPickerIfShown() {
     try {
       const area = document.getElementById('stArea');
       if (!area) return false;
-      const inPicker = /季度盘点需由管理员分派/.test(area.innerText || '');
+      // 🟢 v228.36：改用结构标记判定（旧的正则文案全库不存在 → 恒 false，重渲失效）
+      const inPicker = area.getAttribute('data-st-view') === 'quarter-picker';
       const inSheet = !!(this.sheet && this.sheet.sheetType === 'quarter');
       if (!inPicker || inSheet) return false;
       // 在线才拉云端；离线时纯靠本地数据重渲（同浏览器多标签/本机多账号仍可实时）
@@ -2257,16 +4470,34 @@ const StocktakeModule = {
       const area = document.getElementById('stArea');
       if (!area) return false;
       if (this.sheet && this.sheet.sheetType === 'quarter') return false;
-      if (!/季度盘点需由管理员分派/.test(area.innerText || '')) return false;
+      // 🟢 v228.36：改用结构标记判定（旧的正则文案全库不存在 → 恒 false，轻量重渲从未生效）
+      if (area.getAttribute('data-st-view') !== 'quarter-picker') return false;
       // 🟢 v227.16 修复：原 `:hover` 守卫会让「鼠标停在盘点区域」时 8s 轮询永远跳过重渲，
       //    导致结束/保存后的概览迟迟不刷新（用户最需要时反而不工作）。改为仅「最近 1.2s 内有
       //    点击/键盘交互」才跳过重渲，避免点按钮瞬间 DOM 重建使点击落空，其余时刻正常刷新。
-      if (this._pickerInteracting) return false;
+      // 🟢 v228.47：但「跨端切换了批次」属于必须立即生效的变更 —— 此时用户的停留不该成为阻碍，
+      //    否则 PC 端会停在旧批次上一直显示"暂无任务"（线上复现）。该场景强制穿透交互守卫。
+      const forceByBatchFollow = !!this._pendingBatchFollow;
+      if (forceByBatchFollow) this._pendingBatchFollow = false;
+      if (this._pickerInteracting && !forceByBatchFollow) return false;
       // 🟢 v227.8：轮询重渲也要锚定未结束会话，否则跨天后 picker 会漂到新区间（与 startQuarter 不一致）
       this._anchorRangeToOpenSession();
+      // 🟢 v228.48：跟随云端「当前批次身份」—— 管理员在另一端开了新批次后，
+      //   本端必须跟着落到同一个 sheetId，否则 _taskInCurrentBatch 过滤基准不同 → 各论各的。
+      //   实现已大幅简化：批次身份不是本机日期推导值，云端锚点就是唯一权威，
+      //   因此不再需要「本机是否有权威背书」那类判定，只在有未结束现场时不打断用户。
+      try {
+        const sess0 = this._getOpenSession();
+        if (!(sess0 && sess0.sheetType === 'quarter')) {
+          const aq = this._getActiveQuarter();
+          if (aq && aq.sheetId) {
+            if (aq.sd && aq.ed) { this.query.startDate = aq.sd; this.query.endDate = aq.ed; }
+          }
+        }
+      } catch (e) { /* 忽略 */ }
       this._ensureDefaultRange();
       const sd = this.query.startDate, ed = this.query.endDate;
-      const sheetId = 'quarter_' + sd.slice(5) + '_' + ed.slice(5);
+      const sheetId = this._currentQuarterSheetId() || this._quarterSheetId();
       const counter = String(((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser)
         ? ((AppConfig.getCurrentUser() || {}).username || '') : '') || this.task.counter || '').trim();
       const allTasks = DataStore.getStocktakeTasks() || {};
@@ -2285,29 +4516,256 @@ const StocktakeModule = {
   },
 
   /**
-   * picker 打开时启动 8s 轮询；离开 picker 时清掉。
+   * picker 打开时启动轮询；离开 picker 时清掉。
    * 🟢 v227.5+：不再由 isOnline 门控 —— 离线/弱网（仓库常态）也要能靠本地数据刷新；
    *   在线时额外拉云端，离线时跳过云端只做本地重渲。
+   * 🟢 v228.35（P3）：固定 8s 改为「按页面可见性分级 + 切回前台立即刷新」。
+   *   问题：仓库里管理员常常是「一边看监控一边打电话催人」，8 秒滞后足以让他误判对方没在盘；
+   *        而页面切到后台时 8s 定时器又纯属耗电耗流量。
+   *   方案：可见时 POLL_VISIBLE_MS（3s）高频轮询，隐藏时 POLL_HIDDEN_MS（30s）保活即可，
+   *        并在 visibilitychange 回到前台时立即补一次，避免用户切回来还看到旧数字。
    */
-  _startOverviewPolling() {
-    this._stopOverviewPolling();
-    this._overviewPollTimer = setInterval(async () => {
-      try {
-        if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
-          try {
-            const changed = await this._pullQuarterOverviews();
-            if (changed) { try { await this._pullRoundClosed(); } catch (e) {} }
-          } catch (e) { /* 忽略 */ }
+  POLL_VISIBLE_MS: 3000,
+  POLL_HIDDEN_MS: 30000,
+  /**
+   * 🟢 v228.51（P0 根治「移动端收不到 PC 端操作」）：
+   *   旧版轮询仅 picker 打开时存在，手机切后台/锁屏后 OS 挂起定时器 → 同步停摆，只能靠手动刷新。
+   *   改为**应用级常驻守护**：进入季度盘点即启动（单例），前台 3s、后台 30s；并在「切回前台」
+   *   时立即补拉一次（移动端后台定时器被挂起，这是找回一致性的关键），不再依赖 picker 是否打开。
+   *
+   * 🟢 v228.64（P1-2 提速）：前台周期 3000 → 1500。
+   *   实测（docs/季度盘点同步链路实机走查报告.md）端到端 13.8~14.3s，其中轮询等待占 1.5s（均值半周期），
+   *   CDN 回源占 3~10s 是大头、本地改不动；而轮询是**唯一能一行改动就吃到收益**的杠杆。
+   *   代价（已核对）：_KEY_TTL_MS=2000 > 新周期 1500，同键不会被缓存吞掉，新鲜度有保证；
+   *   请求量按「每轮 5 键 + 任务 + 概览」估算约 8 → 16 次/3s，本轮批量已走 getSettingsKeys 并发直读。
+   *   若后续实测 CDN 成本不可接受，回退此常量即可（单点收口）。
+   */
+  SYNC_MS_VISIBLE: 1500,
+  SYNC_MS_HIDDEN: 30000,
+  // 🟢 v228.66(P2/C-4)：无活跃季度轮次时的「空闲」轮询间隔。
+  //   非盘点期（没开盘）根本不需要 1.5s 实时收敛，降到 30s 即可——
+  //   这能把「没开盘却一直开着应用」的后台读流量砍到约 1/20。
+  SYNC_MS_IDLE: 30000,
+  _globalSyncTimer: null,
+  _globalSyncVisBound: false,
+  _startGlobalSync() {
+    if (this._globalSyncTimer) return;            // 单例，重复调用安全
+    const self = this;
+    // 🟢 v228.66(C-3/C-4)：轮询节奏随「页面可见性 + 是否有活跃季度轮次」动态变化：
+    //   · 页面隐藏            → 30s（省电省流量）
+    //   · 页面可见且无活跃轮次 → 空闲 30s（非盘点期几乎零消耗）
+    //   · 页面可见且有活跃轮次 → 1.5s（实时收敛，保证对账双方视图同步）
+    //   用「递归 setTimeout」替代 setInterval：每次 tick 都按最新状态重算间隔，
+    //   轮次从「无→有」能立即提速（旧 setInterval 写法要等 visibilitychange 才重算，会滞后）。
+    const period = () => {
+      if (typeof document !== 'undefined' && document.hidden) return self.SYNC_MS_HIDDEN;
+      const hasActiveRound = !!(self._currentQuarterSheetId());
+      return hasActiveRound ? self.SYNC_MS_VISIBLE : self.SYNC_MS_IDLE;
+    };
+    const loop = () => {
+      try { self._pollOnce(); } catch (e) { /* 忽略 */ }
+      self._globalSyncTimer = setTimeout(loop, period());
+    };
+    self._globalSyncTimer = setTimeout(loop, 0);   // 立即拉第一次（0ms 后）
+    if (!this._globalSyncVisBound) {
+      this._globalSyncVisBound = true;
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) return;              // 进后台不动
+        try { self._pollOnce(); } catch (e) {}    // 回前台立即补拉对齐
+        // 重新排一期，让间隔立即按「可见」重算（无论之前是隐藏还是空闲）
+        if (this._globalSyncTimer) {
+          clearTimeout(this._globalSyncTimer);
+          this._globalSyncTimer = setTimeout(loop, period());
         }
-        // 无论在线与否都按最新本地数据重渲（分派任务/他人进度落在本地时同样生效）
-        // 页面在后台时跳过：不可见时重渲纯属浪费，切回前台后下一轮会补上
-        if (typeof document === 'undefined' || !document.hidden) this._refreshQuarterPickerLight();
+      });
+    }
+  },
+  // 🟢 v228.66(C-3)：停轮询要清得干净——setTimeout/setInterval 两种都清，
+  //   避免切换写法后残留的定时器继续空转烧流量。
+  _stopGlobalSync() {
+    if (this._globalSyncTimer) {
+      clearTimeout(this._globalSyncTimer);
+      clearInterval(this._globalSyncTimer);
+      this._globalSyncTimer = null;
+    }
+  },
+  // 兼容旧调用点（picker 打开/重置/进表）：统一走常驻守护，不再各自起停轮询
+  _startOverviewPolling() { this._startGlobalSync(); },
+  /** 🟢 v228.35（P3）：单次轮询动作 —— 抽出来供定时器与「切回前台/关键动作」复用 */
+  async _pollOnce() {
+    try {
+      // 🟢 v228.51（P0 读解耦）：移动端弱网下 SyncManager.isOnline 可能误判 false 而冻结同步；
+      //   只要浏览器未明确离线（navigator.onLine!==false）就尝试拉云端，失败自然降级本地。
+      const _canPull = (typeof SyncManager === 'undefined')
+        ? false
+        : (SyncManager.isOnline || (typeof navigator !== 'undefined' && navigator.onLine !== false));
+      if (_canPull) {
+        // 🟢 v228.64（P2）：标记新一轮 —— SyncManager 的单键缓存据此**按轮次失效**，
+        //   保证每轮至少下网一次拿到最新值（旧版 TTL 纯时间判定实测会跨轮命中，
+        //   表现为「隔轮才更新」）。
+        // 🟢 v228.66(C-2)：廉价变更探测——list('settings') 拿各文件 updated_at（一次极小请求），
+        //   与上一轮签名比对；全都没变就跳过本轮「重下载」，仅保留下方不下载的轻量动作。
+        //   绝大多数轮次里没有任何端改动这些共享状态，却每 1.5s 把 ~15KB 的 8 个键 + 任务表重下一遍，
+        //   正是轮询流量的大头。代价：其他端刚写入的变更可能因 list 元数据传播延迟（秒级）晚几秒才被本端看到，
+        //   季度盘点对账场景完全可接受（C-2 已与用户确认）。
+        //   安全网：每 8 轮（≈12s@1.5s）强制一次全读，杜绝 list 元数据偶发滞后导致的「永久看不到变更」。
+        let skipHeavy = false;
+        try {
+          const meta = (typeof SyncManager !== 'undefined' && SyncManager.getSettingsMeta)
+            ? await SyncManager.getSettingsMeta() : null;
+          if (meta) {
+            const sig = meta.map(m => (m.name || '') + ':' + (m.updated_at || '')).sort().join('|');
+            const lastSig = this._pollSettingsSig;
+            this._pollSettingsSig = sig;
+            this._pollCount = (this._pollCount || 0) + 1;
+            if (lastSig && lastSig === sig && (this._pollCount % 8) !== 0) skipHeavy = true;
+          }
+        } catch (e) { /* 探测失败不阻塞，照常全读 */ }
+        this._pollSkip = skipHeavy;
+
+        if (!skipHeavy) {
+          try { if (typeof SyncManager.beginReadRound === 'function') SyncManager.beginReadRound(); } catch (e) { /* 忽略 */ }
+          try {
+            // 🟢 v228.40（一-1/一-3）：轮询也拉齐跨端共享状态（轮次/闸门/命名/批次号/任务），
+            //   让「A 端结束或开下一轮」能实时传导到 B 端，两端视图持续收敛而非各说各话。
+            //
+            // 🟢 v228.61（去掉重复读）：本方法内部已经拉过「任务表」(⑤)，
+            //   v228.64 补齐「概览」(⑦) —— 两处均改为复用内部结果（经
+            //   this._lastCommonTaskChanged / this._lastCommonOverviewChanged），
+            //   仅当内部那次被异常跳过时（字段为 null 哨兵）才补拉一次。
+            this._lastCommonTaskChanged = null;
+            this._lastCommonOverviewChanged = null;
+            const commonChanged = await this._pullBatchCommonState();
+            // 复用内部概览结果；为 null 说明 ⑦ 未执行（异常跳过）→ 补拉一次兜底
+            let changed = this._lastCommonOverviewChanged;
+            if (changed === null || changed === undefined) {
+              changed = false;
+              try { changed = await this._pullQuarterOverviews(); } catch (e) { /* 忽略 */ }
+            }
+            // 复用内部任务变更数；为 null 说明 ⑤ 未执行（异常跳过）→ 补拉一次兜底
+            let taskChanged = this._lastCommonTaskChanged;
+            if (taskChanged === null || taskChanged === undefined) {
+              taskChanged = 0;
+              try { taskChanged = await DataStore.pullStocktakeTasksFromCloud(); } catch (e) { /* 忽略 */ }
+            }
+            if (changed || commonChanged || taskChanged > 0) { try { await this._pullRoundClosed(); } catch (e) {} }
+          } catch (e) { /* 忽略 */ }
+        } else {
+          // 跳过本轮重下载：把「变更哨兵」置为「无需补拉」，避免下方 if 误触发 _pullRoundClosed
+          this._lastCommonTaskChanged = 0;
+          this._lastCommonOverviewChanged = false;
+          console.log('[盘点轮询] settings 未变更，跳过本轮重下载（省流量）');
+        }
+      }
+      try { await this._applyGlobalResetIfAny(); } catch (e) { /* 忽略 */ }
+      // 🟢 v228.54（分叉根治②③）：每轮轮询顺带——
+      //   ① 锚点自愈：本机有锚点而云端确实没有时补推（离线开盘/写入失败后联网自动恢复）；
+      //   2) 补推积压队列：_flushCloudQueue 原本只在 online 事件/picker 打开时触发，
+      //      队列为空时开销为零，挂在常驻守护里让「写入失败入队」真正有兜底出口。
+      try { await this._healActiveQuarterAnchor(); } catch (e) { /* 忽略 */ }
+      try { if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) this._flushCloudQueue(); } catch (e) { /* 忽略 */ }
+
+      // 🟢 v228.64（P0-1，修链路 4「盘点明细跨端不同步」）：
+      //   旧版 pullCloudRecords() 全库唯一调用点是 render()（stocktake.js:93）——
+      //   即「进模块那一刻拉一次，之后再不管」。后果：他人在盘点中产生的明细记录，
+      //   本端在常驻轮询里**永远看不到**（实测静默观察 20 秒 / 6~7 个周期零感知），
+      //   必须退出重进模块或点「🔄 刷新」。而主动调用只需 648ms 就能落地，纯属没接。
+      //
+      //   接入策略（刻意克制，不做无条件每轮拉）：
+      //     · 全量拉 cost = 1 次 stocktake.json（1.6KB / ~490ms），本身不贵；
+      //       但 pullStocktake → merge → 落库是**读改写**，高频会放大 Dexie 写压力。
+      //     · 因此按「本机是否真的关心」条件触发，并降频到每 3 轮一次（≈4.5s@1500ms）。
+      //     · 关心 = 本机在管理员/分派视图（要看所有人进度）或手上有 open 任务（别人补的盘我要看见）。
+      try {
+        this._recPollTick = (this._recPollTick || 0) + 1;
+        if (this._recPollTick % 3 === 0 && this._needCloudRecords()) {
+          await this.pullCloudRecords();
+        }
       } catch (e) { /* 忽略 */ }
-    }, 8000);
+
+      // 无论在线与否都按最新本地数据重渲（分派任务/他人进度落在本地时同样生效）
+      // 页面在后台时跳过：不可见时重渲纯属浪费，切回前台后下一轮会补上
+      if (typeof document === 'undefined' || !document.hidden) {
+        this._refreshQuarterPickerLight();
+        // 🟢 v228.64（P0-1 配套）：__deleted 墓碑只由 pullCloudRecords 从**进模块那一刻**拉取，
+        //   之后记录的删除也永远传不过来。轻量重渲无法表达「某条已盘记录消失了」，
+        //   故在重渲之后补一次概览块重渲（它按 _saveOverviews 之后的本地数据算完成率）。
+        try { this._renderOverviewBlocksOnly(this._myCounter()); } catch (e) { /* 忽略 */ }
+      }
+    } catch (e) { /* 忽略 */ }
   },
-  _stopOverviewPolling() {
-    if (this._overviewPollTimer) { clearInterval(this._overviewPollTimer); this._overviewPollTimer = null; }
+
+  /**
+   * 🟢 v228.64：管理员 / 分派权限判定统一入口。
+   *   旧版同一套语义在库里抄了 4 份（2129 行 inline IIFE、4678、4875、4925），
+   *   4 份的写法还不完全一致（有的查 u.perms，有的查 AppConfig.getKeeperModules），
+   *   任何一处漏改都会造成「某入口能分派、另一入口不能」的诡异权限不一致。
+   *   本方法固定口径：isAdmin() 优先，其次查 keeper 的 stocktakeAssign 模块权限。
+   *   ⚠️ 老账号（getKeeperModules 返回 null = 全开）按有权限处理，与 2129 行既有语义一致。
+   */
+  _hasAssignPerm() {
+    try {
+      if (typeof AppConfig === 'undefined') return false;
+      const c = this._myCounter();
+      if (!c) return false;
+      if (typeof AppConfig.isAdmin === 'function' && AppConfig.isAdmin()) return true;
+      const mods = typeof AppConfig.getKeeperModules === 'function' ? AppConfig.getKeeperModules(c) : null;
+      if (!mods) return true;                                   // 老账号（全开）
+      return mods.indexOf('stocktakeAssign') !== -1;
+    } catch (e) { return false; }
   },
+
+  /**
+   * 🟢 v228.64（P0-1 配套）：本机本次登录账号（与 _refreshQuarterPickerLight 内保持一致的口径）。
+   *   抽成方法是为了让 _pollOnce / _needCloudRecords 复用同一份取值逻辑，避免两处各写各的。
+   */
+  _myCounter() {
+    try {
+      const u = (typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? (AppConfig.getCurrentUser() || {}) : {};
+      return String(u.username || this.task.counter || '').trim();
+    } catch (e) { return String(this.task.counter || '').trim(); }
+  },
+
+  /**
+   * 🟢 v228.64（P0-1 配套）：本机是否需要拉「盘点明细记录」（stocktake.json）。
+   *   命中任一即需要：
+   *     ① 管理员 / 有分派权限 —— 管理员视图要显示所有人的盘点进展与记录数；
+   *     ② 本人有 open 任务 —— 别人可能在本机盘的同时补盘/删除记录，需感知。
+   *   都不满足（普通盘点人、手上已完成）时返回 false —— 省掉每 4.5s 一次 dexie 读改写。
+   */
+  _needCloudRecords() {
+    try {
+      if (this._hasAssignPerm()) return true;
+      const counter = this._myCounter();
+      const tasks = DataStore.getStocktakeTasks() || {};
+      const keys = Object.keys(tasks);
+      // 有作业身份 → 只看自己的 open 任务（精确、省流量）
+      if (counter) {
+        return keys.some(k => {
+          const t = tasks[k];
+          return t && t.counter === counter && t.status === 'open';
+        });
+      }
+      // 🟢 无作业身份（未登录 / getCurrentUser 取不到 username）→ 退化为「本机有任一 open 任务」。
+      //   绝不能因为取不到账号就一律返回 false：那会让「已分派了任务、只是会话信息缺失」
+      //   的设备彻底收不到他人记录，恰好是这条链路最该覆盖的场景。
+      //   代价仅是这类设备多一次 1.6KB 的拉取（每 4.5s 一次），可接受。
+      return keys.some(k => {
+        const t = tasks[k];
+        return t && t.status === 'open';
+      });
+    } catch (e) { return false; }
+  },
+  /**
+   * 🟢 v228.35（P3）：关键动作后立即刷新一次（不等轮询周期）。
+   *   结束盘点 / 放弃任务 / 放弃补盘 / 补派 / 强制结束 —— 这类动作管理员就在盯着看结果，
+   *   等 3s（旧版 8s）才变好会让人怀疑没生效而重复点击。
+   *   调用点：上述动作落库 + 广播之后。
+   */
+  async _refreshNowAfterAction() {
+    try { await this._pollOnce(); } catch (e) { /* 忽略 */ }
+  },
+  _stopOverviewPolling() { /* 常驻守护不随 picker 关闭而停，保持后台持续同步 */ },
 
   /** 查找某人某批次已盘过的编码集合（从 stocktake_records 聚合）
    *  🟢 v227.5：只算「真正盘过」的 —— 未盘点占位记录（unfilled / 盘点数量为空）必须排除，
@@ -2335,7 +4793,75 @@ const StocktakeModule = {
   },
   isQuarterRoundClosed(sheetId) {
     if (!sheetId) return false;
-    return !!(this._getRoundClosed())[sheetId];
+    if ((this._getRoundClosed())[sheetId]) return true;
+    // 🟢 v228.35（P5）：紧急/强制结束通道的兜底读取。
+    //   正常路径走 ROUND_CLOSED_KEY（_setCloud 写入）。这里额外读 SyncManager 的**内存配置**快照，
+    //   覆盖「本轮结束信号已下发、但盘点人端还没等到轮询/拉取」的窗口 —— 否则这段时间内
+    //   盘点人仍能进入盘点（盘完却不生效），正是 P5 要消除的「显示能点、点了没用」。
+    //   只读内存、不发网络请求，不引入新的 IO 依赖，纯属本地竞态兜底。
+    try {
+      if (typeof SyncManager !== 'undefined' && SyncManager.settings
+          && typeof SyncManager.settings === 'object') {
+        const cloud = SyncManager.settings[this.ROUND_CLOSED_KEY];
+        if (cloud && typeof cloud === 'object' && cloud[sheetId]) return true;
+      }
+    } catch (e) { /* 忽略：兜底失败不影响主判断 */ }
+    return false;
+  },
+
+  /**
+   * 🟢 v228.35（P5）：紧急/强制结束当前轮次（管理员专用）。
+   *   与 endQuarterRound 的区别：
+   *     · endQuarterRound = 收口结算 —— 补录草稿、为每位盘点人生成 finished 概览、清季会话、开新一轮流程，
+   *       前提是**所有盘点人都已把数据交上来**。适合「盘点正常做完了」。
+   *     · 本方法 = 应急闸门 —— 只做一件事：立刻关闭本轮入口（本地 + 云端），
+   *       不补录、不生成概览、不动轮次号。适合「有人一直没交、管理员必须马上锁盘」。
+   *   为什么必须存在：旧版只有 endQuarterRound 一条路，管理员想立刻锁盘就只能走完整结算，
+   *   而结算会把未提交的盘点人一次性归档（数据可能还不完整）；没有「先锁盘后慢慢处理」的中间态。
+   *   安全性：本方法不写任何盘点记录、不改任务状态，因此不会产生数据副作用；
+   *         解锁方式与结束轮次一致 —— 走「🔄 开下一轮盘点」。
+   */
+  async emergencyCloseRound(sheetId) {
+    if (!sheetId) { this.toast('缺少批次信息，无法紧急结束'); return; }
+    if (this.isQuarterRoundClosed(sheetId)) { this.toast('本轮已处于结束状态'); return; }
+    try {
+      // 🟢 修复：紧急结束必须写入结构化对象（与 endQuarterRound 一致），而非裸时间戳字符串。
+      //   旧实现 m[sheetId] = new Date().toISOString() 让云端 round_closed[sheetId] 变成 string，
+      //   而 _pullBatchCommonState / _pullRoundClosed 的合并均用 typeof rc[k]==='object' 守卫，
+      //   字符串会被静默丢弃 → 他端永远收不到「紧急结束」闸门（P5「显示能点、点了没用」）。
+      const c = (typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser)
+        ? ((AppConfig.getCurrentUser() || {}).username || '') : '';
+      const info = { closedBy: c, closedAt: new Date().toISOString(),
+                     batchNo: '', round: this._getRoundNo(sheetId), emergency: true };
+      const m = this._getRoundClosed();
+      m[sheetId] = info;
+      this._saveRoundClosed(m);                      // ① 本地立即生效，盘点人同机标签页 storage 事件即可感知
+      try { await this._setRoundClosedCloud(sheetId, info); } catch (e) { /* 离线入队，联网补推 */ }
+      try { this._broadcastOverviewUpdate({ sheetId, emergency: true, updatedAt: new Date().toISOString() }); } catch (e) {}
+      try { await this._refreshNowAfterAction(); } catch (e) {}   // 🟢 v228.35（P3）：立即刷新，不等轮询
+      this.toast('⛔ 本轮已紧急结束：盘点人入口已关闭，未提交的盘点数据保持原样（不会自动归档）。如需重新开放，请点「开下一轮盘点」。');
+    } catch (e) {
+      console.error('[stocktake] 紧急结束本轮失败:', e);
+      this.toast('紧急结束失败：' + (e.message || e));
+    }
+  },
+
+  // 🟢 v228.33：记住 / 读取「上次季度批次」（重进工作台优先落回）
+  // 🟢 v228.48：同时记录批次身份 sheetId —— 现在它是权威身份，日期只是显示字段
+  _setLastQuarterSheet(sd, ed) {
+    try {
+      if (!sd || !ed) return;
+      const aq = this._getActiveQuarter();
+      localStorage.setItem(this.LAST_QUARTER_SHEET_KEY, JSON.stringify({
+        sd: sd, ed: ed,
+        sheetId: (aq && aq.sheetId) || this._currentQuarterSheetId() || '',
+        openedAt: (aq && aq.openedAt) || '',
+        ts: new Date().toISOString()
+      }));
+    } catch (e) { /* 忽略 */ }
+  },
+  _getLastQuarterSheet() {
+    try { return JSON.parse(localStorage.getItem(this.LAST_QUARTER_SHEET_KEY) || 'null'); } catch (e) { return null; }
   },
 
   // 🟢 v227.12：当前轮次号（默认 1）—— 支撑「开下一轮」与选择器「第 N 轮」展示
@@ -2350,8 +4876,26 @@ const StocktakeModule = {
   async _setRoundNo(sheetId, n) {
     if (!sheetId) return;
     try {
-      const m = JSON.parse(localStorage.getItem(this.ROUND_NO_KEY) || '{}') || {};
-      m[sheetId] = n;
+      const local = JSON.parse(localStorage.getItem(this.ROUND_NO_KEY) || '{}') || {};
+      let m = Object.assign({}, local);
+      // 🟢 v228.38（P8）：推云端前先与远端「取最大」合并，杜绝落后设备把轮次抹回旧值。
+      //   场景：A 已开到第 4 轮并同步，B 久未轮询（本地仍记第 2 轮）直接开轮 →
+      //   若整图覆盖会把云端第 4 轮冲掉、回跳到第 3 轮。改为逐键取 max 后推送。
+      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.getSetting === 'function') {
+        try {
+          // 🟢 v228.61（P0-A）：只读 ROUND_NO_KEY 一个键
+          const rm = await SyncManager.getSetting(this.ROUND_NO_KEY);
+          if (rm && typeof rm === 'object') {
+            Object.keys(rm).forEach(k => {
+              const rv = parseInt(rm[k], 10), lv = parseInt(m[k], 10);
+              if (!isNaN(rv) && (isNaN(lv) || rv > lv)) m[k] = rm[k];
+            });
+          }
+        } catch (e) { /* 离线降级：用本地值继续 */ }
+      }
+      // 本批次取 max(远端/本地/本次目标)，确保不开倒车
+      const cur = parseInt(m[sheetId], 10);
+      if (isNaN(cur) || n > cur) m[sheetId] = n;
       localStorage.setItem(this.ROUND_NO_KEY, JSON.stringify(m));
       if (typeof SyncManager !== 'undefined' && typeof SyncManager.setSetting === 'function') {
         try { await this._setCloud(this.ROUND_NO_KEY, m); } catch (e) { /* 忽略 */ }
@@ -2363,6 +4907,68 @@ const StocktakeModule = {
     if (!sheetId) return null;
     const rc = (this._getRoundClosed())[sheetId];
     return (rc && rc.round) ? rc.round : null;
+  },
+
+  // ---------------- 🟢 v228.37：轮次命名（展示层别名） ----------------
+  _getRoundLabels() {
+    try { return JSON.parse(localStorage.getItem(this.ROUND_LABEL_KEY) || '{}') || {}; }
+    catch (e) { return {}; }
+  },
+  // 取某批次某轮的命名；无命名或 round 已不匹配（开了更新轮次）→ null（调用方回退「第 N 轮」）
+  _getRoundLabel(sheetId, roundNo) {
+    if (!sheetId) return null;
+    const it = this._getRoundLabels()[sheetId];
+    if (!it || !it.label) return null;
+    if (roundNo != null && it.round != null && String(it.round) !== String(roundNo)) return null;
+    return String(it.label);
+  },
+  // 轮次显示文本：有命名显示命名，否则「第 N 轮」
+  _roundDisplay(sheetId, roundNo) {
+    return this._getRoundLabel(sheetId, roundNo) || ('第 ' + (roundNo || 1) + ' 轮');
+  },
+
+  /**
+   * 🟢 v228.65：轮次徽标 HTML —— picker 与管理员视图共用的**唯一**渲染源。
+   *
+   *   为什么要抽出来：原先同样的三元表达式在 _renderQuarterTaskPicker 与
+   *   _renderAdminBatchBlock 各写一遍，且都只判了 `roundClosed ? 已结束 : 进行中`，
+   *   漏了「根本没有批次」这第三种状态 —— 清场后 sheetId 为空，roundClosed 自然是 false，
+   *   于是界面显示「🟢 第 1 轮 · 进行中」，可实际上一轮都还没开。
+   *   这正是用户截图里那行「第 1 轮 · 进行中」的来源（清场后仍显示，看着像没清干净）。
+   *
+   *   三态：无批次 = ⚪ 未开始；已结束 = ⛔ N 已结束；否则 = 🟢 N · 进行中。
+   */
+  _roundBadgeHtml(sheetId, roundClosed, roundNo, closedRound) {
+    const escH = (s) => typeof esc === 'function' ? esc(s) : String(s);
+    const base = 'margin-left:8px;font-size:12px;padding:2px 8px;border-radius:6px;';
+    // 🟢 v228.65：以**本机权威批次**为准，而不是调用方传进来的 sheetId。
+    //   实测坑：入参来自 _pickerCtx.sheetId，是上一次渲染留下的上下文；清场后
+    //   _currentQuarterSheetId() 已是 null，pickerCtx 却仍攥着旧 sheetId →
+    //   徽标照旧渲染成「🟢 第 1 轮 · 进行中」。本机都没确立批次，谈何「第几轮」。
+    const sid = this._currentQuarterSheetId() || '';
+    if (!sid) {
+      return `<span style="${base}background:rgba(148,163,184,0.16);color:#64748b;">⚪ 未开始季度盘点</span>`;
+    }
+    if (roundClosed) {
+      return `<span class="st-pill-error" style="${base}">⛔ ${escH(this._roundDisplay(sid, closedRound || roundNo))} 已结束</span>`;
+    }
+    return `<span class="st-pill-success" style="${base}">🟢 ${escH(this._roundDisplay(sid, roundNo))} · 进行中</span>`;
+  },
+  // 写命名（本地 + 云端合并写，防整包覆盖其他设备的命名）
+  async _setRoundLabel(sheetId, roundNo, label) {
+    if (!sheetId || !label) return;
+    const m = this._getRoundLabels();
+    m[sheetId] = { round: roundNo, label: String(label), namedAt: new Date().toISOString() };
+    try { localStorage.setItem(this.ROUND_LABEL_KEY, JSON.stringify(m)); } catch (e) { /* 忽略 */ }
+    try {
+      let merged = m;
+      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.getSetting === 'function') {
+        // 🟢 v228.61（P0-A）：只读 ROUND_LABEL_KEY 一个键
+        const rm = await SyncManager.getSetting(this.ROUND_LABEL_KEY);
+        if (rm && typeof rm === 'object') merged = Object.assign({}, rm, m);  // 本机最新命名优先
+      }
+      await this._setCloud(this.ROUND_LABEL_KEY, merged);
+    } catch (e) { /* 离线降级：本地已存，下次在线时轮询/再命名会补推 */ }
   },
 
   /** 管理员或 stocktakeAssign 权限者点击【本次季度盘点结束】—— 强行收尾本批次
@@ -2393,7 +4999,7 @@ const StocktakeModule = {
       '本次季度盘点结束（盘点号 ' + batchNo + '）？\n\n' +
       (openCount > 0
         ? '⚠️ 当前还有 ' + openCount + ' 个分派任务（含 ' + counters.length + ' 位盘点人）未结束。\n' +
-          '  系统将强制结束所有盘点人的分派任务，等同于盘点人点击「盘点结束」；\n' +
+          '  系统将强制结束所有盘点人的分派任务，等同于盘点人点击「结束本次盘点」；\n' +
           '  已落库的盘点记录保留并汇总到清单，未落库的随任务一并结束。\n\n'
         : '所有盘点人都已完成。\n\n') +
       '结束后本批次不可再进入盘点。是否继续？',
@@ -2401,9 +5007,28 @@ const StocktakeModule = {
     );
     if (!ok) return;
 
+    // 🟢 v228.39（P4）：冻结协议 —— 结束前广播 freeze，给打开中的盘点表留出 flush 草稿 + 锁输入的时间窗，
+    // 避免「盘点人正在单元格输入、尚未失焦保存」的最后一条草稿来不及落库。跨设备仅靠云端收口兜底，
+    // 同浏览器多标签则能在此窗口内同步保存。
+    try {
+      const fzSd = (allTasks[sheetId] && allTasks[sheetId].startDate) || this.query.startDate || '';
+      const fzEd = (allTasks[sheetId] && allTasks[sheetId].endDate) || this.query.endDate || '';
+      this._broadcastFreeze(sheetId, fzSd, fzEd);
+    } catch (e) { /* 忽略 */ }
+    await new Promise(r => setTimeout(r, 700));
+
     // 1) 标记 round closed（先写本地 + 推云端）—— 🟢 v227.12：记录被关闭的是第几轮
     const map = this._getRoundClosed();
-    map[sheetId] = { closedBy: c, closedAt: new Date().toISOString(), batchNo: batchNo, round: this._getRoundNo(sheetId) };
+    const closedInfo = { closedBy: c, closedAt: new Date().toISOString(), batchNo: batchNo, round: this._getRoundNo(sheetId) };
+    map[sheetId] = closedInfo;
+    // 🟢 v228.33：把当前未结束会话的 sheetId 也关上 —— 防止 _anchorRangeToOpenSession
+    //   把 query 漂到旧日期后，结束标记写在「错」的 sheetId 下，导致重进仍显示「进行中」。
+    try {
+      const sess = this._getOpenSession();
+      if (sess && sess.sheetType === 'quarter' && sess.sheetId && sess.sheetId !== sheetId) {
+        map[sess.sheetId] = closedInfo;
+      }
+    } catch (e) { /* 忽略 */ }
     this._saveRoundClosed(map);
     // 🟢 v228.0（P0-1）：管理员结束整个批次 → 释放该批次的盘点号（下次同批次开局才启用 -2）
     this._markBatchFinished(sheetId);
@@ -2491,6 +5116,26 @@ const StocktakeModule = {
         };
       }
     }
+    // 🟢 v228.33：当前操作人（如管理员自己分派给自己后进入盘点）如果没有被 batchTasks 统计到，
+    //   也补一份 finished 概览，避免「我的概览」卡片继续显示「本次盘点未结束」。
+    const myCounter = String(((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? (AppConfig.getCurrentUser() || {}).username : '') || '').trim();
+    if (myCounter && counters.indexOf(myCounter) < 0) {
+      const myKey = this._overviewKey(myCounter, sheetId);
+      const myOv = overviewMap[myKey];
+      if (myOv) {
+        myOv.status = 'finished';
+        myOv.updatedAt = now;
+        overviewMap[myKey] = myOv;
+      } else {
+        overviewMap[myKey] = {
+          counter: myCounter, batchNo, sheetId, sd, ed,
+          totalCount: 0, realCount: 0, zeroCount: 0, unfilledCount: 0,
+          diffCount: 0, countedCount: 0, completionRate: 100,
+          status: 'finished', finishedAt: now, noStart: null, noEnd: null,
+          updatedAt: now, forceClosed: true
+        };
+      }
+    }
     this._saveOverviews(overviewMap);
     // 推云端（走 settings 通道，与概览落地同一链路）
     try {
@@ -2502,11 +5147,15 @@ const StocktakeModule = {
     // 4) 清掉所有盘点人的未结束会话（防止 picker 走续盘路径绕过 round closed 守卫）
     try {
       const sess = this._getOpenSession();
-      if (sess && sess.sheetId === sheetId) this._clearOpenSession();
+      // 🟢 v228.33：结束季度盘点时把任何 quarter session 都清掉，不限于当前 sheetId。
+      //   否则 session 的 sheetId 若因日期漂移和当前不一致，旧 session 会残留，下次进 picker 又锚回去。
+      if (sess && sess.sheetType === 'quarter') this._clearOpenSession();
     } catch (e) { /* 忽略 */ }
 
     // 5) 广播给所有打开 picker 的标签即时刷新
     try { this._broadcastOverviewUpdate({ sheetId, updatedAt: now, forceClosed: true }); } catch (e) { /* 忽略 */ }
+    // 🟢 v228.35（P3）：结束是管理员最需要即时反馈的动作，立即刷新一次不等轮询周期
+    try { await this._refreshNowAfterAction(); } catch (e) { /* 忽略 */ }
 
     this.toast('本次季度盘点已结束：' + batchNo + '（共收 ' + counters.length + ' 位盘点人）');
     if (this._entrySheetType === 'quarter') this.startQuarter();
@@ -2536,9 +5185,9 @@ const StocktakeModule = {
     const allTasks = DataStore.getStocktakeTasks() || {};
     const inBatch = (t) => {
       if (!t || t.deleted || t.sheetType !== 'quarter' || t.counter !== counter) return false;
+      // 🟢 v228.48：批次身份一律按 batchKey 严格判定（不再反算日期）
+      if (t.batchKey && t.batchKey === sheetId) return true;
       if (t.sheetId && t.sheetId === sheetId) return true;
-      if (t.startDate && t.endDate &&
-          ('quarter_' + String(t.startDate).slice(5) + '_' + String(t.endDate).slice(5)) === sheetId) return true;
       return this._taskInCurrentBatch(t, this.query.startDate, this.query.endDate);
     };
     const tasks = Object.keys(allTasks).map(k => allTasks[k]).filter(inBatch);
@@ -2552,7 +5201,7 @@ const StocktakeModule = {
       '指派「' + counter + '」补盘？\n\n' +
       '· 该盘点人进入盘点后，系统只列出其「尚未盘过的编码」，已盘项不会重复出现；\n' +
       '· 归属保持不变（仍记在「' + counter + '」名下），补盘结果就地更新原「未盘」占位，不会多出重复行；\n' +
-      '· 补盘完成后正常点「盘点结束」即可；本轮其他人的数据不受影响。\n\n' +
+      '· 补盘完成后正常点「结束本次盘点」即可；本轮其他人的数据不受影响。\n\n' +
       '涉及 ' + tasks.length + ' 个区间 / 共 ' + codesLen + ' 项。',
       { title: '🔧 指派补盘', okText: '确认指派', cancelText: '取消' }
     );
@@ -2570,6 +5219,8 @@ const StocktakeModule = {
     // 广播：让在线盘点人的 picker 立刻出现「🔧 补盘」入口
     try { this._broadcastOverviewUpdate({ sheetId, counter, updatedAt: now, replenishAssigned: true }); }
     catch (e) { /* 忽略 */ }
+    // 🟢 v228.35（P3）：补派后立即刷新，管理员可马上看到「补盘人员监控」出现
+    try { await this._refreshNowAfterAction(); } catch (e) { /* 忽略 */ }
     this.toast('已指派「' + counter + '」补盘（' + tasks.length + ' 个区间），其进入盘点后将只看到未盘编码');
     if (this._entrySheetType === 'quarter') this.startQuarter();
   },
@@ -2582,49 +5233,75 @@ const StocktakeModule = {
     if (!sheetId) { this.toast('批次标识缺失'); return; }
     if (!this.isQuarterRoundClosed(sheetId)) { this.toast('本批次尚未结束，无需开下一轮'); return; }
 
+    // 🟢 v228.48：**开下一轮 = 开一批新盘**（生成新的批次身份/开盘时间戳）。
+    //
+    //   旧版（v227.12~v228.47）在同一 sheetId 上做轮次 +1 —— 因为那时 sheetId 由日期推导，
+    //   "换批次"只能是"换日期区间"，而日期对用户又毫无意义，于是被迫引入"轮次"概念去区分
+    //   同一日期下的多批。现在批次身份就是开盘时间戳，**每一轮天然是一个独立批次**：
+    //     · 轮次号、闸门、命名、概览全部挂在新的 sheetId 上，不再与上一轮混用同一个 key 空间；
+    //     · 任务 batchKey 也跟着换成新身份，上一轮任务不会以任何形式漏进新一轮（天然无串档）；
+    //     · 用户语义更直白：「这一轮盘完了 → 开新的一批」。
+    //
+    //   prevRound / nextRound 仍保留 —— 作为**轮次连续性的展示**（「第 N 轮」），只是不再当身份用。
     const prevRound = this._getClosedRound(sheetId) || this._getRoundNo(sheetId);
     const nextRound = prevRound + 1;
-    const ok = await WBModal.confirm(
-      '开启第 ' + nextRound + ' 轮季度盘点？\n\n' +
-      '· 第 ' + prevRound + ' 轮已落库的盘点记录会原样保留在「盘点记录列表」（不删除、不覆盖）；\n' +
-      '· 本批次所有分派任务将重置为「待领取」，盘点人可重新进入、管理员可重新分派；\n' +
-      '· 本轮（第 ' + nextRound + ' 轮）将作为新一轮独立盘点，与第 ' + prevRound + ' 轮数据分开统计。',
-      { title: '开下一轮季度盘点', okText: '开启第 ' + nextRound + ' 轮', cancelText: '取消' }
-    );
-    if (!ok) return;
+    const newOpenedAt = new Date().toISOString();
+    const newSheetId = this._quarterSheetId(newOpenedAt);
+    // 🟢 v228.37：开下一轮 = 命名新一轮季度盘点。默认按今天日期预填「YYYY年第Q季度」，
+    //   管理员可整串改（如「2026年第3季度(返工)」）；留空则回退显示「第 N 轮」。
+    const _now = new Date();
+    const defLabel = _now.getFullYear() + '年第' + (Math.floor(_now.getMonth() / 3) + 1) + '季度';
+    const intro = '为新一轮季度盘点命名（将显示在盘点界面与盘点记录中）：'
+      + '\n\n· 第 ' + prevRound + ' 轮已落库的盘点记录会原样保留（不删除、不覆盖）；'
+      + '\n· 本批次所有分派任务将重置为「待领取」，可重新分派/进入；'
+      + '\n· 留空则按轮次显示为「第 ' + nextRound + ' 轮」。';
+    let label = await WBModal.prompt(intro, {
+      title: '开启新一轮季度盘点（内部轮次：第 ' + nextRound + ' 轮）',
+      default: defLabel,
+      placeholder: '如：2026年第3季度',
+      okText: '开启新一轮', cancelText: '取消'
+    });
+    if (label === null || label === undefined) return;   // 取消
+    label = String(label).trim();
+    // 重名检查：任意批次/历史轮次已用过同名 → 二次确认（允许重名，底层按轮次号区分）
+    if (label) {
+      const labels = this._getRoundLabels();
+      const dup = Object.keys(labels).some(k => labels[k] && labels[k].label === label);
+      if (dup) {
+        const go = await WBModal.confirm(
+          '已存在同名轮次「' + label + '」。\n\n同名不影响数据（系统内部仍按轮次号区分），但盘点记录列表中会出现两条同名记录，建议命名带上区分信息（如月份或「返工」）。是否仍使用该名称？',
+          { title: '同名轮次提醒', okText: '仍使用', cancelText: '重新命名' }
+        );
+        if (!go) return;
+      }
+    }
 
-    // 1) 轮次 +1（本地 + 云端）
-    await this._setRoundNo(sheetId, nextRound);
-    // 2) 解闸：删 roundClosed[sheetId]（本地 + 云端）
-    const map = this._getRoundClosed();
-    delete map[sheetId];
-    this._saveRoundClosed(map);
-    // 🟢 v227.67：合并式解闸（云端并集上删除该轮次，不抹掉其他轮次）
-    try { await this._clearRoundClosedCloud(sheetId); }
-    catch (e) { console.warn('[stocktake] 解闸推云端失败(已忽略):', e && e.message); }
-
-    // 3) 清空上一轮全部分派任务（墓碑删除，而非重置为「待领取」）
+    // 1) 清空上一批的全部分派任务（墓碑删除，而非重置为「待领取」）
     //    🟢 v227.16 修复：原实现把 closed 任务改回 open，导致上一轮任务在下一轮
     //    以「我的任务 · 进入盘点」形态复活（用户反馈图3）。按用户语义，开下一轮 =
     //    清空上一轮信息与任务，管理员重新分派；已落库的盘点记录保留在「盘点记录列表」。
+    //    🟢 v228.48：判定改为**严格按 batchKey === 旧批次身份**（不再依赖日期区间兜底），
+    //      因此绝不会误删其他批次的任务。
     const allTasks = DataStore.getStocktakeTasks() || {};
     const batchTasks = Object.keys(allTasks).map(k => allTasks[k]).filter(t =>
-      t && t.sheetType === 'quarter' && this._taskInCurrentBatch(t,
-        (allTasks[sheetId] && allTasks[sheetId].startDate) || this.query.startDate,
-        (allTasks[sheetId] && allTasks[sheetId].endDate) || this.query.endDate));
+      t && !t.deleted && t.sheetType === 'quarter' && (t.batchKey === sheetId || t.sheetId === sheetId));
     const now = new Date().toISOString();
     for (const t of batchTasks) {
-      if (t.deleted) continue;
       // 🟢 v227.15（G9）：清掉该盘点人本批次的分区草稿 —— 避免旧草稿被新一轮认领带进新表
-      try { localStorage.removeItem(this._draftKey(t.counter, t.sheetId)); } catch (e) {}
+      try { localStorage.removeItem(this._draftKey(t.counter, t.batchKey || t.sheetId)); } catch (e) {}
       try { localStorage.removeItem(this.DRAFT_KEY); } catch (e) {}
       // 墓碑删除任务（不保留为待领取，避免复活）；skipPush 后统一推一次
       try { await DataStore.deleteStocktakeTask(t.taskId, { skipPush: true }); } catch (e) { /* 忽略 */ }
     }
-    try { await this._pushStocktakeTasksToCloud(); } catch (e) { /* 忽略 */ }
+    // 🟢 v228.50-fix：此处必须走 DataStore._pushStocktakeTasksToCloud()，
+    //   原实现 this._pushStocktakeTasksToCloud() 中的 this=StocktakeModule，
+    //   而该方法只定义在 DataStore 上 → 调用即抛 TypeError，被外层 try/catch 吞掉，
+    //   导致「开下一轮」的墓碑删除（deleteStocktakeTask 已本地写入 deleted:true）
+    //   永远推不上云端，其他设备旧批次任务无法同步清除（P5：开下一轮后另一端旧任务残留）。
+    //   db.js 内部统一走 DataStore._pushStocktakeTasksToCloud()，此处对齐。
+    try { await DataStore._pushStocktakeTasksToCloud(); } catch (e) { /* 忽略 */ }
 
-    // 3b) 清空本批次上一轮概览（让下一轮回到「未开始」态，而非继续显示「已结束/漏盘」）
-    //     🟢 v227.16 修复：原实现不解概览，导致下一轮 picker 仍显示上一轮的「已盘 0/未盘 3 · 100%」。
+    // 2) 清空旧批次的概览（让新批次回到「未开始」态，而非继续显示「已结束/漏盘」）
     try {
       const ov = this._getAllOverviews();
       let changed = false;
@@ -2635,18 +5312,34 @@ const StocktakeModule = {
           await this._setCloud(this.OVERVIEW_KEY, ov);
         }
       }
-    } catch (e) { console.warn('[stocktake] 清上一轮概览失败(已忽略):', e && e.message); }
+    } catch (e) { console.warn('[stocktake] 清旧批次概览失败(已忽略):', e && e.message); }
 
-    // 4) 清掉所有盘点人的未结束会话（防止 picker 走续盘路径绕过新一轮闸门）
+    // 3) 清掉所有盘点人的未结束会话（防止 picker 走续盘路径绕过新批次闸门）
     try {
       const sess = this._getOpenSession();
       if (sess && sess.sheetId === sheetId) this._clearOpenSession();
     } catch (e) { /* 忽略 */ }
 
-    // 5) 广播给所有打开 picker 的标签即时刷新
-    try { this._broadcastOverviewUpdate({ sheetId, updatedAt: now, nextRound }); } catch (e) { /* 忽略 */ }
+    // 4) 🟢 v228.48：**确立新批次身份**（关键一步）—— 生成新开盘时间戳并回推云端。
+    //    此前所有针对旧 sheetId 的清理都已完成，从这里开始系统进入"新的一批"。
+    try {
+      await this._setActiveQuarter(newOpenedAt);
+    } catch (e) { console.warn('[stocktake] 确立新批次身份失败(已忽略):', e && e.message); }
+    // 新批次 = 轮次从第 1 轮重新计，同时记录「第 N 轮」的连续性展示值
+    try { await this._setRoundNo(newSheetId, 1); } catch (e) { /* 忽略 */ }
+    // 🟢 v228.37：写入新一轮命名（本地 + 云端；留空不写 → 显示回退「第 N 轮」）
+    if (label) { try { await this._setRoundLabel(newSheetId, 1, label); } catch (e) { /* 忽略 */ } }
+    // 记住新批次（重进工作台落回）
+    try { this._setLastQuarterSheet(this.query.startDate, this.query.endDate); } catch (e) { /* 忽略 */ }
+    // 旧批次闸门保持关闭（历史批次应一直显示「已结束」）；新批次天然无闸门记录。
 
-    this.toast('已开启第 ' + nextRound + ' 轮季度盘点（任务已重置为待领取，可重新分派/进入）');
+    // 5) 广播给所有打开 picker 的标签即时刷新
+    try { this._broadcastOverviewUpdate({ sheetId: newSheetId, prevSheetId: sheetId, updatedAt: now, nextRound }); } catch (e) { /* 忽略 */ }
+    // 🟢 v228.35（P3）：开下一轮后立即刷新，无需等轮询即可看到新轮次界面
+    try { await this._refreshNowAfterAction(); } catch (e) { /* 忽略 */ }
+
+    // 🟢 v228.48：成功提示 —— 已切到"新一批"语义
+    this.toast('已开启「' + this._roundDisplay(newSheetId, 1) + '」季度盘点（新批次已就绪，请重新分派任务）');
     if (this._entrySheetType === 'quarter') this.startQuarter();
   },
 
@@ -2654,18 +5347,49 @@ const StocktakeModule = {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
     if (typeof SyncManager.getSettings !== 'function') return;
     try {
-      const remote = await SyncManager.getSettings();
-      const rmap = (remote && remote[this.ROUND_CLOSED_KEY]) || null;
+      // 🟢 v228.61（P0-A）：只读 ROUND_CLOSED_KEY / ROUND_NO_KEY / ROUND_LABEL_KEY 三个键。
+      //   旧版读整包（15 请求）只为挑这 3 个键；本方法在 _pollOnce 里条件触发，是热路径成员。
+      let rmap, rno, rlabel;
+      if (typeof SyncManager.getSettingsKeys === 'function') {
+        const got = await SyncManager.getSettingsKeys(
+          [this.ROUND_CLOSED_KEY, this.ROUND_NO_KEY, this.ROUND_LABEL_KEY]);
+        rmap = got[this.ROUND_CLOSED_KEY] || null;
+        rno = got[this.ROUND_NO_KEY] || null;
+        rlabel = got[this.ROUND_LABEL_KEY] || null;
+      } else {
+        const remote = await SyncManager.getSettings();
+        rmap = (remote && remote[this.ROUND_CLOSED_KEY]) || null;
+        rno = (remote && remote[this.ROUND_NO_KEY]) || null;
+        rlabel = (remote && remote[this.ROUND_LABEL_KEY]) || null;
+      }
       if (!rmap || typeof rmap !== 'object') return;
       const local = this._getRoundClosed();
-      const merged = Object.assign({}, local, rmap);
+      // 🟢 v228.33：仅合并云端 truthy 的 closed 记录，避免远端缺失/被写成了 null
+      //   的 key 把本地已结束标记误覆盖为「进行中」。
+      const merged = Object.assign({}, local);
+      Object.keys(rmap).forEach(k => {
+        const v = rmap[k];
+        if (v && typeof v === 'object') merged[k] = v;
+      });
       this._saveRoundClosed(merged);
       // 🟢 v227.12：一并拉取轮次计数器，保证其他设备看到「第 N 轮」与下一轮入口
-      const rno = (remote && remote[this.ROUND_NO_KEY]) || null;
+      // 🟢 v228.38（P8）：逐键取最大，避免远端返回的旧值把本地更新的轮次拉低（与 _setRoundNo 对称）
+      // 🟢 v228.61：rno 已在函数开头一并读出，此处不再二次读云端。
       if (rno && typeof rno === 'object') {
         const ln = JSON.parse(localStorage.getItem(this.ROUND_NO_KEY) || '{}') || {};
-        const mergedNo = Object.assign({}, ln, rno);
+        const mergedNo = Object.assign({}, ln);
+        Object.keys(rno).forEach(k => {
+          const rv = parseInt(rno[k], 10), lv = parseInt(mergedNo[k], 10);
+          if (!isNaN(rv) && (isNaN(lv) || rv > lv)) mergedNo[k] = rno[k];
+        });
         localStorage.setItem(this.ROUND_NO_KEY, JSON.stringify(mergedNo));
+      }
+      // 🟢 v228.37：一并拉取轮次命名 —— A 设备命名后，B 设备轮询即可看到同一名称
+      // 🟢 v228.61：rlabel 已在函数开头一并读出，此处不再二次读云端。
+      if (rlabel && typeof rlabel === 'object') {
+        const ll = this._getRoundLabels();
+        const mergedLabel = Object.assign({}, ll, rlabel);
+        localStorage.setItem(this.ROUND_LABEL_KEY, JSON.stringify(mergedLabel));
       }
     } catch (e) { /* 忽略 */ }
   },
@@ -2676,11 +5400,14 @@ const StocktakeModule = {
   //   改为「读云端 → 合并并集 → 回写」，closed 记录只增不丢。
   async _setRoundClosedCloud(sheetId, info) {
     let merged = Object.assign({}, this._getRoundClosed());
-    if (sheetId) merged[sheetId] = info;
+    // 🟢 v228.35：info 缺省时回退为「本机已记录的结束时间」，绝不写 undefined。
+    //   否则紧急结束通道调用本方法会把 {sheetId: undefined} 推到云端，盘点人端读到 undefined
+    //   会被判为「未结束」→ 锁盘失效（且很难排查）。
+    if (sheetId) merged[sheetId] = info || merged[sheetId] || new Date().toISOString();
     try {
-      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.getSettings === 'function') {
-        const remote = await SyncManager.getSettings();
-        const rmap = (remote && remote[this.ROUND_CLOSED_KEY]) || null;
+      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.getSetting === 'function') {
+        // 🟢 v228.61（P0-A）：只读 ROUND_CLOSED_KEY 一个键
+        const rmap = await SyncManager.getSetting(this.ROUND_CLOSED_KEY);
         if (rmap && typeof rmap === 'object') merged = Object.assign({}, rmap, merged);
       }
     } catch (e) { /* 忽略，回退本机并集 */ }
@@ -2692,9 +5419,9 @@ const StocktakeModule = {
     let merged = Object.assign({}, this._getRoundClosed());
     if (sheetId) delete merged[sheetId];
     try {
-      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.getSettings === 'function') {
-        const remote = await SyncManager.getSettings();
-        const rmap = (remote && remote[this.ROUND_CLOSED_KEY]) || null;
+      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.getSetting === 'function') {
+        // 🟢 v228.61（P0-A）：只读 ROUND_CLOSED_KEY 一个键
+        const rmap = await SyncManager.getSetting(this.ROUND_CLOSED_KEY);
         if (rmap && typeof rmap === 'object') {
           const u = Object.assign({}, rmap);
           if (sheetId) delete u[sheetId];
@@ -2729,20 +5456,93 @@ const StocktakeModule = {
     this.toast('已取消分派：' + t.counter + ' ' + t.noStart + '-' + t.noEnd);
   },
 
+  // 🟢 v228.34：盘点人「放弃任务」—— 仅未开始（无落库实盘记录）的任务可退回管理员处重新分派。
+  //   退回后编码进入「退回待分配」池，由管理员在「补派任务」中重新分派给任何人。
+  async returnTask(taskId) {
+    const tasks = DataStore.getStocktakeTasks();
+    const t = tasks[taskId];
+    if (!t) { this.toast('任务不存在或已撤销'); return; }
+    if (t.status !== 'open') {
+      WBModal.alert('该任务（' + (t.counter || '') + ' · 序号 ' + t.noStart + '-' + t.noEnd + '）已结束，无法放弃任务。\n\n如需回收未盘项，请在「🧩 我的补盘」中对该任务点「放弃补盘」退回漏盘项。');
+      return;
+    }
+    const cur = ((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? ((AppConfig.getCurrentUser() || {}).username || '') : '').trim();
+    // 是否已开始盘点：存在本人实盘记录（非作废、非结束补0）且编码在固化清单内
+    const recs = await DataStore.getStocktakeRecords();
+    const started = (recs || []).some(r =>
+      !r.voided && !r.closedByFinish &&
+      String(r.盘点人 || '').trim() === String(t.counter).trim() &&
+      (t.codes || []).indexOf(r.存货编码) >= 0);
+    if (started) {
+      WBModal.alert('该任务（' + t.counter + ' · 序号 ' + t.noStart + '-' + t.noEnd + '）已进入盘点，不能放弃任务。\n\n请先点盘点界面右上角「🗑️ 放弃本次盘点」回滚已填进度，再回到此处放弃任务。');
+      return;
+    }
+    const ok = await WBModal.confirm('确认放弃任务：' + t.counter + ' · 序号 ' + t.noStart + '-' + t.noEnd + '（' + (t.codes || []).length + ' 项）？\n放弃后该任务回退管理员处，可在「补派任务」中重新分派给他人。', { title: '放弃任务' });
+    if (!ok) return;
+    const now = new Date().toISOString();
+    const oldCounter = t.counter;
+    t.returned = true; t.returnedAt = now; t.returnedBy = cur || '未知'; t.replenishedCodes = []; t.updatedAt = now;
+    t.counter = null;   // 退出本人任务池（getMyOpenTasks 按 counter 过滤）；编码保留供补派
+    await DataStore.saveStocktakeTask(t);   // 自动推云端（settings 通道，跨设备同步）
+    // 清本人会话 / 草稿，避免重进时续盘到已退回任务
+    try { const sess = this._getOpenSession(); if (sess && sess.taskId === taskId) this._clearOpenSession(); } catch (e) {}
+    try { localStorage.removeItem(this._draftKey(oldCounter, t.sheetId)); } catch (e) {}
+    try { localStorage.removeItem(this.DRAFT_KEY); } catch (e) {}
+    this.toast('已放弃任务，回退管理员处可重新分派');
+    this._refreshTaskBar();   // 实时刷新当前视图（管理员跨设备靠云端任务通道同步）
+  },
+
+  // 🟢 v228.34：盘点人「放弃补盘」—— 退回该任务未盘的漏盘项给管理员补派池。
+  async returnLeak(taskId) {
+    const tasks = DataStore.getStocktakeTasks();
+    const t = tasks[taskId];
+    if (!t) { this.toast('任务不存在或已撤销'); return; }
+    if (t.status !== 'closed') {
+      WBModal.alert('该任务（' + (t.counter || '') + ' · 序号 ' + t.noStart + '-' + t.noEnd + '）尚未结束，无需放弃补盘；如需回收请点「放弃任务」。');
+      return;
+    }
+    const counted = await this._countedCodesForQuarter(t.sheetId, t.counter);
+    const leak = (t.codes || []).filter(c => c && !counted.has(c));
+    if (!leak.length) {
+      WBModal.alert('该任务（' + t.counter + ' · 序号 ' + t.noStart + '-' + t.noEnd + '）无漏盘项，无需放弃补盘。');
+      return;
+    }
+    const ok = await WBModal.confirm('确认放弃补盘：' + t.counter + ' · 序号 ' + t.noStart + '-' + t.noEnd +
+      '\n退回 <b>' + leak.length + '</b> 项漏盘给管理员补派？', { title: '放弃补盘' });
+    if (!ok) return;
+    const now = new Date().toISOString();
+    const cur = ((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? ((AppConfig.getCurrentUser() || {}).username || '') : '').trim();
+    t.leakReturned = true; t.returnedLeakCodes = leak; t.returnedAt = now; t.returnedBy = cur || '未知';
+    t.replenishedCodes = []; t.updatedAt = now;
+    await DataStore.saveStocktakeTask(t);
+    this.toast('已放弃补盘，漏盘 ' + leak.length + ' 项回退管理员处可补派');
+    this._refreshTaskBar();
+  },
+
   // 当前批次（同类别 + 同盘点日期区间）下尚未结束的分派任务
   _batchOpenTasks(sheetType) {
     const type = sheetType || (this.sheet && this.sheet.sheetType) || 'quarter';
-    const sd = this.query.startDate || '', ed = this.query.endDate || '';
     const all = DataStore.getStocktakeTasks();
+    const curId = this._currentQuarterSheetId();
     return Object.keys(all).map(k => all[k]).filter(t =>
       t && t.status === 'open' && t.sheetType === type &&
-      // 存量任务无 startDate 字段时按类别宽松匹配，避免老任务被误判为其他批次
-      (t.startDate == null || t.startDate === '' || (t.startDate === sd && t.endDate === ed)));
+      // 🟢 v228.48：批次归属按身份严格判定；仅无 batchKey 的历史任务才宽松匹配
+      (t.batchKey ? t.batchKey === curId : true));
   },
 
   // v217 防重复分派：返回冲突说明（有冲突）或 null（可安全分派）
   _findAssignConflict(sheetType, counter, codes) {
-    const opens = this._batchOpenTasks(sheetType);
+    // 🟢 v228.34：退回待分配项（放弃任务/放弃补盘）已退入补派池，不再占用「正常分派」的序号空间，
+    //   故冲突检测排除它们（counter 已置空、reserved 给补派），避免管理员无法重新分派这些编码。
+    const opens = this._batchOpenTasks(sheetType).filter(t => !(t.returned || t.leakReturned));
+    // 🟢 v228.34：退回待分配项 reserved 给「补派任务」，正常分派不得抢占，否则会与补派双重分派同一编码
+    const pool = this._replenishPool();
+    const poolCodes = new Set(pool.serialList.map(s => pool.codeOf.get(s)).filter(Boolean));
+    const grabbed = (codes || []).filter(c => poolCodes.has(c));
+    if (grabbed.length) {
+      return `以下序号属于「退回待分配」项，请用「📥 补派任务」重新分派（不可走正常分派，否则会与补派重复）：\n` +
+        grabbed.slice(0, 6).map(c => String(c)).join('、') + (grabbed.length > 6 ? ' …' : '');
+    }
     // ① 同一人已有未结束任务 → 拒绝（一人一段，避免自己跟自己重复）
     const mine = opens.find(t => String(t.counter).trim() === String(counter).trim());
     if (mine) {
@@ -2766,6 +5566,15 @@ const StocktakeModule = {
 
   // 管理员分派弹窗（盘点人含「管理员」，支持派给自己 §5.3）
   openAssignDialog() {
+    // 🟢 v228.65（用户反馈）：本轮已结束、还没开下一轮时禁止分派 —— 此时派的活没有归属轮次。
+    //   按钮 UI 已置灰，这里是逻辑兜底（诊断/重渲等路径也可能调进来）。
+    try {
+      const sid = this._currentQuarterSheetId();
+      if (sid && this.isQuarterRoundClosed(sid)) {
+        this.toast('⛔ 本轮已结束，请先点「🔄 开下一轮盘点」再分派任务');
+        return;
+      }
+    } catch (e) { /* 判定失败不拦正常流程 */ }
     const overlay = document.getElementById('modalOverlay');
     const title = document.getElementById('modalTitle');
     const body = document.getElementById('modalBody');
@@ -2792,6 +5601,23 @@ const StocktakeModule = {
             <input id="asNoEnd" type="number" min="1" placeholder="结束" class="as-input">
           </div>
         </div>
+        <!-- 🟢 v228.35（P9）：序号含义说明 + 存货编码直查序号。
+             旧版只写「序号区间」，首次使用的管理员不知道序号从哪来（以为是存货编码），
+             也不知道该派到几。这里把来源、总数、换算方式一次说清，并支持粘贴编码反查。 -->
+        <div class="as-row full as-row-help">
+          <div class="as-help">
+            ℹ️ <b>序号</b>是本轮盘点清单中的<b>连续编号</b>（不是存货编码）：本轮基线共 <b id="asTotalN">—</b> 项存货（已剔除空白/0 存量），序号从 1 连续排到 <b id="asTotalN2">—</b>。
+            下方「可分配序号区间」列出了还没派出去的号。
+          </div>
+        </div>
+        <div class="as-row full as-row-code">
+          <label class="title">按存货编码查序号（可选，粘贴编码自动换算）</label>
+          <div class="as-duo">
+            <input id="asCodeQuery" type="text" placeholder="如 A01 或 A01,A02" class="as-input">
+            <button type="button" id="asCodeBtn" class="btn--ghost as-btn-inline">查序号</button>
+          </div>
+          <div id="asCodeResult" class="as-preview" style="margin-top:6px;"></div>
+        </div>
         <div class="as-row as-row-multi">
           <label class="title">多批次非连续选号（如 <code>1-3,6-20,30-40,15</code>，覆盖起止）</label>
           <input id="asMulti" type="text" placeholder="1-3,6-20,30-40,15" class="as-input">
@@ -2799,6 +5625,10 @@ const StocktakeModule = {
         <div class="as-row full as-row-preview">
           <label class="title">区间预览（光标所在的段：起/止对应的存货名称+规格）</label>
           <div id="asInfo" class="as-preview">输入序号或多批次后，这里实时显示对应的存货名称与规格型号。</div>
+        </div>
+        <div class="as-row full">
+          <label class="title">可分配序号区间（未被分派的，实时计算；退回待分配项请用「📥 补派任务」）</label>
+          <div id="asAvailHint" class="as-preview" style="white-space:pre-wrap;"></div>
         </div>
         <div class="as-actions">
           <button id="asCancelBtn" class="btn--ghost as-btn-cancel">取消</button>
@@ -2811,14 +5641,51 @@ const StocktakeModule = {
     const self = this;
     // 缓存全库排序 + 实时查表
     (async () => {
-      const total = (await self._allStockCodesSorted()).length;
+      // 🟢 v228.32：本机尚无本轮基线时先从云端拉，避免各设备各自拍一张不一致的快照
+      const total = (await self._allStockCodesSorted('quarter')).length;
       const info = document.getElementById('asInfo');
       if (info && total) info.dataset.total = String(total);
+      // 🟢 v228.35（P9）：把本轮总数写进说明区，用户一眼知道序号上界
+      try {
+        const tn = document.getElementById('asTotalN');
+        const tn2 = document.getElementById('asTotalN2');
+        if (tn) tn.textContent = String(total || '—');
+        if (tn2) tn2.textContent = String(total || '—');
+      } catch (e) { /* 忽略 */ }
 
       const renderInfo = async () => {
         const totalN = parseInt((document.getElementById('asInfo') || {}).dataset?.total || '0', 10);
         if (!totalN) return;
-        const allCodes = await self._allStockCodesSorted();
+        // 🟢 v228.34：分派弹窗底部实时提示可分配序号区间
+        try {
+          const fav = self._freeAssignSerials();
+          const hint = document.getElementById('asAvailHint');
+          if (hint) {
+            // 🟢 v228.41（优化项-1）：把「可分配区间」与「补派池」显式分开 ——
+            //   旧实现只列可分配区间、一句「退回待分配项请用补派任务」带过，
+            //   管理员在弹窗里根本看不到补派池到底压了哪些号，容易误以为这些号凭空消失。
+            //   现补一行「📥 补派池」：区间 + 项数 + 明确指引，让两个池子一眼分清。
+            let txt = fav.serialList.length
+              ? ('共 ' + fav.serialList.length + ' 项可分配，序号区间：\n' + self._toRangeText(fav.serialList))
+              : '本轮基线已全部派完。';
+            try {
+              const rp = self._replenishPool();
+              if (rp && rp.serialList && rp.serialList.length) {
+                txt += '\n\n📥 补派池（放弃任务 / 放弃补盘退回）：共 ' + rp.serialList.length
+                     + ' 项，序号区间：' + self._toRangeText(rp.serialList)
+                     + '\n这些序号不能用本弹窗分派，请点【📥 补派任务】处理。';
+              }
+            } catch (e2) { /* 忽略补派池读取异常，不影响可分配展示 */ }
+            hint.textContent = txt;
+            // 有补派池时用一个浅色高亮块承载，避免长文本糊成一片
+            hint.style.background = (function () {
+              try { return self._replenishPool().serialList.length ? 'rgba(37,99,235,0.06)' : ''; } catch (e3) { return ''; }
+            })();
+            hint.style.padding = '8px';
+            hint.style.borderRadius = '6px';
+          }
+        } catch (e) {}
+        const allCodes = await self._allStockCodesSorted('quarter');
         const sInp = document.getElementById('asNoStart');
         const eInp = document.getElementById('asNoEnd');
         const multiEl = document.getElementById('asMulti');
@@ -2835,18 +5702,21 @@ const StocktakeModule = {
           if (!isNaN(s) && !isNaN(e) && e >= s && s >= 1) ranges = [[s, e]];
         }
         if (!ranges.length) {
-          info.textContent = '全库共 ' + totalN + ' 项存货；结束序号不得超过此值。';
+          info.textContent = '本轮基线共 ' + totalN + ' 项存货（已剔除空白/0 存量）；结束序号不得超过此值。';
           return;
         }
         // 取首段起点 + 末段止点（多段时显示首段起点/末段止点，方便校验首尾两端）
         const firstStart = ranges[0][0];
         const lastSeg = ranges[ranges.length - 1];
         const lastEnd = lastSeg[1];
-        // 多段时也取末段起点（用于"末段第一项"）
+        // 多段时也取末段起点（用于"末段第一项"）与首段止点（用于"首段止"）
         const lastStart = lastSeg[0];
+        const firstEnd = ranges[0][1];
+        // 🟢 v228.34：多段时补齐「首段止」——原实现只取 [首段起, 末段起, 末段止]，
+        //   输入 1-5,6-10 时看不到序号 5 对应哪件货，恰好漏掉用户最关心的首段结束位置。
         const stopNos = (ranges.length === 1)
-          ? [firstStart, lastEnd]                  // 单段：起 + 止
-          : [firstStart, lastStart, lastEnd];      // 多段：首段起 + 末段起 + 末段止
+          ? [firstStart, lastEnd]                       // 单段：起 + 止
+          : [firstStart, firstEnd, lastStart, lastEnd]; // 多段：首段起 + 首段止 + 末段起 + 末段止
         const stopInfos = [];
         try {
           const stock = await DataStore.getRows('stock');
@@ -2854,7 +5724,10 @@ const StocktakeModule = {
             if (!no || no < 1 || no > allCodes.length) { stopInfos.push({ no, ok:false }); continue; }
             const code = allCodes[no - 1];
             const row = (stock || []).find(r => String(r.存货编码 || '') === code) || null;
-            stopInfos.push({ no, code, row });
+            // 🟢 v228.32：成功分支必须带 ok:true —— 原实现只 push {no,code,row}，
+            //   下面按 !it.ok 判「越界」→ 每一个正常序号都被显示成「（越界）」，
+            //   管理员在分派前根本看不到区间端点对应哪件货（v227.26 的预览功能形同失效）。
+            stopInfos.push({ no, code, row, ok: true });
           }
         } catch (e) {}
         const segCount = ranges.length;
@@ -2863,7 +5736,7 @@ const StocktakeModule = {
         stopInfos.forEach((it, idx) => {
           const tag = (segCount === 1)
             ? (idx === 0 ? '起' : '止')
-            : (idx === 0 ? '首段起' : (idx === 1 ? '末段起' : '末段止'));
+            : ['首段起', '首段止', '末段起', '末段止'][idx] || ('第' + (idx + 1) + '项');
           if (!it.ok) { lines.push('· ' + tag + ' 序号 ' + it.no + '（越界）'); return; }
           if (it.row) {
             lines.push('· <b>' + tag + '</b> 序号 <b>' + it.no + '</b>　' + esc(it.code) + '　·　' +
@@ -2873,7 +5746,7 @@ const StocktakeModule = {
             lines.push('· <b>' + tag + '</b> 序号 <b>' + it.no + '</b>　' + esc(it.code) + '　·　（未在库存中找到）');
           }
         });
-        info.innerHTML = lines.join('\n') + '\n\n全库共 ' + totalN + ' 项存货；结束序号不得超过此值；' + segLabel + '。';
+        info.innerHTML = lines.join('\n') + '\n\n本轮基线共 ' + totalN + ' 项存货（已剔除空白/0 存量，序号已锁定，后续库存变动不影响本轮分配）；结束序号不得超过此值；' + segLabel + '。';
       };
       // 多批次文本框变动时清空起止；起止变化时把同步到多批次；多批次变化时同步起止并刷新预览
       const multi = document.getElementById('asMulti');
@@ -2898,10 +5771,314 @@ const StocktakeModule = {
       eInp.addEventListener('input', onRange);
       multi.addEventListener('input', onMulti);
       renderInfo();
+      // 🟢 v228.35（P9）：按存货编码查序号 —— 支持逗号/空格/换行分隔，一次查多个。
+      //   价值：管理员手里拿到的往往是编码清单（来自盘点表/邮件），不是序号；
+      //   能直接粘贴编码换算出序号，就不必靠肉眼在几百行清单里数位置。
+      const doCodeQuery = async () => {
+        const el = document.getElementById('asCodeQuery');
+        const out = document.getElementById('asCodeResult');
+        if (!el || !out) return;
+        const raw = String(el.value || '').trim();
+        if (!raw) { out.innerHTML = ''; return; }
+        const codes = raw.split(/[,，\s;；\n\r\t]+/).map(s => s.trim()).filter(Boolean);
+        let allCodes = [];
+        try { allCodes = await self._allStockCodesSorted('quarter'); } catch (e) { allCodes = []; }
+        const idxOf = new Map(allCodes.map((c, i) => [String(c), i + 1]));
+        const hit = [], miss = [];
+        codes.forEach(c => { idxOf.has(c) ? hit.push({ c, no: idxOf.get(c) }) : miss.push(c); });
+        const parts = [];
+        if (hit.length) {
+          parts.push('找到 <b>' + hit.length + '</b> 项：<br>' +
+            hit.map(h => '· 序号 <b>' + h.no + '</b>　' + esc(h.c)).join('<br>'));
+          // 命中项若恰好是连续区间，给出可直接填入的区间文本，省去手工拼写
+          const nos = hit.map(h => h.no).sort((a, b) => a - b);
+          const isConsec = nos.every((n, i) => i === 0 || n === nos[i - 1] + 1);
+          if (hit.length > 1 && isConsec) {
+            parts.push('<span style="color:#2563eb;">这些序号连续，区间为 <b>' + nos[0] + '-' + nos[nos.length - 1] + '</b>，可直接填入上方序号区间。</span>');
+          }
+        }
+        if (miss.length) {
+          parts.push('<span style="color:#b45309;">未在本轮清单中找到：' + miss.map(esc).join('、') +
+            (miss.length && raw.indexOf(',') < 0 ? '（若这是一段区间请改用「多批次」输入，如 1-3,6-20）' : '') + '</span>');
+        }
+        out.innerHTML = parts.join('<br>');
+      };
+      const codeBtn = document.getElementById('asCodeBtn');
+      if (codeBtn) codeBtn.onclick = doCodeQuery;
+      const codeEl = document.getElementById('asCodeQuery');
+      if (codeEl) {
+        codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doCodeQuery(); } });
+      }
       // 绑定确认/取消
       document.getElementById('asCancelBtn').onclick = () => overlay.classList.remove('show');
       document.getElementById('asConfirmBtn').onclick = () => self._doAssign();
     })();
+  },
+
+  // 🟢 v228.34：可分配序号区间（未被分派给任何人的，含退回待分配项）—— 供分派弹窗提示
+  _freeAssignSerials() {
+    const sd = this.query.startDate, ed = this.query.endDate;
+    const sheetId = this._currentQuarterSheetId() || this._quarterSheetId();
+    const b = this._peekQuarterBaseline(sheetId);
+    const baselineCodes = (b && b.codes) || [];
+    const assigned = new Set();
+    const allTasks = DataStore.getStocktakeTasks() || {};
+    Object.keys(allTasks).forEach(k => {
+      const t = allTasks[k];
+      if (!t || !this._taskInCurrentBatch(t, sd, ed)) return;
+      // 🟢 v228.34：退回待分配项（放弃任务=returned / 放弃补盘=leakReturned）reserved 给「补派任务」，
+      //   从正常分派自由池里剔除，避免与「补派」双重分派同一编码。
+      if (t.returned || t.leakReturned) {
+        const reserved = t.returned ? (t.codes || []) : (t.returnedLeakCodes || []);
+        reserved.forEach(c => assigned.add(c));
+        return;
+      }
+      // 🟢 v228.40（二-2b）修复：只要「已派给某人」就占号 —— 不再限定 status==='open'。
+      //   旧实现只排除 open 任务，已结束（closed）任务的编码会重新出现在「可分配序号区间」，
+      //   管理员可以从别人已盘完的序号重新分派（线上反馈图：nx 已结束 11-18，弹窗仍列 1-5、11-953）。
+      //   已结束任务同样占号：后续轮次由 startNextRound 清空任务后自然释放。
+      if (!t.counter) return;     // 无归属（已放弃归属）不占号
+      (t.codes || []).forEach(c => assigned.add(c));
+    });
+    const serialList = [];
+    baselineCodes.forEach((c, i) => { if (!assigned.has(c)) serialList.push(i + 1); });
+    return { serialList, baselineCodes };
+  },
+
+  // 🟢 v228.34：退回待分配的可补派序号集合（serial -> sourceTaskId），实时计算
+  _replenishPool() {
+    const sd = this.query.startDate, ed = this.query.endDate;
+    const sheetId = this._currentQuarterSheetId() || this._quarterSheetId();
+    const b = this._peekQuarterBaseline(sheetId);
+    const baselineCodes = (b && b.codes) || [];
+    const serialOf = new Map(baselineCodes.map((c, i) => [c, i + 1]));
+    const codeOf = new Map(baselineCodes.map((c, i) => [i + 1, c]));
+    const allTasks = DataStore.getStocktakeTasks() || {};
+    const map = new Map();   // serial -> sourceTaskId
+    const serialList = [];
+    Object.keys(allTasks).forEach(k => {
+      const t = allTasks[k];
+      if (!t || (!t.returned && !t.leakReturned)) return;
+      if (!this._taskInCurrentBatch(t, sd, ed)) return;
+      const all = (t.returned ? (t.codes || []) : (t.returnedLeakCodes || [])).filter(Boolean);
+      const replenished = new Set(t.replenishedCodes || []);
+      all.forEach(c => {
+        if (replenished.has(c)) return;
+        const ser = serialOf.get(c);
+        if (ser == null) return;
+        if (!map.has(ser)) { map.set(ser, t.taskId); serialList.push(ser); }
+      });
+    });
+    serialList.sort((a, b) => a - b);
+    return { map, serialList, codeOf, baselineCodes };
+  },
+
+  // 🟢 v228.34：把序号数组压缩成连续区间文本（如 1-3、6-20）
+  _toRangeText(serialList) {
+    if (!serialList || !serialList.length) return '';
+    const segs = [];
+    let s = serialList[0], prev = serialList[0];
+    for (let i = 1; i < serialList.length; i++) {
+      const x = serialList[i];
+      if (x === prev + 1) { prev = x; continue; }
+      segs.push(s + '-' + prev); s = x; prev = x;
+    }
+    segs.push(s + '-' + prev);
+    return segs.join('、');
+  },
+
+  _replenishAvailableSerials() {
+    const pool = this._replenishPool();
+    if (!pool.serialList.length) return { text: '当前没有可补派的退回项。', serialList: [] };
+    const text = '共 ' + pool.serialList.length + ' 项可补派，序号区间：\n' + this._toRangeText(pool.serialList);
+    return { text, serialList: pool.serialList, map: pool.map, codeOf: pool.codeOf };
+  },
+
+  // 🟢 v228.34：补派退回任务弹窗（类似分派任务，仅可派「退回待分配」的编码）
+  openReplenishDialog() {
+    const overlay = document.getElementById('modalOverlay');
+    const title = document.getElementById('modalTitle');
+    const body = document.getElementById('modalBody');
+    if (!overlay || !title || !body) return;
+    title.textContent = '补派退回任务';
+    let opts = '<option value="管理员">管理员（自己）</option>';
+    if (typeof AppConfig !== 'undefined' && AppConfig.getKeepers) {
+      AppConfig.getKeepers().filter(k => !k.disabled).forEach(k => {
+        opts += '<option value="' + escAttr(k.username) + '">' + esc(k.username) + '</option>';
+      });
+    }
+    body.innerHTML = `
+      <input type="hidden" id="rsType" value="quarter">
+      <div class="as-grid">
+        <div class="as-row as-row-counter">
+          <label class="title">补派给（盘点人）</label>
+          <select id="rsCounter" class="as-input">${opts}</select>
+        </div>
+        <div class="as-row as-row-duo">
+          <label class="title">序号区间（仅限退回待分配项）</label>
+          <div class="as-duo">
+            <input id="rsNoStart" type="number" min="1" placeholder="起始" class="as-input">
+            <span class="as-dash">—</span>
+            <input id="rsNoEnd" type="number" min="1" placeholder="结束" class="as-input">
+          </div>
+        </div>
+        <div class="as-row as-row-multi">
+          <label class="title">多批次非连续选号（如 <code>1-3,6-20</code>，覆盖起止）</label>
+          <input id="rsMulti" type="text" placeholder="1-3,6-20" class="as-input">
+        </div>
+        <div class="as-row full as-row-preview">
+          <label class="title">区间预览（光标所在的段：起/止对应的存货名称+规格）</label>
+          <div id="rsInfo" class="as-preview">输入序号或多批次后，这里实时显示对应的存货名称与规格型号。</div>
+        </div>
+        <div class="as-row full as-row-preview">
+          <label class="title">可补派序号区间（退回待分配，实时计算）</label>
+          <div id="rsAvail" class="as-preview" style="white-space:pre-wrap;"></div>
+        </div>
+        <div class="as-actions">
+          <button id="rsCancelBtn" class="btn--ghost as-btn-cancel">取消</button>
+          <button id="rsConfirmBtn" class="btn--primary as-btn-confirm">确认补派</button>
+        </div>
+      </div>`;
+    const m = document.getElementById('modal'); if (m) m.classList.remove('modal-compact');
+    overlay.classList.add('show');
+    const self = this;
+    (async () => {
+      const availEl = document.getElementById('rsAvail');
+      const infoEl = document.getElementById('rsInfo');
+      const multi = document.getElementById('rsMulti');
+      const sInp = document.getElementById('rsNoStart');
+      const eInp = document.getElementById('rsNoEnd');
+
+      // 🟢 v228.34：补派弹窗也提供「区间预览」——复用本轮基线序号 → 存货编码 → 库存名/规格，
+      //   与分派弹窗同款语义（单段显示 起+止；多段显示 首段起/首段止/末段起/末段止）。
+      const renderInfo = async () => {
+        const avail = self._replenishAvailableSerials();
+        if (availEl) availEl.textContent = avail.text;
+        if (!infoEl) return;
+        const pool = self._replenishPool();
+        const baseline = pool.codeOf || new Map();     // serial -> code（本轮基线）
+        if (!baseline.size) { infoEl.textContent = '当前没有可补派的退回项。'; return; }
+        let ranges = [];
+        try { if (multi && multi.value && multi.value.trim()) ranges = self._parseAssignRanges(multi.value) || []; } catch (e) {}
+        if (!ranges.length) {
+          const s = parseInt(sInp && sInp.value, 10), e = parseInt(eInp && eInp.value, 10);
+          if (!isNaN(s) && !isNaN(e) && e >= s && s >= 1) ranges = [[s, e]];
+        }
+        const baselineCodes = pool.baselineCodes || [];
+        const baseTotal = baselineCodes.length;
+        if (!ranges.length) {
+          infoEl.textContent = '输入序号或多批次后，这里实时显示对应的存货名称与规格型号。本轮基线共 ' + baseTotal + ' 项（仅可补派落在退回池内的项）。';
+          return;
+        }
+        const segCount = ranges.length;
+        const lastSeg = ranges[segCount - 1];
+        const stopNos = (segCount === 1)
+          ? [ranges[0][0], lastSeg[1]]
+          : [ranges[0][0], ranges[0][1], lastSeg[0], lastSeg[1]];
+        let stock = [];
+        try { stock = (await DataStore.getRows('stock')) || []; } catch (e) {}
+        const serialSet = pool.serialList ? new Set(pool.serialList) : new Set();
+        const lines = [];
+        stopNos.forEach((no, idx) => {
+          const tag = (segCount === 1) ? (idx === 0 ? '起' : '止')
+                                       : (['首段起', '首段止', '末段起', '末段止'][idx] || ('第' + (idx + 1) + '项'));
+          if (!no || no < 1 || no > baseTotal) { lines.push('· ' + tag + ' 序号 ' + no + '（越界）'); return; }
+          const code = baseline.get(no);
+          if (!code) { lines.push('· ' + tag + ' 序号 ' + no + '（无对应存货）'); return; }
+          const row = stock.find(r => String(r.存货编码 || '') === code) || null;
+          const inPool = serialSet.has(no) ? '' : '　<span style="color:#dc2626;">（不在退回池，不可补派）</span>';
+          if (row) {
+            lines.push('· <b>' + tag + '</b> 序号 <b>' + no + '</b>　' + esc(code) + '　·　' +
+                       esc(row.存货名称 || '（无名）') + (row.规格型号 ? ' / ' + esc(row.规格型号) : '') + inPool);
+          } else {
+            lines.push('· <b>' + tag + '</b> 序号 <b>' + no + '</b>　' + esc(code) + '　·　（未在库存中找到）' + inPool);
+          }
+        });
+        infoEl.innerHTML = lines.join('\n') + '\n\n本轮基线共 ' + baseTotal + ' 项存货；' +
+          (segCount > 1 ? ('共 ' + segCount + ' 段') : '单段') + '；仅可选「退回待分配」范围内的序号。';
+      };
+
+      const onRange = () => { const s = parseInt(sInp.value, 10), e = parseInt(eInp.value, 10); if (!isNaN(s) && !isNaN(e) && e >= s) multi.value = s + '-' + e; renderInfo(); };
+      const onMulti = () => { const segs = (self._parseAssignRanges(multi.value) || []); if (segs.length === 1) { sInp.value = segs[0][0]; eInp.value = segs[0][1]; } else if (segs.length > 1) { sInp.value = segs[0][0]; eInp.value = segs[0][1]; } renderInfo(); };
+      sInp.addEventListener('input', onRange);
+      eInp.addEventListener('input', onRange);
+      multi.addEventListener('input', onMulti);
+      renderInfo();
+      document.getElementById('rsCancelBtn').onclick = () => overlay.classList.remove('show');
+      document.getElementById('rsConfirmBtn').onclick = () => self._doReplenishAssign();
+    })();
+  },
+
+  // 🟢 v228.34：执行补派 —— 复用 _doAssign 同样的区间解析，但校验全部落在退回池内
+  async _doReplenishAssign() {
+    const tEl = document.getElementById('rsType');
+    const cEl = document.getElementById('rsCounter');
+    if (!tEl || !cEl) return;
+    const sheetType = tEl.value;
+    const counter = cEl.value.trim();
+    if (!counter) { WBModal.alert('请选择补派给谁'); return; }
+    const multi = document.getElementById('rsMulti');
+    const sEl = document.getElementById('rsNoStart');
+    const eEl = document.getElementById('rsNoEnd');
+    let ranges = [];
+    try {
+      if (multi && multi.value && multi.value.trim()) ranges = this._parseAssignRanges(multi.value) || [];
+      else { const s = parseInt(sEl.value, 10), e = parseInt(eEl.value, 10); if (!isNaN(s) && !isNaN(e) && e >= s && s >= 1) ranges = [[s, e]]; }
+    } catch (e) { WBModal.alert('选号格式错误：' + (e.message || e)); return; }
+    if (!ranges.length) { WBModal.alert('请输入起止序号或多批次选号（如 1-3,6-20）'); return; }
+
+    const pool = this._replenishPool();
+    const selSerials = new Set();
+    for (const [a, b] of ranges) {
+      if (a < 1 || b < a) { WBModal.alert('区间 ' + a + '-' + b + ' 无效'); return; }
+      for (let s = a; s <= b; s++) selSerials.add(s);
+    }
+    const notIn = [];
+    selSerials.forEach(s => { if (!pool.map.has(s)) notIn.push(s); });
+    if (notIn.length) {
+      notIn.sort((a, b) => a - b);
+      WBModal.alert('以下序号不属于「退回待分配」项（不可补派）：' + notIn.slice(0, 12).join('、') + (notIn.length > 12 ? ' …' : ''));
+      return;
+    }
+    const codes = Array.from(selSerials).sort((a, b) => a - b).map(s => pool.codeOf.get(s)).filter(Boolean);
+    if (!codes.length) { WBModal.alert('选号范围为空'); return; }
+
+    // 标记消耗到源任务（退回池按 source 递减，避免被重复补派）
+    const bySource = new Map();
+    selSerials.forEach(s => {
+      const sid = pool.map.get(s);
+      if (!bySource.has(sid)) bySource.set(sid, []);
+      bySource.get(sid).push(pool.codeOf.get(s));
+    });
+    const allTasks = DataStore.getStocktakeTasks();
+    let from = 'mixed';
+    for (const [sid, cs] of bySource.entries()) {
+      const st = allTasks[sid];
+      if (!st) continue;
+      if (from === 'mixed') { from = st.returned ? 'task' : 'leak'; }
+      const merged = new Set(st.replenishedCodes || []);
+      cs.forEach(c => merged.add(c));
+      st.replenishedCodes = Array.from(merged);
+      st.updatedAt = new Date().toISOString();
+      try { await DataStore.saveStocktakeTask(st); } catch (e) {}
+    }
+    // 新建补派任务（counter 锁定、codes 固化，概览/监控自动生效）
+    const sd = this.query.startDate, ed = this.query.endDate;
+    const sheetId = this._currentQuarterSheetId() || this._quarterSheetId();
+    const rangesKey = ranges.map(([a, b]) => a + '-' + b).join(',');
+    const taskId = 'replenish_' + sheetId + '_' + counter + '_' + rangesKey + '_' + Date.now();
+    const task = {
+      taskId, sheetId, sheetType, counter,
+      noStart: ranges[0][0], noEnd: ranges[ranges.length - 1][1], ranges,
+      startDate: sd, endDate: ed,
+      codes, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      status: 'open', closedAt: null,
+      isReplenish: true, replenishFrom: from, originTaskIds: Array.from(bySource.keys())
+    };
+    await DataStore.saveStocktakeTask(task);
+    const overlay = document.getElementById('modalOverlay'); if (overlay) overlay.classList.remove('show');
+    WBModal.alert('已补派：' + counter + ' · 选号 ' + rangesKey + '（共 ' + codes.length + ' 项，编码已固化）');
+    this._refreshTaskBar();
   },
 
   /** 🟢 v227.24：解析"1-3,6-20,30-40,15"等多批次选号 → 区间数组 [ [start,end], ... ] */
@@ -2953,7 +6130,8 @@ const StocktakeModule = {
 
     if (!ranges.length) { WBModal.alert('请输入起止序号或多批次选号（如 1-3,6-20）'); return; }
 
-    const allCodes = await this._allStockCodesSorted();
+    // 🟢 v228.32：分派一律以本轮基线为准（剔除 0/空存量后连续重排，且库存变动不影响）
+    const allCodes = await this._allStockCodesSorted(sheetType === 'quarter' ? 'quarter' : '');
     // 合并所有段对应的编码（去重 + 保留排序）
     const set = new Set();
     ranges.forEach(([a, b]) => {
@@ -2974,8 +6152,12 @@ const StocktakeModule = {
     const task = {
       taskId, sheetId: null, sheetType, counter,
       noStart: ranges[0][0], noEnd: ranges[ranges.length - 1][1], ranges,
-      // v217：记录分派时所属盘点区间，作为「同一批次」的判定依据（结束时才写 sheetId）
+      // v217：记录分派时所属盘点区间（**仅显示用**；批次归属判定不再依赖它）
       startDate: this.query.startDate || '', endDate: this.query.endDate || '',
+      // 🟢 v228.48：批次身份标识 = 当前批次的开盘时间戳 ID。
+      //   这是「本任务属于哪一批」的**唯一权威依据**，不含日期语义、跨端天然一致。
+      //   _taskInCurrentBatch 严格按它判定，从根本上消除了跨批次串档。
+      batchKey: sheetType === 'quarter' ? (this._currentQuarterSheetId() || this._quarterSheetId()) : null,
       codes, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       status: 'open', closedAt: null
     };
@@ -3002,6 +6184,8 @@ const StocktakeModule = {
   renderTable() {
     const area = document.getElementById('stArea');
     if (!area) return;
+    // 🟢 v228.36：进入填表视图 → 清掉 picker 标记，否则轻量重渲会误判「仍停在 picker」而重渲覆盖表格
+    this._setStocktakeView('sheet');
     const rows = this.visibleRows();
     const typeCn = this.sheet && this.sheet.sheetType === 'quarter' ? '季度盘点' : '日常盘点';
 
@@ -3032,7 +6216,7 @@ const StocktakeModule = {
       <div style="margin-bottom:10px;padding:8px 12px;border-radius:8px;background:var(--status-warning-bg,#fff7ed);border:1px solid #fed7aa;font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span>盘点人：<b>${esc(counterVal || '')}</b>${counterVal ? '（已自动带出）' : '<span style="color:#dc2626;">（未登录，请先登录库管员账号）</span>'}</span>
         ${batchNoText ? '<span>盘点号：<input type="text" readonly value="' + escAttr(batchNoText) + '" style="width:120px;background:#f3f4f6;color:#475569;font-weight:600;cursor:not-allowed;border:1px solid #cbd5e1;border-radius:6px;padding:2px 8px;"></span>' : ''}
-        <span style="color:#b45309;font-size:12px;">⚠️ 本次盘点<b>尚未结束</b>：点【保存】= 暂停（下次进入会提醒），全部盘完请点【盘点结束】才算完成</span>
+        <span style="color:#b45309;font-size:12px;">⚠️ 本次盘点<b>尚未结束</b>：点【暂存并退出】只是存到本机（不计入盘点记录），全部盘完请点【结束本次盘点】才算完成</span>
         <button class="btn--primary" onclick="StocktakeModule.goBackFromSheet()" title="返回上一级（盘点工作台）" style="padding:4px 14px;font-size:12.5px;display:inline-flex;align-items:center;gap:5px;">
           <span style="font-size:14px;">◀</span>返回
         </button>
@@ -3105,16 +6289,32 @@ const StocktakeModule = {
         <span style="font-size:13px;opacity:.8;">已盘 <b id="stDone">0</b> / ${rows.length}</span>
       </div>
     `;
+    // 🟢 v228.35（P1）：「保存」语义拆分 + 明确未计入记录。
+    //   原实现只有一个「💾 保存」，用户（尤其一线仓管）普遍理解为"存进盘点记录了"，
+    //   实际只写本地草稿、不落库、不推云端 → 盘点人以为盘完了，管理员看到的进度还是 0，双方互相怀疑。
+    //   现在：主按钮「🏁 结束本次盘点」（真正完成），副按钮「💾 暂存并退出」（暂停），
+    //   并在进度条旁常驻一行说明，消除"我明明保存了"的认知落差。
+    const hasFilled = rows.some(r => r.盘点数量 !== '' && r.盘点数量 != null);
     area.innerHTML = `
       ${claimHtml}
       ${progressBar}
+      <div style="margin:0 0 8px;font-size:12.5px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <span>ℹ️ 全部盘完后请点 <b style="color:var(--status-success,#16a34a);">结束本次盘点</b> 才算完成；中途有事点 <b>暂存并退出</b>，下次进入可继续。</span>
+      </div>
       ${tableOrEmpty}
       ${emptyNote}
-      <div style="margin-top:10px;display:flex;gap:10px;">
-        <button class="btn--primary" onclick="StocktakeModule.saveToRecords()">💾 保存</button>
-        <button class="btn--ghost" onclick="StocktakeModule.finishStocktake()">🏁 盘点结束</button>
+      <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+        <button class="btn--primary" onclick="StocktakeModule.finishStocktake()" title="全部盘完后点这里：数据落库并同步云端，任务才算完成">🏁 结束本次盘点</button>
+        <button class="btn--ghost" onclick="StocktakeModule.saveToRecords({ thenBack: true })" title="仅暂存到本机，不计入盘点记录；下次进入可继续">💾 暂存并退出</button>
+        <!-- 🟢 v228.41（优化项-3）：结束前「差异预警」—— 把「事后告知」变「事前预防」。
+             旧实现只在点【结束本次盘点】的确认弹窗里才告诉用户「还有 N 项漏盘」，
+             用户点之前无从得知；结束按钮旁常驻一行实时提示，随填写即时刷新。 -->
+        <span id="stLeakHint" style="font-size:12.5px;color:#b45309;display:none;"></span>
+        <span id="stDraftHint" style="font-size:12.5px;color:#b45309;${hasFilled ? '' : 'display:none;'}">当前已填内容尚未计入盘点记录，点「结束本次盘点」才算完成</span>
       </div>
     `;
+    // 🟢 v228.41（优化项-3）：渲染后立即按当前填写状态刷新「未盘」预警
+    this._refreshLeakHint();
     // 🟢 v227.91：移动端把表格列折叠按钮搬到原「清空已填」位置（progressBar）
     this._relocateColCollapseToProgressBar();
     if (rows.length > 0) {
@@ -3123,6 +6323,9 @@ const StocktakeModule = {
     } else {
       this.updateProgress();
     }
+    // 🟢 v228.39（P4）：若已被远程冻结（管理员正在结束本轮），renderTable 的 innerHTML 会覆盖横幅与输入态，
+    // 重渲后重新锁输入 + 补横幅，避免解冻伪象。
+    if (this._frozen) this._applyFreezeLockUI();
   },
 
   // ⚠️ AUDIT-228-04（v228.18）复核结论：本盘点主表**不接入** TableUtils.virtualTable。
@@ -3253,6 +6456,21 @@ const StocktakeModule = {
     this.saveDraft();
     this._flashCounted(tr, el);
     this.updateProgress();
+    this._refreshDraftHint();
+  },
+
+  /**
+   * 🟢 v228.35（P1）：同步「尚未计入盘点记录」提示条的显隐。
+   *   为什么不在 renderTable 里重渲：盘点表格是交互式录入表，重渲会丢焦点、断键盘流，
+   *   这里只切换一个 span 的显隐，零重排、不影响正在输入的用户。
+   */
+  _refreshDraftHint() {
+    try {
+      const span = document.getElementById('stDraftHint');
+      if (!span) return;
+      const has = (this.allRows || []).some(r => r.盘点数量 !== '' && r.盘点数量 != null);
+      span.style.display = has ? '' : 'none';
+    } catch (e) { /* 忽略：提示条只是辅助，失败不影响录入 */ }
   },
 
   // 🟢 v227.71：盘点录入即时反馈 —— 行闪一下成功绿 + 输入框脉冲（600ms / 420ms）。
@@ -3295,6 +6513,25 @@ const StocktakeModule = {
     if (el) el.textContent = done;
     const p = document.getElementById('stProgress');
     if (p) p.textContent = `已盘 ${done} / ${rows.length}`;
+    // 🟢 v228.41（优化项-3）：进度变化同步刷新结束前「未盘」预警
+    this._refreshLeakHint();
+  },
+
+  // 🟢 v228.41（优化项-3）：结束前「未盘」实时预警 —— 结束按钮旁常驻提示尚有 N 项未盘。
+  //   纯展示、只读 DOM 文本，不改任何数据；rows 为空/全盘完时隐藏。
+  _refreshLeakHint() {
+    const el = document.getElementById('stLeakHint');
+    if (!el) return;
+    const rows = this.visibleRows();
+    if (!rows.length) { el.style.display = 'none'; el.textContent = ''; return; }
+    const unfilled = rows.filter(r => !(r.盘点数量 !== '' && r.盘点数量 != null)).length;
+    if (unfilled > 0) {
+      el.textContent = '⚠️ 尚有 ' + unfilled + ' 项未盘（结束后可补盘）';
+      el.style.display = '';
+    } else {
+      el.textContent = '';
+      el.style.display = 'none';
+    }
   },
 
   // ---------------- 盘点会话标记（v226：保存=暂停，结束才算完成）----------------
@@ -3360,7 +6597,15 @@ const StocktakeModule = {
       const m = /^.+-(\d+)$/.exec(String(no));
       used.add(m ? parseInt(m[1], 10) : 1);
     };
-    Object.keys(map).forEach(k => { const it = map[k]; if (it && it.no) bump(it.no); });
+    Object.keys(map).forEach(k => {
+      const it = map[k];
+      if (!it || !it.no) return;
+      // 🟢 v228.37：只有「未结束」的批次才由 no_map 占坑（防止并发开局重号，此时记录尚未落库）。
+      //   已结束批次的号改由下方记录表判定：记录还在 → 记录 bump 占号；记录已删（voided/清空）
+      //   → 序号释放可回填。原实现对 map 无条件 bump，反复「结束→开下一轮」积累的 finished 墓碑
+      //   会把当日序号一路推高（如 jd20260915-6），即使盘点记录一条不剩也永不回落（线上反馈）。
+      if (!it.finished) bump(it.no);
+    });
     try {
       const allRecs = (DataStore._tableCache && DataStore._tableCache['stocktake_records']) || [];
       // 只 bump 未删除的记录；voided（删除墓碑）不占号 → 新批次可回填该序号
@@ -3380,7 +6625,8 @@ const StocktakeModule = {
     //    避免「只是打开看了一眼日常盘点」就往 no_map 写一个 finished:false/count:0 的孤儿号，
     //    否则默认区间每天平移导致 sheetId 变化 → 下拉反复冒出「新建·未开始」。真正落库在 beginDaily。
     if (sheetId && persist) {
-      map[sheetId] = { no: finalNo, type: type, finished: false, date: today };
+      // 🟢 v228.40（一-1/一-2）：写入 updatedAt —— 云端按「较新者胜」合并批次号映射，缺它无法判定。
+      map[sheetId] = { no: finalNo, type: type, finished: false, date: today, updatedAt: new Date().toISOString() };
       try { localStorage.setItem(MAP_KEY, JSON.stringify(map)); } catch (e) {}
       // 旧版计数器（v226 之前）同步推进，仅真正落库时推进，保证与历史实现不冲突
       try { localStorage.setItem('wb_stocktake_no_' + type + '_' + today, String(next <= 1 ? 1 : next)); } catch (e) {}
@@ -3432,12 +6678,15 @@ const StocktakeModule = {
     const filled = all.filter(r => r.盘点数量 !== '' && r.盘点数量 != null);
     if (!filled.length) { this.toast('尚未填写任何盘点数量'); return; }
     const unfilled = all.filter(r => !(r.盘点数量 !== '' && r.盘点数量 != null));
+    // 🟢 v228.35（P1）：确认文案去掉「保存」字样，改为「暂存并退出」，并明确"不计入盘点记录"。
+    //   旧文案「确认暂停保存？」仍有用户理解成"已保存完成"，必须把"未计入记录"说到字面上。
     // 🟢 v227.11 P1-7：确认文案从 4 行压到 2 行；skipConfirm=true 时（如从「返回」自动保存）不重复弹确认
-    let tip = '确认暂停保存？本次盘点尚未结束，已填 ' + filled.length + ' 条将存为本地草稿。';
-    tip += unfilled.length
-      ? '\n尚有 ' + unfilled.length + ' 条未盘，可继续盘点或点【盘点结束】完成。'
-      : '\n所有行均已填写，可直接点【盘点结束】完成。';
-    if (!opts.skipConfirm && !(await WBModal.confirm(tip, { title: '暂停保存' }))) return;
+    const remain = unfilled.length;
+    let tip = '将暂存 ' + filled.length + ' 条到本机（不计入盘点记录），退出后可继续盘点。';
+    tip += remain
+      ? '\n还有 ' + remain + ' 条未盘；全部盘完请回来点【结束本次盘点】才算完成。'
+      : '\n所有行均已填写，建议直接点【结束本次盘点】完成本次盘点。';
+    if (!opts.skipConfirm && !(await WBModal.confirm(tip, { title: '暂存并退出' }))) return;
 
     // 🟢 v226.1 修复：保存 = 暂停盘点 → 仅存本地草稿，不写盘点记录列表、不推云端。
     //   之前实现直接 addStocktakeRecords 落库，导致三大问题：
@@ -3455,7 +6704,19 @@ const StocktakeModule = {
       try { if (this.sheet.sheetType === 'quarter') await this._publishQuarterOverview({ finished: false }); } catch (e) { /* 忽略 */ }
       const syncTip = (typeof SyncManager !== 'undefined' && SyncManager.isOnline)
         ? '' : '（未连接云端不影响，结束盘点时再同步）';
-      this.toast('已暂停保存（本地草稿 ' + filled.length + ' 条）。下次进入将提醒点【盘点结束】完成盘点' + syncTip);
+      // 🟢 v228.35（P1）：toast 明确「未计入盘点记录」，与按钮文案形成闭环，消除"我明明保存了"的误解
+      const leftTip = unfilled.length ? ('，还剩 ' + unfilled.length + ' 条未盘') : '，已全部填写，可直接结束盘点';
+      this.toast('已暂存 ' + filled.length + ' 条到本机（未计入盘点记录）' + leftTip + syncTip);
+      // 🟢 v228.40（二-6）修复：手动点【暂存并退出】确认后必须真正退出到季度盘点初始界面。
+      //   旧实现只 toast + 清现场，停留在盘点界面，与「暂存并退出」字面语义相悖。
+      //   opts.thenBack=true（手动路径）→ 保存完成后导航回初始界面；
+      //   skipConfirm 路径（从「返回」弹窗的「保存并返回」）由调用方自己 _backToWorkbench()，
+      //   这里不重复导航（否则会二次导航导致界面错乱）。
+      if (opts.thenBack) {
+        this._sheetTouched = null;
+        this._skipResumePrompt = true;   // 返回后停在初始界面，不自动续盘
+        this._backToWorkbench();
+      }
     } catch (e) {
       console.error('[stocktake] 暂停保存失败:', e);
       this.toast('暂停保存失败：' + (e.message || e));
@@ -3583,6 +6844,8 @@ const StocktakeModule = {
     const typeCn = ctx.sheetType === 'quarter' ? '季度' : '日常';
     const build = (r, kind) => ({
       recId: this._uuid(), sheetId: sheetId, batchNo: ctx.batchNo || '', sheetType: ctx.sheetType,
+      // 🟢 v228.37：季度记录带入轮次命名（如「2026年第3季度」），记录列表可直接看出是哪一轮
+      roundLabel: ctx.sheetType === 'quarter' ? (this._getRoundLabel(sheetId, this._getRoundNo(sheetId)) || '') : '',
       存货编码: r.存货编码, 存货名称: r.存货名称 || '', 规格型号: r.规格型号 || '',
       现存量: parseFloat(r.现存量) || 0,
       盘点数量: kind === 'unfilled' ? null : (parseFloat(r.盘点数量) || 0),
@@ -3730,13 +6993,18 @@ const StocktakeModule = {
     // 🟢 v226：未盘的也写记录，但盘点数量以「/」留空（不再按 0 计入盘亏）——
     //   「盘点数量」字段存 null，UI 渲染时显示「/」；差异量同样存 null。
     //   已盘为 0 的如实记为 0（不记负差异），备注标「已盘为 0」以保留审计痕迹。
+    // 🟢 v228.40（二-2a）：结束确认文案 —— 有漏盘时明确告知「结束后可补盘」，与结束后的补盘语义闭环。
+    const _leakTip = unfilled.length
+      ? ('未盘点：' + unfilled.length + ' 条（以「/」保存，不计入盘亏）\n\n'
+        + 'ℹ️ 结束后如有未盘项，系统会自动为你保留补盘入口，可随时补录漏盘（只列没盘过的编码）。')
+      : '未盘点：0 条（本次全部盘完 🎉）';
     const ok = await WBModal.confirm(
       '确认结束本次盘点？\n\n' +
       '盘点号：' + batchNoText + '\n' +
       '盘点人：' + counter + '\n' +
       '区间：' + rangeTxt + '\n' +
       '已盘（含为 0）：' + (filledReal.length + filledZero.length) + ' 条\n' +
-      '未盘点：' + unfilled.length + ' 条（以「/」保存，不计入盘亏）',
+      _leakTip,
       { title: '结束盘点' }
     );
     if (!ok) return;
@@ -3874,13 +7142,15 @@ const StocktakeModule = {
         this._markPending(recs.map(r => r.recId));
         syncTip = '（未连接云端，已存本地待补推）';
       }
-      this.toast(counter + ' · ' + rangeTxt + ' 已结束：' +
-        filledReal.length + ' 条实盘 + ' + filledZero.length + ' 条 0 + ' + unfilled.length + ' 条未盘' + syncTip);
-      // 🟢 v226：日常盘点不写批次快照（日常结果/过程不出现在盘点批次模块中）——
-      //   仅季度盘点（多人协作）需要批次汇总。
-      if (this.sheet.sheetType === 'quarter') {
-        try { await this._generateBatchSummary(); } catch (err) { console.error('[stocktake] 批次汇总生成失败:', err); }
-      }
+      // 🟢 v228.40（二-3）：文案简化 —— 旧版「4 条实盘 + 0 条 0 + 2 条未盘」把 0 条项也拼进去，
+      //   读起来像残缺公式。改为「N 条实盘 / M 条未盘」，0 条项直接省略，语义清晰。
+      const _parts = [filledReal.length + ' 条实盘'];
+      if (filledZero.length) _parts.push(filledZero.length + ' 条为 0');
+      _parts.push(unfilled.length + ' 条未盘');
+      this.toast(counter + ' · ' + rangeTxt + ' 已结束：' + _parts.join(' / ') + syncTip);
+      // 🟢 v228.60：移除批次汇总快照生成 —— 「盘点批次汇总」模块已下线（stocktake-batch.js 已删除），
+      //   该快照唯一的消费方是那个页面。生成它每次要 pull + push 整包 stocktake.json（约 1.06MB），
+      //   属纯浪费。季度盘点页内的进度概览走 OVERVIEW_KEY 通道，与本链路完全独立，不受影响。
       await this._resetStocktakingSession();
     } catch (e) {
       console.error('[stocktake] 结束盘点失败:', e);
@@ -4038,134 +7308,6 @@ const StocktakeModule = {
     }
   },
 
-  async _generateBatchSummary() {
-    if (!this.sheet) return;
-    // 🟢 v226：日常盘点不写批次快照——日常结果不出现在盘点批次模块
-    if (this.sheet.sheetType === 'daily') return;
-    // v217：汇总前确保已拿到所有人的记录（审查 #1），否则会漏盘他人进度
-    await this.pullCloudRecords();
-    const sheetId = this.sheet.sheetId;
-    // ① v224 修复：改为「按全量记录重算」，不再防覆盖。
-    //    旧逻辑（已有快照就直接 return）会让第 2 个结束的人的记录永远进不了汇总：
-    //    甲先结束 → 快照定格为甲的 2 条；乙再结束 → 记录落库了但快照不动，
-    //    于是「盘点记录列表 4 条、批次汇总 counted=2」——两处对不上（相悖状态）。
-    //    快照本就是从记录实时算出来的，而 pullCloudRecords() 已确保拿到所有人的记录，
-    //    重算只会更全、不会丢数据。
-    //    仅保留「已作废」保护：管理员手动作废的批次不因有人结束而自动复活。
-    const exist = await DataStore.getStocktakeBatch(sheetId);
-    if (exist && exist.voided) {
-      this.toast('该批次汇总已作废，未自动重算。如需恢复，请到「盘点批次汇总」点「重新生成」');
-      return;
-    }
-    if (exist) this.toast('已根据最新记录重算该批次汇总');
-    // ② 应盘全集：按 sheetId 重算（不依赖 allRowsFull —— 审查 #2）
-    const totalCodes = await this._calcBatchTotalCodes();
-    // ③ 已盘：读该批次全量记录（pull 合并后含所有人的 —— 审查 #1）
-    const allRecs = await DataStore.getStocktakeRecordsBySheet(sheetId);
-    // v224：把记录列表挂到模块实例上，供 _genBatchName() 取真实盘点日期
-    this._batchAllRecs = allRecs || [];
-    // ③b 存量去重：同编码保留最新一条（审查 #10，防覆盖率/盈亏虚高）
-    const validRecs = window.dedupStocktakeRecords((allRecs || []).filter(r => !r.voided));
-    // 🟢 v224：v223 起未盘不再按 0 写入，所以「已盘 = 全部有效记录」（含已盘为 0）；
-    //   closedByFinish 仅是审计标记，不影响是否计入已盘
-    // 🟢 v226：新增「未盘点」占位记录（盘点数量=null，UI 显示「/」）—— 它不是已盘，
-    //   必须排除，否则 done/counted/zeroFilled 全部虚高（盘 1 条显示 3/3 完成）。
-    const countedRecs = validRecs.filter(r => !(r.unfilled === 1 || r.盘点数量 == null || r.盘点数量 === ''));
-    const countedSet = new Set(countedRecs.map(r => r.存货编码));
-    const realSet = countedSet;
-    // 🟢 v224：已盘为 0 的记录集合（用于覆盖统计与未盘清单剔除）
-    const zeroFilledCodes = countedRecs.filter(r => r.closedByFinish).map(r => r.存货编码);
-    // ④ 盘盈 / 盘亏（差异量已 round2 修过精度）
-    let profit = 0, loss = 0;
-    validRecs.forEach(r => {
-      const d = Number(r.差异量) || 0;
-      if (d > 0) profit += d; else if (d < 0) loss += Math.abs(d);
-    });
-    // ⑤ 各人进度：done 只统计「真人实盘」，结束时补的 0 不计入（否则进度虚高 —— 审查 #9）
-    const byCounter = {};
-    countedRecs.forEach(r => {
-      const c = r.盘点人 || '未知';
-      byCounter[c] = byCounter[c] || { done: 0 };
-      byCounter[c].done++;
-    });
-    const batchTasks = await DataStore.getTasksBySheet(sheetId);
-    this._batchTasks = batchTasks || [];        // 供 _genBatchName() 取分配日（§2.7）
-    (batchTasks || []).forEach(t => {
-      if (!byCounter[t.counter]) byCounter[t.counter] = { done: 0 };
-      byCounter[t.counter].assigned = t.codes ? t.codes.length : (t.noEnd - t.noStart + 1);
-      byCounter[t.counter].status = t.status;
-    });
-    // ⑥ 未盘清单（分派可判归属，认领诚实标 unknown —— 审查 #4）
-    const uncounted = [...totalCodes].filter(c => !countedSet.has(c));
-    const openTasks = (batchTasks || []).filter(t => t.status === 'open');
-    const uncountedCodes = uncounted.map(code => {
-      const t = openTasks.find(t => t.codes && t.codes.includes(code));
-      if (t) return { code, reason: 'assigned', assignee: t.counter };
-      return { code, reason: openTasks.length ? 'unassigned' : 'unknown', assignee: null };
-    });
-    // ⑥b 已盘为 0 的清单（便于一眼看出"账面有但实盘为 0"项）
-    const zeroFilledList = countedRecs.filter(r => r.closedByFinish).map(r => ({ code: r.存货编码, assignee: r.盘点人 || null }));
-
-    const summary = {
-      sheetId,
-      batchName: this._genBatchName(),
-      sheetType: this.sheet.sheetType,
-      startDate: this.sheet.startDate, endDate: this.sheet.endDate,
-      total: totalCodes.size,
-      counted: realSet.size,
-      zeroFilled: zeroFilledList.length,
-      uncounted: uncounted.length,
-      realCoverage: totalCodes.size ? realSet.size / totalCodes.size : 0,
-      bookCoverage: totalCodes.size ? countedSet.size / totalCodes.size : 0,
-      profit: round2(profit), loss: round2(loss),
-      byCounter, uncountedCodes, zeroFilledCodes: zeroFilledList,
-      savedAt: new Date().toISOString(),
-      generatedBy: this.task.counter,
-      deviceId: this._deviceId(),
-      voided: 0
-    };
-    await DataStore.addStocktakeBatch(summary);
-    await this._pushBatchToCloud(summary);
-  },
-
-  async _calcBatchTotalCodes() {
-    const { sheetType, startDate, endDate } = this.sheet;
-    const stock = await DataStore.getRows('stock');
-    const codes = (stock || []).map(s => String(s.存货编码 == null ? '' : s.存货编码).trim()).filter(Boolean);
-    if (sheetType === 'quarter') return new Set(codes);   // 季度 = 全库
-    const out = await DataStore.getOutbound({ startDate, endDate }, 1, 1000000);
-    const outMap = this._aggByCode(out && out.items ? out.items : (out || []), '出库数量');
-    return new Set(codes.filter(c => outMap[c] > 0));
-  },
-
-  _genBatchName() {
-    const typeCn = this.sheet.sheetType === 'quarter' ? '季度盘点' : '日常盘点';
-    let d;
-    if (this.sheet.sheetType === 'quarter') {
-      const t = (this._batchTasks || []).find(t => t.counter === this.task.counter);
-      d = (t && t.createdAt) ? String(t.createdAt).slice(0, 10) : this._today();
-    } else {
-      // 🟢 v224：日常盘点的批次日期取该批次实际盘点动作的日期（盘点记录里的「盘点日期」字段），
-      //   而不是「生成汇总的今天」。用户反馈：批次汇总写「2026-09-01」但实际是更早或更晚盘的，怀疑不准。
-      //   取该 sheet 下所有未作废记录的 盘点日期 最小值（最真实的最早一次盘点）。
-      try {
-        const recs = (this._batchAllRecs || []).filter(r => !r.voided && r.盘点日期);
-        if (recs.length) {
-          const dates = recs.map(r => String(r.盘点日期).slice(0, 10)).filter(s => /^\d{4}-\d{2}-\d{2}$/.test(s)).sort();
-          d = dates[0] || this._today();
-        } else {
-          d = this._today();
-        }
-      } catch (e) { d = this._today(); }
-    }
-    return d + ' ' + typeCn;
-  },
-
-  async _pushBatchToCloud(summary) {
-    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
-    try { await SyncManager.pushStocktakeBatch(summary); } catch (e) { console.warn('[stocktake] 批次汇总上云失败(已忽略):', e && e.message); }
-  },
-
   _deviceId() {
     try {
       let id = localStorage.getItem('wb_device_id');
@@ -4205,7 +7347,11 @@ const StocktakeModule = {
         //    否则会把当前人的盘点结果记到别人名下（与 v223 同类的归属错乱）。
         const dCounter = String((d.task && d.task.counter) || '').trim();
         const mine = !dCounter || !counter || dCounter === counter;
-        if (mine && qtyCount > 0) return { sheetId, sheetType, counter: dCounter || counter, reason: 'draft' };
+        if (mine && qtyCount > 0) {
+          // 🟢 v228.35（P2）：带出进度与时间，供续盘横幅显示「已暂存 2/5 · 上次 14:20」
+          const p = await this._unfinishedProgress(sheetId, sheetType, dCounter || counter, d, qtyCount);
+          return Object.assign({ sheetId, sheetType, counter: dCounter || counter, reason: 'draft' }, p);
+        }
       }
       // ①b 🟢 v226：存在「未结束的盘点会话」→ 保存只是暂停，必须点【盘点结束】才算完成。
       //     只要该会话属于同一 sheetId + 同一作业身份，无论有没有草稿都要提醒。
@@ -4213,7 +7359,11 @@ const StocktakeModule = {
       if (s && s.sheetId === sheetId) {
         const sCounter = String((s && s.counter) || '').trim();
         const sMine = !sCounter || !counter || sCounter === counter;
-        if (sMine) return { sheetId, sheetType, counter: sCounter || counter, reason: 'session' };
+        if (sMine) {
+          const p = await this._unfinishedProgress(sheetId, sheetType, sCounter || counter,
+            d, Object.keys((d && d.qty) || {}).length);
+          return Object.assign({ sheetId, sheetType, counter: sCounter || counter, reason: 'session' }, p);
+        }
       }
       // ② 该 sheetId 下本人有任务 open 且非 closedByFinish 全部完成
       if (counter) {
@@ -4234,11 +7384,52 @@ const StocktakeModule = {
         }
         // 日常盘点没有分派任务，总数未知 → 只靠草稿判断（上面分支）
         if (total > 0 && realDone > 0 && realDone < total) {
-          return { sheetId, sheetType, counter, reason: 'open' };
+          return { sheetId, sheetType, counter, reason: 'open', done: realDone, total,
+                   lastAt: this._draftSavedAt(d), batchNo: (d && d.sheet && d.sheet.batchNo) || '' };
         }
       }
     } catch (e) { console.warn('[stocktake] 续盘检测异常:', e); }
     return null;
+  },
+
+  /**
+   * 🟢 v228.35（P2）：未完成盘点的进度摘要。
+   *   背景：旧版只在弹窗里说「你有未结束的盘点」，用户不知道盘了多少、上次什么时候盘的，
+   *        一旦误点「放弃」这份工作就白做了。横幅要给出可判断的信息，人才敢放心点「继续」。
+   *   返回 { done, total, lastAt, batchNo }；total 为 0 表示总数未知（日常盘点无分派任务）。
+   */
+  async _unfinishedProgress(sheetId, sheetType, counter, draft, draftQty) {
+    const out = { done: draftQty || 0, total: 0, lastAt: this._draftSavedAt(draft),
+                  batchNo: (draft && draft.sheet && draft.sheet.batchNo) || '' };
+    try {
+      // 已落库的实盘记录（续盘场景：上次结束前写入的记录同样算进度）
+      const recs = (await DataStore.getStocktakeRecordsBySheet(sheetId)) || [];
+      const doneSet = new Set();
+      recs.filter(r => !r.voided && String(r.盘点人 || '').trim() === String(counter || '').trim())
+          .forEach(r => {
+            if (r.unfilled) return;
+            if (r.盘点数量 === '' || r.盘点数量 == null) return;
+            if (r.存货编码) doneSet.add(r.存货编码);
+          });
+      out.done = Math.max(out.done, doneSet.size);
+      if (sheetType === 'quarter') {
+        const allTasks = DataStore.getStocktakeTasks() || {};
+        const mine = Object.keys(allTasks).map(k => allTasks[k]).filter(t =>
+          t && t.counter === counter && !t.returned && !t.deleted &&
+          this._taskInCurrentBatch(t, this.query.startDate, this.query.endDate));
+        const open = mine.filter(t => t.status === 'open' || t.replenishAssigned || t.isReplenish);
+        out.total = open.reduce((n, t) => n + ((t.codes || []).length || Math.max(0, (t.noEnd - t.noStart + 1))), 0);
+      }
+    } catch (e) { /* 忽略：进度只是提示，取不到就不显示 */ }
+    return out;
+  },
+
+  /** 草稿最后保存时间（取草稿里的 updatedAt/savedAt，都没有则不给） */
+  _draftSavedAt(draft) {
+    try {
+      const t = draft && (draft.updatedAt || draft.savedAt || (draft.sheet && draft.sheet.savedAt));
+      return t ? String(t) : '';
+    } catch (e) { return ''; }
   },
 
   // 🟢 v224：跳回未结束的盘点现场（弹窗确认）
@@ -4253,27 +7444,14 @@ const StocktakeModule = {
       await this.startQuarter();
       return;
     }
-    // 🟢 v226：明确语义 —— 保存 ≠ 完成；本次盘点只有点【盘点结束】才算完成。
-    // 🟢 v226：三种来源都是「未结束」：session（保存后暂停）/ draft（有草稿）/ open（季度任务未完成）
-    const msg = info.reason === 'open'
-      ? '上次分配给你的季度盘点任务尚未完成（保存≠结束，必须点盘点结束才算完成）。是否继续？'
-      : '上次盘点处于「暂停」状态（未点【盘点结束】）。\n\n要点【盘点结束】才算完成本次盘点；点【取消】则放弃本次未完成的盘点（已保存的记录会保留）。\n\n是否继续上次盘点？';
-    const ok = await WBModal.confirm(msg, { title: '检测到未结束的盘点' });
-    if (!ok) {
-      // 取消 = 放弃本次未结束的盘点：清会话标记 + 清草稿（已落库的记录保留）
-      this.clearDraft();
-      this._clearOpenSession();
-      // 🟢 v227.5：取消续盘后必须回到对应初始界面（否则界面一片空白，看不到概览/任务）
-      this._skipResumePrompt = true;
-      if (info.sheetType === 'quarter') await this.startQuarter();
-      else await this.startDaily();
-      return;
-    }
-    // 继续：触发原 startDaily/startQuarter 的后续逻辑
+    // 🟢 v228.40（二-5）修复：删除「检测到未结束的盘点」确认弹窗（用户明确要求删除）。
+    //   旧行为：点【取消】会 clearDraft() 放弃本次盘点 —— 用户只是想回来接着盘，却要先过一道弹窗，
+    //   误点一下就把草稿清了。现改为：静默恢复上次草稿继续盘（与用户确认口径一致）。
+    //   注意：真正的「放弃本次盘点」仍由盘点界面内的【🗑️ 放弃本次盘点】按钮承担，语义不丢。
     if (info.sheetType === 'daily') {
-      this._continueDailyInternal(info);
+      await this._continueDailyInternal(info);
     } else {
-      this._continueQuarterInternal(info);
+      await this._continueQuarterInternal(info);
     }
   },
 
@@ -4311,6 +7489,7 @@ const StocktakeModule = {
       await this._applyAssignedIfAny();
       this._entrySheetType = 'daily';
       this.renderTable();
+      this._refreshDraftHint();           // 🟢 v228.35（P1）：续盘恢复草稿后同步提示条显隐
     } catch (e) { console.error('[stocktake] 续盘失败:', e); }
   },
 
@@ -4321,12 +7500,14 @@ const StocktakeModule = {
     const allTasks = DataStore.getStocktakeTasks() || {};
     const myTasks = info.counter ? (DataStore.getMyOpenTasks(info.counter) || []) : [];
     this.batchNo = this._genBatchNo('quarter', sheetId);
+    // 🟢 v228.40（一-1/一-2）：续盘同样回推批次号，保证多端同一号
+    try { this._pushBatchCommonState(sheetId, this.batchNo); } catch (e) { /* 忽略 */ }
 
     // 🟢 v227.3：续盘时点「确定」后直接进入正式盘点界面，跳过任务选择器。
     //   找到本人在本批次第一个 open 任务 → 直接 _claimQuarterTask；找不到再回退到选择器
     //   （理论上 _detectUnfinished 命中说明一定有未完成任务，回退路径为防御）。
     const openTask = myTasks.find(t => t && t.sheetType === 'quarter' &&
-      (t.startDate == null || (t.startDate === sd && t.endDate === ed)) && t.status !== 'closed');
+      this._taskInCurrentBatch(t, sd, ed) && t.status !== 'closed');
     if (openTask) {
       this._entrySheetType = 'quarter';
       await this._claimQuarterTask(openTask.taskId);
@@ -4338,7 +7519,7 @@ const StocktakeModule = {
     const closedTask = info.counter
       ? Object.keys(allTasks).map(k => allTasks[k]).find(t => t && t.sheetType === 'quarter'
         && String(t.counter || '') === String(info.counter)
-        && (t.startDate == null || (t.startDate === sd && t.endDate === ed))
+        && this._taskInCurrentBatch(t, sd, ed)
         && t.status === 'closed')
       : null;
     if (closedTask) {
@@ -4355,7 +7536,7 @@ const StocktakeModule = {
       : [];
     const sameBatchAll = Object.keys(allTasks)
       .map(k => allTasks[k])
-      .filter(t => t && t.sheetType === 'quarter' && (t.startDate == null || (t.startDate === sd && t.endDate === ed)));
+      .filter(t => t && t.sheetType === 'quarter' && this._taskInCurrentBatch(t, sd, ed));
     this._renderQuarterTaskPicker(sd, ed, sheetId, myTasks, sameBatchAll, info.counter, myClosed, this.batchNo);
   },
 
@@ -4415,7 +7596,7 @@ const StocktakeModule = {
     const openTip = s ? `
       <div style="margin-top:10px;padding:10px 14px;border-radius:8px;background:var(--status-warning-bg,#fff7ed);border:1px solid #fed7aa;font-size:13px;">
         ⚠️ 有未结束的盘点：盘点号 <b>${esc(s.batchNo || s.sheetId)}</b>（${s.sheetType === 'quarter' ? '季度' : '日常'} · 盘点人 ${esc(s.counter || '未填写')} · 始于 ${esc(String(s.startedAt || '').slice(0, 16).replace('T', ' '))}）<br>
-        点击【${s.sheetType === 'quarter' ? '季度盘点' : '日常盘点'}】继续；盘完必须点【盘点结束】才算完成本次盘点。
+        点击【${s.sheetType === 'quarter' ? '季度盘点' : '日常盘点'}】继续；盘完必须点【结束本次盘点】才算完成本次盘点。
         <button class="btn--ghost" style="margin-left:8px;" onclick="StocktakeModule._clearOpenSession();App.go('stocktake')">放弃本次</button>
       </div>` : '';
 
@@ -4453,12 +7634,19 @@ const StocktakeModule = {
   saveDraft() {
     try {
       const qty = {};
+      // 🟢 v228.40（二-4）修复：备注必须随草稿一起落盘。
+      //   旧实现只存 qty（盘点数量），用户「保存退出再进入」后备注全部被清空 ——
+      //   因为重进时按草稿重建行、remark 取不到值。remarks 与 qty 同生命周期保存。
+      const remarks = {};
       (this.allRows || []).forEach(r => {
-        if (r && r.存货编码 != null && r.盘点数量 !== '' && r.盘点数量 != null) qty[r.存货编码] = r.盘点数量;
+        if (!r || r.存货编码 == null) return;
+        if (r.盘点数量 !== '' && r.盘点数量 != null) qty[r.存货编码] = r.盘点数量;
+        const nt = (r.备注 == null ? '' : String(r.备注));
+        if (nt) remarks[r.存货编码] = nt;      // 只存非空，避免草稿膨胀
       });
       const key = this._draftKey(this.task.counter, this.sheet && this.sheet.sheetId);
       localStorage.setItem(key, JSON.stringify({
-        sheet: this.sheet, task: this.task, qty: qty, updatedAt: new Date().toISOString()
+        sheet: this.sheet, task: this.task, qty: qty, remarks: remarks, updatedAt: new Date().toISOString()
       }));
     } catch (e) { console.warn('[stocktake] 草稿保存失败(已忽略):', e); }
   },
@@ -4500,7 +7688,10 @@ const StocktakeModule = {
       ((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser) ? ((AppConfig.getCurrentUser() || {}).username || '') : '')).trim();
     if (dCounter && cur && dCounter !== cur) return;
     const qty = d.qty || {};
+    // 🟢 v228.40（二-4）：备注与数量一并从草稿恢复 —— 旧实现只恢复数量，备注被清空。
+    const remarks = d.remarks || {};
     let n = 0;
+    let nr = 0;
     this.allRows.forEach(r => {
       if (Object.prototype.hasOwnProperty.call(qty, r.存货编码)) {
         r.盘点数量 = qty[r.存货编码];
@@ -4508,14 +7699,22 @@ const StocktakeModule = {
         r.差异量 = isNaN(f) ? '' : (f - (parseFloat(r.现存量) || 0));
         n++;
       }
+      if (Object.prototype.hasOwnProperty.call(remarks, r.存货编码)) {
+        r.备注 = remarks[r.存货编码];
+        nr++;
+      }
     });
-    if (n > 0) this.toast('已恢复上次未完成的 ' + n + ' 条盘点数量');
+    if (n > 0) this.toast('已恢复上次未完成的 ' + n + ' 条盘点数量' + (nr ? '、' + nr + ' 条备注' : ''));
   },
 
   // 🟢 v228.03：离开盘点模块时保存现场快照（当前盘点单 / 行数据 / 查询区间 / 滚动位置），
   //   切回时按快照恢复，做到「离开前在哪，切回还在哪」。
   //   仅内存快照（不落盘）：刷新页面仍按既定行为回到初始界面。
   onLeave() {
+    // 🟢 v228.66(C-3)：离开盘点模块即停全局轮询。旧版轮询一旦因「进过盘点模块」启动就
+    //   永远挂后台，用户在订单/出库里忙一天它仍在 1.5s 烧流量（后台白烧）。
+    //   回到盘点模块时 render() 会幂等重启 _startGlobalSync()，无副作用。
+    try { this._stopGlobalSync(); } catch (e) { /* 忽略 */ }
     try {
       const content = document.getElementById('contentArea');
       this._viewSnapshot = {

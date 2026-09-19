@@ -159,6 +159,9 @@ const StocktakeRecordModule = {
       const color = isNaN(diff) || diff === 0 ? '' : (diff > 0 ? 'color:#16a34a;' : 'color:#dc2626;');
       const voidTag = r.voided ? '<span style="color:#999;">（已作废）</span>' : '';
       const batchNo = esc(r.batchNo || r.sheetId || '');
+      // 🟢 v228.37：季度记录显示轮次命名（开下一轮时管理员命名，如「2026年第3季度」）
+      const rl = String(r.roundLabel || '').trim();
+      const rlTag = rl ? ` <span style="display:inline-block;margin-left:4px;padding:1px 6px;border-radius:6px;font-size:11px;background:rgba(37,99,235,.10);color:#2563eb;white-space:nowrap;">🏷 ${esc(rl)}</span>` : '';
       const qtyCell = (r.盘点数量 == null || r.盘点数量 === '') ? '/' : this._num(r.盘点数量);
       const diffCell = (r.差异量 == null || r.差异量 === '')
         ? '/'
@@ -169,7 +172,7 @@ const StocktakeRecordModule = {
       return `<tr${this.selected.has(r.recId) ? ' style="background:rgba(220,38,38,.05);"' : ''}>
         <td style="text-align:center;"><input type="checkbox" class="stRecChk" data-rid="${rid}" ${checked}
           onchange="StocktakeRecordModule.toggleOne(this)"></td>
-        <td>${batchNo}</td>
+        <td>${batchNo}${rlTag}</td>
         <td>${esc(r.存货编码 || '')}</td>
         <td>${esc(r.存货名称 || '')}</td>
         <td>${esc(r.规格型号 || '')}</td>
@@ -477,5 +480,5 @@ const StocktakeRecordModule = {
 
   onLeave() { this.currentData = []; }
 };
-// v217：挂到 window，保持模块命名一致性（StocktakeBatchModule 同款写法）
+// v217：挂到 window，保持模块命名一致性
 window.StocktakeRecordModule = StocktakeRecordModule;

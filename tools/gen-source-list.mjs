@@ -36,8 +36,14 @@ const EXCLUDE_DIRS = ['tools/ux-review'];  // 走查截图与采集数据目录�
 const TOOL_FILES = ['tools/credential-tool.mjs', 'tools/gen-source-list.mjs', 'tools/gen-critical-css.mjs'];
 // 点文件（CDN 可能 403，index.html 有内嵌兜底，仍列入清单保证常规托管可下载）
 const DOT_FILES = ['.gitignore', '.gitlab-ci.yml', '.nojekyll', '.github/workflows/deploy.yml'];
-// 根目录必备文档（不被"根级 .md 垃圾过滤"误剔）
-const REQUIRED_DOCS = ['docs/全局代码审查标准.md', '修复与发布纪律_v227.92.md', 'SECURITY.md'];
+// 🟢 v228.66：源码下载包内的 markdown 文档「仅保留两类」——
+//   ① 纪律类：修复与发布纪律_v227.92.md（根目录）
+//   ② 全局审查代码类：docs/全局代码审查标准.md
+//   其余所有随版本膨胀的实施 / 走查 / 方案 / 评估类 .md 一律不进包（见下方 MD_WHITELIST 白名单）。
+//   此前每发一版就往清单塞一个几十 KB 的报告 md，越堆越大，已被要求收敛为「只留纪律 + 审查两类」。
+const REQUIRED_DOCS = ['docs/全局代码审查标准.md', '修复与发布纪律_v227.92.md'];
+// md 白名单：只有这两个文档类可进源码下载包
+const MD_WHITELIST = new Set(REQUIRED_DOCS);
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'tools', 'scripts']);
 
@@ -70,6 +76,7 @@ TOOL_FILES.forEach(f => { if (existsSync(join(ROOT, f))) list.add(f); });
 const files = [...list]
   .filter(f => !EXCLUDE_FILE_RE.some(re => re.test(f)))
   .filter(f => !EXCLUDE_DIRS.some(d => f === d || f.startsWith(d + '/')))
+  .filter(f => !f.endsWith('.md') || MD_WHITELIST.has(f))  // 🟢 v228.66：md 仅保留白名单两类（纪律 + 全局审查标准）
   .sort();
 writeFileSync(join(ROOT, 'SOURCE_FILES.json'), JSON.stringify(files, null, 2) + '\n');
 console.log(`✅ SOURCE_FILES.json 已生成：${files.length} 个文件`);

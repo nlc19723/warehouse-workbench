@@ -130,7 +130,7 @@ const InventoryAlertModule = {
     const totalNeedQty = needRestock.reduce((s, a) => s + (parseFloat(a.补货值) || 0), 0);
 
     if (rt !== undefined && rt !== App._goToken) return;
-    document.getElementById('alertSummary').innerHTML = `
+    TableUtils.setHtml('alertSummary', `
       <div class="kpi-grid">
         <div class="kpi-card card-warning">
           <div class="kpi-label">需补货种类</div>
@@ -141,7 +141,7 @@ const InventoryAlertModule = {
           <div class="kpi-value">${TableUtils.formatNum(totalNeedQty)}</div>
         </div>
       </div>
-    `;
+    `);
 
     this.currentData = alerts;
     this.renderTable(rt);
@@ -181,7 +181,7 @@ const InventoryAlertModule = {
     const area = document.getElementById('alertTableArea');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无预警数据</div></div>';
-      document.getElementById('alertPagination').innerHTML = '';
+      TableUtils.setHtml('alertPagination', '');
       return;
     }
 

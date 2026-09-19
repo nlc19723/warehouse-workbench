@@ -39,6 +39,84 @@ const TablePrefs = {
     return !!(all.widths && all.widths[tableKey] && Object.keys(all.widths[tableKey]).length > 0);
   },
 
+  // ────────────────────────────────────────────────────────────
+  // 🟢 v228.26 弹性权重列宽（Flex Column Model）
+  //   背景：旧体系把列宽存成绝对像素（widths[tableKey][field] = 168），
+  //   导致 ① 宽屏表格不撑开、右侧大片留白 ② 窄屏被压到 36px 下限、列头截断
+  //   ③ 换台机器/换个分辨率拖过的列宽就不对了。
+  //   改为存「相对权重 + 最小可读宽度」，渲染时按可用宽度动态分配。
+  //   存储结构（v2，与旧 widths 并存，旧值自动迁移一次）：
+  //     colFlex: { tableKey: { field: 2.2 } }   // 相对权重，非像素
+  //     colMin:  { tableKey: { field: 110 } }   // 可读下限像素
+  // ────────────────────────────────────────────────────────────
+  getColFlex(tableKey, colField) {
+    if (!tableKey || !colField) return null;
+    const all = this._read();
+    const v = all.colFlex && all.colFlex[tableKey] && all.colFlex[tableKey][colField];
+    return (typeof v === 'number' && v > 0) ? v : null;
+  },
+  setColFlex(tableKey, colField, flex) {
+    if (!tableKey || !colField || !(flex > 0)) return;
+    const all = this._read();
+    all.colFlex = all.colFlex || {};
+    all.colFlex[tableKey] = all.colFlex[tableKey] || {};
+    all.colFlex[tableKey][colField] = Math.round(flex * 1000) / 1000;
+    this._write(all);
+  },
+  getColMin(tableKey, colField) {
+    if (!tableKey || !colField) return null;
+    const all = this._read();
+    const v = all.colMin && all.colMin[tableKey] && all.colMin[tableKey][colField];
+    return (typeof v === 'number' && v > 0) ? v : null;
+  },
+  setColMin(tableKey, colField, px) {
+    if (!tableKey || !colField || !(px > 0)) return;
+    const all = this._read();
+    all.colMin = all.colMin || {};
+    all.colMin[tableKey] = all.colMin[tableKey] || {};
+    all.colMin[tableKey][colField] = Math.round(px);
+    this._write(all);
+  },
+  hasAnyColFlex(tableKey) {
+    if (!tableKey) return false;
+    const all = this._read();
+    return !!(all.colFlex && all.colFlex[tableKey] && Object.keys(all.colFlex[tableKey]).length > 0);
+  },
+  /**
+   * 一次性迁移：把旧的 px 列宽换算成 flex 权重。
+   * 换算基准 = 该表当前所有列 px 之和（保持原有比例关系不变），
+   * 归一化到「列数」为基准，使 flex 值直观（1.0 = 平均宽度）。
+   */
+  migrateWidthsToFlex(tableKey, fields) {
+    if (!tableKey || !Array.isArray(fields) || !fields.length) return false;
+    const all = this._read();
+    const oldMap = (all.widths && all.widths[tableKey]) || null;
+    if (!oldMap) return false;
+    const pxs = fields.map(f => (typeof oldMap[f] === 'number' && oldMap[f] > 0) ? oldMap[f] : null);
+    const valid = pxs.filter(p => p != null);
+    if (valid.length < fields.length * 0.6) return false;   // 覆盖不足，不迁移
+    const total = valid.reduce((a, b) => a + b, 0);
+    if (!(total > 0)) return false;
+    all.colFlex = all.colFlex || {};
+    all.colFlex[tableKey] = all.colFlex[tableKey] || {};
+    fields.forEach((f, i) => {
+      const p = pxs[i];
+      if (p == null) return;
+      // 归一化：让 Σflex = 列数，则 flex=1 表示该列等于平均宽度
+      all.colFlex[tableKey][f] = Math.round(p / total * fields.length * 1000) / 1000;
+    });
+    // 标记已迁移，避免重复执行
+    all.colFlexMigrated = all.colFlexMigrated || {};
+    all.colFlexMigrated[tableKey] = 1;
+    this._write(all);
+    return true;
+  },
+  isFlexMigrated(tableKey) {
+    if (!tableKey) return false;
+    const all = this._read();
+    return !!(all.colFlexMigrated && all.colFlexMigrated[tableKey]);
+  },
+
   // 对齐偏好
   getAlign(tableKey, colField) {
     if (!tableKey || !colField) return null;
@@ -146,8 +224,8 @@ const COLLAPSE_KEEP = {
   trackTableArea:    ['存货名称','规格型号','未入库订单量'], // 订单跟踪（表头叫“未入库订单量”）
   stockTableArea:    ['存货名称','规格型号','现存数量'],   // 现存量（表头叫“现存数量”）
   inventoryAlert:    ['存货名称','规格型号','补货值'],
-  stArea:            ['存货名称','规格型号','盘点数量'],
-  stRecArea:         ['存货名称','规格型号','盘点数量'],   // 盘点记录列表
+  stArea:            ['存货名称','规格型号','现存量','盘点数量'],
+  stRecArea:         ['存货名称','规格型号','现存量','盘点数量'],   // 盘点记录列表：v228.43 同步补「现存量」
   pricingTableArea:  ['存货名称','规格型号','含税单价'],
   recTableArea:      ['存货名称','规格型号','含税金额'],
   supplierTableArea: ['供应商','合同到期日','已入库金额'], // 供应商管理（特殊3列：表头“供应商/合同到期日/已入库金额(元)”）
@@ -974,6 +1052,7 @@ const TableUtils = {
             </g>
           </svg>
         </button>
+        <button class="efp-action-btn efp-clear efp-clear-inline" title="清空当前列筛选，显示全部数据">取消筛选</button>
       </div>
       ` : ''}
       <div class="efp-values" style="max-height:280px;overflow-y:auto;">
@@ -990,6 +1069,7 @@ const TableUtils = {
       <div class="efp-actions">
         <button class="efp-action-btn efp-select-all">全选</button>
         <button class="efp-action-btn efp-invert">反选</button>
+        ${!tableKey || !colField ? '<button class="efp-action-btn efp-clear" title="清空当前列筛选，显示全部数据">取消筛选</button>' : ''}
         <button class="efp-action-btn efp-ok primary">确定</button>
         <button class="efp-action-btn efp-cancel">取消</button>
       </div>
@@ -1072,6 +1152,20 @@ const TableUtils = {
       const filterState = (kw || finalExcluded.size > 0) ? { kw, excluded: Array.from(finalExcluded) } : { kw: '', excluded: [] };
       onConfirm(filterState);
       this._hideFilterPopup();
+    });
+
+    // 🟢 v228.29：「取消筛选」一键清空当前列筛选条件，恢复显示全部数据；
+    // 本次用户反馈：不关闭弹窗，留在原地让用户继续操作。
+    popup.querySelector('.efp-clear').addEventListener('click', () => {
+      excludedSet.clear();
+      searchInput.value = '';
+      popup.querySelectorAll('.efp-cb').forEach(cb => {
+        cb.checked = true;
+        const item = cb.closest('.efp-item');
+        if (item) item.style.display = '';
+      });
+      onConfirm({ kw: '', excluded: [] });
+      // 不调用 _hideFilterPopup()，保持弹窗打开
     });
 
     popup.querySelector('.efp-cancel').addEventListener('click', () => {
@@ -1319,7 +1413,13 @@ const TableUtils = {
       this._lockWidthsAndBaseline(table, ths, tableKey, getColField, hasPreset, remembered);
     }
 
-    this._applyPcConstraints(table, tableKey);
+    // 🟢 v228.26：走弹性权重体系的表，改用 flex 分配（并挂容器尺寸监听）
+    if (this._useFlex(table, tableKey)) {
+      this._applyFlexWidths(table, tableKey, getColField);
+      this._observeFlexResize(table, tableKey, getColField);
+    } else {
+      this._applyPcConstraints(table, tableKey);
+    }
     this._bindResizeHandles(table, ths, tableKey, getColField);
   },
 
@@ -1363,7 +1463,7 @@ const TableUtils = {
       colSum += w;
     });
 
-    if (tableKey && !TablePrefs.hasAnyColWidth(tableKey)) {
+    if (tableKey && !TablePrefs.hasAnyColWidth(tableKey) && !this._useFlex(table, tableKey)) {
       if (!hasPreset) {
         const scrollParent = this._findScrollParent(table) || table.parentElement;
         const containerW = (scrollParent ? scrollParent.clientWidth
@@ -1394,6 +1494,247 @@ const TableUtils = {
       table.style.tableLayout = 'fixed';
     }
     table.dataset.colResize = '1';
+  },
+
+  // ══════════════════════════════════════════════════════════════
+  // 🟢 v228.26 弹性权重列宽（Flex Column Model）核心实现
+  //
+  // 与旧体系的三点本质差异：
+  //   1. 存储：像素 → 相对权重（跨分辨率保持"列间比例"意图）
+  //   2. 分配：两趟算法，minWidth 保底 + 剩余空间按权重再分配
+  //   3. 时机：ResizeObserver 监听容器（而非渲染时算一次），
+  //      侧边栏折叠 / 滚动条出现 / 窗口缩放 都能重排
+  // ══════════════════════════════════════════════════════════════
+
+  /** 每列可读下限兜底（px）——低于此值列头必然截断 */
+  FLEX_MIN_FALLBACK: 56,
+
+  /**
+   * 是否走弹性权重体系（Flex Column Model）。
+   * 策略：PC 端（>768）下，凡「非模板预设宽表的横向滚动表」一律启用弹性自适应；
+   *       移动端（≤768）维持原有折叠逻辑。
+   * 这样覆盖「PC 端所有表格」的自适应诉求，且不再依赖脆弱的 tableKey 白名单匹配。
+   * @param {HTMLTableElement} table
+   * @param {string|null} tableKey
+   */
+  _useFlex(table, tableKey) {
+    if (window.innerWidth <= 768) return false;
+    if (!tableKey) return false;
+    // 已建立弹性权重的表，始终走 flex（粘性，避免回归到旧像素体系）
+    if (typeof TablePrefs !== 'undefined' && TablePrefs.isFlexMigrated && TablePrefs.isFlexMigrated(tableKey)) return true;
+    // PC 端其余表格一律弹性自适应：
+    //   旧像素记忆的表会在此分支被迁移为 flex（而非退回横滚），契合「所有 PC 表格自适应」诉求；
+    //   真正的宽表超出容器时，由 _computeFlexWidths 的 min-width 兜底自动转为横向滚动。
+    //   （不再用「th 内联宽度之和 > 容器」判定横滚——该内联宽度可能来自本系统的记忆/锁宽，
+    //     会误把带旧记忆的表判成「模板预设宽表」而跳过 flex，详见 F-7 验证。）
+    const ths = table ? table.querySelectorAll('thead th') : [];
+    return ths.length >= 2;
+  },
+
+  /** canvas 测量文本宽度（用于推算列的最小可读宽度） */
+  _measureText(text, font) {
+    try {
+      const cv = this.__mcv || (this.__mcv = document.createElement('canvas'));
+      const ctx = cv.getContext('2d');
+      ctx.font = font || '700 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      return ctx.measureText(String(text || '')).width;
+    } catch (e) { return String(text || '').length * 12; }
+  },
+
+  /**
+   * 推算某列的最小可读宽度：列头文字 + padding + 排序箭头余量
+   * 有记忆值优先用记忆值；否则按列头文字实测宽度推算。
+   */
+  _resolveMinWidth(th, tableKey, field) {
+    const remembered = tableKey && field ? TablePrefs.getColMin(tableKey, field) : null;
+    if (remembered) return remembered;
+    const explicit = parseFloat(th.dataset.minW);
+    if (!isNaN(explicit) && explicit > 0) return explicit;
+    const lbl = th.querySelector('.th-sort-label');
+    const text = ((lbl ? lbl.textContent : th.textContent) || '').trim();
+    // 列头文字宽 + 左右 padding(28) + 排序箭头/筛选按钮余量(22)
+    const measured = this._measureText(text) + 50;
+    return Math.max(this.FLEX_MIN_FALLBACK, Math.round(measured));
+  },
+
+  /**
+   * 核心：按 flex 权重 + minWidth 约束分配列宽（两趟算法）
+   * @returns {{widths:number[], tableW:number, overflow:boolean}}
+   */
+  _computeFlexWidths(ths, flexArr, minArr, containerW) {
+    const n = ths.length;
+    const widths = new Array(n).fill(0);
+    const locked = new Array(n).fill(false);
+
+    // 若所有列的最小宽度之和已超出容器 → 直接按 min 铺开，出横向滚动
+    const minSum = minArr.reduce((a, b) => a + b, 0);
+    if (minSum >= containerW) {
+      for (let i = 0; i < n; i++) widths[i] = minArr[i];
+      return { widths, tableW: minSum, overflow: true };
+    }
+
+    // 趟 1：按权重分配剩余空间（先扣掉所有列的下限）
+    let free = containerW - minSum;
+    const flexSum = flexArr.reduce((a, b) => a + b, 0) || 1;
+    for (let i = 0; i < n; i++) {
+      widths[i] = minArr[i] + Math.round(flexArr[i] / flexSum * free);
+    }
+
+    // 趟 2：修正取整误差，让总和精确等于容器宽（消除"最后一列差几像素"的缝隙）
+    let diff = containerW - widths.reduce((a, b) => a + b, 0);
+    if (diff !== 0) {
+      // 误差摊到最宽的那几列上（对视觉影响最小）
+      const order = widths.map((w, i) => i).sort((a, b) => widths[b] - widths[a]);
+      let guard = 0;
+      while (diff !== 0 && guard++ < 1000) {
+        for (const i of order) {
+          if (diff === 0) break;
+          const step = diff > 0 ? 1 : -1;
+          if (widths[i] + step >= minArr[i]) { widths[i] += step; diff -= step; }
+        }
+      }
+    }
+    return { widths, tableW: containerW, overflow: false };
+  },
+
+  /**
+   * 应用弹性列宽到表格
+   */
+  _applyFlexWidths(table, tableKey, getColField) {
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    if (!ths.length) return false;
+    const scrollParent = this._findScrollParent(table) || table.parentElement;
+    const host = scrollParent || table.parentElement;
+    if (!host) return false;
+    const containerW = (host.clientWidth || table.offsetWidth) - 2;
+    if (!(containerW > 0)) return false;
+
+    const fields = ths.map(th => (getColField(th) || '').trim());
+
+    // ① 无 flex 记忆 → 从当前渲染宽度推导基线权重（并尝试迁移旧 px）
+    let needInit = !TablePrefs.hasAnyColFlex(tableKey);
+    if (needInit && !TablePrefs.isFlexMigrated(tableKey)) {
+      TablePrefs.migrateWidthsToFlex(tableKey, fields);
+    }
+    if (!TablePrefs.hasAnyColFlex(tableKey)) {
+      const base = ths.map(th => {
+        const inline = parseFloat(th.style.width);
+        return (!isNaN(inline) && inline > 0) ? inline : (th.offsetWidth > 0 ? th.offsetWidth : 100);
+      });
+      const bTotal = base.reduce((a, b) => a + b, 0) || 1;
+      // 归一化到「Σflex = 列数」，使 flex=1 表示平均宽度
+      ths.forEach((th, i) => {
+        const f = fields[i];
+        if (f) TablePrefs.setColFlex(tableKey, f, Math.round(base[i] / bTotal * ths.length * 1000) / 1000);
+      });
+    }
+
+    // ② 读取权重与下限
+    const flexArr = ths.map((th, i) => {
+      const f = fields[i];
+      const v = f ? TablePrefs.getColFlex(tableKey, f) : null;
+      return (typeof v === 'number' && v > 0) ? v : 1;
+    });
+    const minArr = ths.map((th, i) => this._resolveMinWidth(th, tableKey, fields[i]));
+
+    // ③ 两趟分配
+    const { widths, tableW, overflow } = this._computeFlexWidths(ths, flexArr, minArr, containerW);
+
+    // ④ 施加
+    if (getComputedStyle(table).tableLayout !== 'fixed') table.style.tableLayout = 'fixed';
+    ths.forEach((th, i) => {
+      th.style.width = widths[i] + 'px';
+      th.style.minWidth = widths[i] + 'px';
+    });
+    table.style.width = tableW + 'px';
+    table.style.minWidth = tableW + 'px';
+    table.dataset.flexApplied = '1';
+    table.dataset.flexOverflow = overflow ? '1' : '0';
+    return true;
+  },
+
+  /**
+   * 把用户拖出的像素宽度换算回 flex 权重并持久化。
+   * 思路：Σflex 保持为「列数」不变，被拖列的新权重按其在容器中的占比重新计算，
+   * 其余列按原比例瓜分剩下的权重（保证 Σflex 恒定，避免整体缩放）。
+   */
+  _saveFlexFromPixels(tableKey, ths, fields, draggedTh, draggedPx, containerW) {
+    const n = ths.length;
+    if (!(containerW > 0) || n === 0) return;
+    const di = ths.indexOf(draggedTh);
+    if (di < 0) return;
+
+    const curFlex = fields.map(f => (f ? TablePrefs.getColFlex(tableKey, f) : null));
+    const base = curFlex.map((v, i) => (typeof v === 'number' && v > 0) ? v : 1);
+    const baseSum = base.reduce((a, b) => a + b, 0) || 1;
+
+    // 被拖列：按像素占容器的比例 → 换算成权重（Σflex = n 的基准下）
+    const newFlexDragged = Math.max(0.15, draggedPx / containerW * n);
+    // 其余列：按原比例瓜分 (n - newFlexDragged)
+    const restFlex = Math.max(0.1, n - newFlexDragged);
+    const restBase = baseSum - base[di];
+    fields.forEach((f, i) => {
+      if (!f) return;
+      if (i === di) { TablePrefs.setColFlex(tableKey, f, newFlexDragged); return; }
+      const share = restBase > 0 ? base[i] / restBase : 1 / Math.max(1, n - 1);
+      TablePrefs.setColFlex(tableKey, f, Math.max(0.1, restFlex * share));
+    });
+  },
+
+  /** ResizeObserver 注册表：避免同一容器重复挂 */
+  __flexObservers: null,
+
+  /**
+   * 监听容器宽度变化并重分配列宽。
+   * 用 ResizeObserver 而非 window.resize —— 侧边栏折叠、纵向滚动条出现/消失
+   * 都会改变可用宽度，但不一定触发 window 级事件。
+   */
+  _observeFlexResize(table, tableKey, getColField) {
+    if (typeof ResizeObserver === 'undefined') return;
+    const host = this._findScrollParent(table) || table.parentElement;
+    if (!host) return;
+    this.__flexObservers = this.__flexObservers || new WeakMap();
+
+    const reapply = () => {
+      if (!table.isConnected) { this._unobserveFlexResize(table); return; }
+      if (window.innerWidth <= 768) return;          // 移动端走原有折叠逻辑
+      try { this._applyFlexWidths(table, tableKey, getColField); } catch (e) { /* 忽略 */ }
+    };
+
+    let t = null;
+    const debounced = () => { clearTimeout(t); t = setTimeout(reapply, 80); };
+
+    let ro = this.__flexObservers.get(host);
+    if (!ro) {
+      ro = new ResizeObserver(debounced);
+      this.__flexObservers.set(host, ro);
+    }
+    // 同一 host 下可能有多个表，用 Set 记录回调
+    if (!host.__flexTables) host.__flexTables = new Set();
+    host.__flexTables.add(table);
+    try { ro.observe(host); } catch (e) { /* 忽略 */ }
+
+    if (!this.__flexResizeBound) {
+      this.__flexResizeBound = true;
+      window.addEventListener('resize', () => {
+        clearTimeout(this.__flexWinT);
+        this.__flexWinT = setTimeout(() => {
+          document.querySelectorAll('.data-table[data-flex-applied="1"]').forEach(tb => {
+            const key = tb.dataset.tableKey || tb.closest('[data-table-key]')?.dataset.tableKey;
+            if (!key || window.innerWidth <= 768) return;
+            try { this._applyFlexWidths(tb, key, (th) => {
+              const l = th.querySelector('.th-sort-label');
+              return ((l ? l.textContent : th.textContent) || '').trim();
+            }); } catch (e) { /* 忽略 */ }
+          });
+        }, 100);
+      }, { passive: true });
+    }
+  },
+
+  _unobserveFlexResize(table) {
+    const host = this._findScrollParent(table) || table.parentElement;
+    if (host && host.__flexTables) host.__flexTables.delete(table);
   },
 
   _applyPcConstraints(table, tableKey) {
@@ -1453,7 +1794,20 @@ const TableUtils = {
           if (tableKey) {
             const field = getColField(th);
             const finalW = parseFloat(th.style.width || th.style.minWidth || th.offsetWidth);
-            if (field && !isNaN(finalW)) TablePrefs.setColWidth(tableKey, field, finalW);
+            if (field && !isNaN(finalW)) {
+              TablePrefs.setColWidth(tableKey, field, finalW);   // 保留旧字段，便于回退
+              // 🟢 v228.26：弹性体系下额外把"拖出的像素"换算成权重存起来，
+              // 这样换个分辨率/换台机器，用户调过的列间比例依然保持。
+              if (this._useFlex(table, tableKey)) {
+                const ths2 = Array.from(table.querySelectorAll('thead th'));
+                const fields2 = ths2.map(t => {
+                  const l = t.querySelector('.th-sort-label');
+                  return ((l ? l.textContent : t.textContent) || '').trim();
+                });
+                this._saveFlexFromPixels(tableKey, ths2, fields2, th, finalW,
+                  (scrollParent ? scrollParent.clientWidth : table.offsetWidth) - 2);
+              }
+            }
           }
         };
         document.body.classList.add('col-resizing');
@@ -1808,14 +2162,33 @@ const TableUtils = {
   },
 
 
+  // 🟢 v228.25 健壮性加固：安全写入 innerHTML。
+  //   背景：全站 12+ 模块存在 `document.getElementById('xxx').innerHTML = ...` 直赋值写法。
+  //   用户快速切模块 / 切主题时，渲染是异步的，await 回来时 DOM 已被新模块替换，
+  //   getElementById 返回 null → 抛 "Cannot set properties of null (setting 'innerHTML')"
+  //   并被上层 catch 成整页「加载出错」。stock.js 曾有此崩溃（v228.24 单独修过），
+  //   本函数把该防护沉淀为通用能力，避免同类问题在其余模块重复出现。
+  //   用法：TableUtils.setHtml('trackSummary', html) —— 元素不存在时静默跳过。
+  setHtml(id, html) {
+    const el = (typeof id === 'string') ? document.getElementById(id) : id;
+    if (!el) return null;
+    el.innerHTML = html;
+    return el;
+  },
+
   // 实体可点击链接（打通模块关联）：点击跳转 App.openEntity(type, key)
   // 文字原样显示，仅 hover 出现下划线；onmousedown 阻止冒泡，避免触发智能选区
+  // 🟢 v228.25 W-4：统一详情入口形态。同一「查看详情」动作此前有三套呈现
+  //   （供应商=详情按钮、合同价格=文字按钮、现存量/订单/低周转=实体链接），
+  //   视觉权重/尺寸/位置不一致，用户跨模块无法形成稳定预期。
+  //   现统一为「🔍 图标 + 文案」的次级入口：链接形态加 🔍 前缀图标；
+  //   按钮形态（供应商/合同价格）由 .btn-detail 类统一；两者共用 .detail-entry 命中区规格。
   link(type, label, key) {
     const t = escAttr(type ?? '');
     const k = escAttr(key ?? '');
     const text = esc(label ?? '');
     const typeName = ({ order: '订单', supplier: '供应商', stock: '存货' })[type] || '存货';
-    return `<a class="entity-link" href="javascript:void(0)" title="查看${typeName}档案" onclick="App.openEntity('${t}','${k}')" onmousedown="event.stopPropagation()">${text}</a>`;
+    return `<a class="entity-link detail-entry" href="javascript:void(0)" title="查看${typeName}档案" aria-label="查看${typeName} ${text} 档案" onclick="App.openEntity('${t}','${k}')" onmousedown="event.stopPropagation()"><span class="de-icon" aria-hidden="true">🔍</span>${text}</a>`;
   },
 
   // 🟢 v228.08 性能优化 P1-5：通用防抖（debounce）。

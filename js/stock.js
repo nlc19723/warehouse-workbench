@@ -57,7 +57,11 @@ const StockModule = {
     const updateTime = stocks.length > 0 ? stocks[0].数据更新时间 : '';
 
     if (rt !== undefined && rt !== App._goToken) return;
-    document.getElementById('stockSummary').innerHTML = `
+    // 🟢 v228.24：加空值守卫——切换主题/快速切模块时，loadData 可能在 DOM 节点被替换后仍执行，
+    //   原直接 .innerHTML 会抛「Cannot set properties of null」并渲染成整页错误态（PRE-EXISTING 竞态）。
+    const summaryEl = document.getElementById('stockSummary');
+    if (summaryEl) {
+      summaryEl.innerHTML = `
       <div class="kpi-grid">
         <div class="kpi-card card-info">
           <div class="kpi-label">物料种类</div>
@@ -69,6 +73,7 @@ const StockModule = {
         </div>
       </div>
     `;
+    }
 
     this.currentData = stocks;
     this.renderTable(rt);
@@ -86,9 +91,11 @@ const StockModule = {
     const items = data.slice((page - 1) * pageSize, page * pageSize);
 
     const area = document.getElementById('stockTableArea');
+    if (!area) return;   // 🟢 v228.24：节点已被替换/卸载时安全退出，避免 null.innerHTML 抛错
+    const pagerEl = () => document.getElementById('stockPagination');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无库存数据</div></div>';
-      document.getElementById('stockPagination').innerHTML = '';
+      const pg = pagerEl(); if (pg) pg.innerHTML = '';
       return;
     }
 

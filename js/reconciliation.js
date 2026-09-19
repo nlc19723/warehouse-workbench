@@ -167,7 +167,8 @@ const ReconciliationModule = {
     const supplierList = Object.entries(summary).sort((a, b) => b[1].amount - a[1].amount);
 
     if (rt !== undefined && rt !== App._goToken) return;
-    document.getElementById('recSummary').innerHTML = `
+    if (rt !== undefined && rt !== App._goToken) return;
+    TableUtils.setHtml('recSummary', `
       <div class="chart-stats-row" style="margin-bottom:14px;">
         <!-- 左侧：按供应商汇总 (2/3) -->
         <div class="glass-card" style="flex:0 0 58%;min-width:320px;margin-bottom:0;">
@@ -199,7 +200,7 @@ const ReconciliationModule = {
       </div>
 
       ${supplierList.length > 0 ? '' : '<div class="empty-state" style="margin-bottom:14px;"><div class="empty-text">暂无对账数据</div></div>'}
-    `;
+    `);
 
     this.currentData = inbound;
     this.renderTable(rt);
@@ -219,9 +220,10 @@ const ReconciliationModule = {
     const items = data.slice((page - 1) * pageSize, page * pageSize);
 
     const area = document.getElementById('recTableArea');
+    if (!area) return;   // 🟢 v228.25 健壮性：await 后 DOM 可能已被新模块替换
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无对账数据</div></div>';
-      document.getElementById('recPagination').innerHTML = '';
+      TableUtils.setHtml('recPagination', '');
       return;
     }
 

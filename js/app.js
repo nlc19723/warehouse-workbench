@@ -30,7 +30,6 @@ const App = {
     outboundList: { title: '中心出库列表', instance: OutboundListModule },
     // 扫码盘点（v215 新增 · 脚本先于 app.js 加载，引用安全）
     stocktake: { title: '盘点', instance: StocktakeModule },
-    stocktakeBatch: { title: '盘点批次汇总', instance: StocktakeBatchModule },
     stocktakeRecord: { title: '盘点记录列表', instance: StocktakeRecordModule },
     // 实体 360 档案（仅作链接跳转目标，不在侧边栏出现）
     'stock-detail': { title: '存货档案', instance: StockDetailModule },
@@ -46,6 +45,7 @@ const App = {
     }
 
     this.bindSidebarToggle();
+    this.initFooterGroup();   // 🟢 v228.28：底部「更多 / 设置」折叠分组
     this.bindSidebarNav();
     this.bindMobileTabbar();   // 🟢 v227.33：移动端底部 Tab（查询 / 盘点）
     this.bindHamburger();
@@ -100,12 +100,32 @@ const App = {
     if (typeof DataStore !== 'undefined') {
       try {
         // 🟢 v227.96：已连云端 → 进入即自动同步最新「工作/设置/盘点」三包（静默、时间戳门控，不弹确认）
+        //
+        // 🔴 v228.62（真机实测：启动白等 19 秒的元凶，务必保持"后台化"）：
+        //   旧版这里对 autoSyncFromCloud / pullCloudRecords 都是 `await`。
+        //   实测（18.4MB 工作包）：
+        //       DL.autoSyncFromCloud START      t=400ms
+        //         pullDataPrivate（下载）        t=400→1658ms   ← 只占 1.26s
+        //       DL.autoSyncFromCloud END        t=19620ms      ← 总计 19.2s！
+        //   即 17.9s 全部花在下载之后的 loadBundleFromCloud()（把 18.4MB 还原进 IndexedDB），
+        //   而它被 await 卡在 App.init() 的主链上 → **用户要白等约 19 秒才看到界面**，
+        //   15s 看门狗先触发，还会打出"启动加载超过 15s"的告警。
+        //   更糟的是它拉完一次后，DataLoader.init()（t=20102ms）又拉了一次同一份 31.7MB
+        //   data.json —— 一次启动两份全量包，这正是用户反馈"同步速度有点慢"的直接来源。
+        //
+        //   修法：把这两个"静默后台同步"真正后台化（不 await）。
+        //     ① 它们本来就是**后台静默**语义（注释原文："静默、时间戳门控，不弹确认"），
+        //        阻塞启动没有任何收益；
+        //     ② 数据是否替换由各自内部的时间戳门控 + 完整性校验决定，与"何时开始"无关；
+        //     ③ DataLoader.init() 在下方紧接着执行，它自带「本地已完整→立即显示，后台再同步」
+        //        的完整策略，云端覆盖这一职责本就由它承担，此处只是提前预热缓存、加速它。
+        //   ⚠️ 顺序不变、门控不变、失败处理不变，只去掉「阻塞」。
         if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
           if (typeof DataLoader !== 'undefined' && typeof DataLoader.autoSyncFromCloud === 'function') {
-            await DataLoader.autoSyncFromCloud().catch(e => console.warn('[autoSync] 失败(已忽略):', e && e.message));
+            DataLoader.autoSyncFromCloud().catch(e => console.warn('[autoSync] 失败(已忽略):', e && e.message));
           }
           if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.pullCloudRecords === 'function') {
-            await StocktakeModule.pullCloudRecords().catch(e => console.warn('[stocktake] 自动同步失败(已忽略):', e && e.message));
+            StocktakeModule.pullCloudRecords().catch(e => console.warn('[stocktake] 自动同步失败(已忽略):', e && e.message));
           }
         }
         await DataStore.migrateSearchHistoryToCloud();
@@ -119,10 +139,35 @@ const App = {
       const imported = await DataLoader.init();
       if (imported) {
         hideLoading(); // 先关闭加载遮罩，再渲染模块
-        this.go('dashboard');
+        // 🟢 v228.49-fix4（回归套件 v22845 的 C-8 偶发失败抓到，跨端走查同源）：
+        //   数据导入完成**也不得**抢走用户已打开的界面。
+        //   缺陷链：DataLoader.init() 是异步的（云端拉取 / Excel 解析，弱网下可达 10s+）。
+        //   若用户在等待期间已从侧边栏进入盘点等模块，init 一返回就无条件 go('dashboard')，
+        //   把用户正在用的界面整块抹成仪表盘 —— 表现为「盘点界面自己消失了 / 一连就白屏」。
+        //   与下方 false 分支同源，v228.45 只修了兜底分支，此处漏了同一处判定。
+        //   修复：用户已离开起始页 → **不跳** dashboard，改为原地重渲当前模块
+        //   （数据刚到，界面需要它；盘点草稿在 localStorage，重渲不丢录入）。
+        const bootNavAway = !!(this.currentModule && this.currentModule !== 'dashboard');
+        if (bootNavAway) {
+          console.warn('[app] 启动数据导入完成，但用户已进入「' + this.currentModule +
+                       '」模块 —— 保留当前界面并原地重渲（不抢跳仪表盘）');
+          try { this.go(this.currentModule); } catch (e) { /* 重渲失败也不抢跳 */ }
+        } else {
+          this.go('dashboard');
+        }
       } else {
-        // 🟢 v227.36：未登录优先显示「请先登录」占位页（模块已按权限隐藏）；已登录但无数据才显示空状态引导
-        if (typeof AppConfig !== 'undefined' && AppConfig.isLoggedIn && !AppConfig.isLoggedIn()) {
+        // 🟢 v228.45 修复（跨端走查发现）：启动期「空状态」不得覆盖用户已经打开的界面。
+        //   缺陷链：弱网/冷启动下 DataLoader 看门狗 15s 触发 → _doInit 返回 false →
+        //   这里无脑 showEmptyState() 清空 contentArea。若用户在等待期间已从侧边栏进入
+        //   盘点等模块（本次走查中 PC 端季度 picker 已渲染完成），界面会被整块抹成
+        //   「欢迎使用库管工作台」，表现为「盘点界面自己消失了 / 另一端一连就白屏」。
+        //   修复：只有在确认用户尚未离开起始页时才渲染空状态/未登录占位页。
+        //   判定依据 —— currentModule 仍停留在 dashboard（初始值）或为空。
+        const userNavigatedAway = !!(this.currentModule && this.currentModule !== 'dashboard');
+        if (userNavigatedAway) {
+          console.warn('[app] 启动兜底阶段用户已进入「' + this.currentModule + '」模块，保留当前界面不覆盖');
+        } else if (typeof AppConfig !== 'undefined' && AppConfig.isLoggedIn && !AppConfig.isLoggedIn()) {
+          // 🟢 v227.36：未登录优先显示「请先登录」占位页（模块已按权限隐藏）；已登录但无数据才显示空状态引导
           this.showNotLoggedInState();
         } else {
           this.showEmptyState();
@@ -132,7 +177,9 @@ const App = {
       // 防御：初始化任何意外异常都不能导致整页永久空白且无提示
       console.error('应用初始化失败:', err);
       hideLoading();
-      try { this.go('dashboard'); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
+      // 🟢 v228.49-fix4：异常兜底同样不得把用户从已打开的模块踢回仪表盘
+      const errNavAway = !!(this.currentModule && this.currentModule !== 'dashboard');
+      try { this.go(errNavAway ? this.currentModule : 'dashboard'); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
       WBModal.alert('初始化出现异常，已尝试继续加载；如仍空白请刷新重试。\n' + (err && err.message ? err.message : err));
     }
   },
@@ -142,6 +189,12 @@ const App = {
     hideLoading();
     const area = document.getElementById('contentArea');
     if (!area) return;
+    // 🟢 v228.45：最后一道防线 —— 若用户已经进了别的模块，直接放弃这次覆盖。
+    //   调用方（App.init 兜底分支）已做判定，这里再兜一次，避免其它路径误调。
+    if (this.currentModule && this.currentModule !== 'dashboard') {
+      console.warn('[app] showEmptyState 被跳过：当前已在「' + this.currentModule + '」模块');
+      return;
+    }
     this.currentModule = 'dashboard';
     document.querySelectorAll('.sidebar-item[data-module]').forEach(item => {
       item.classList.toggle('active', item.getAttribute('data-module') === 'dashboard');
@@ -279,6 +332,26 @@ const App = {
       localStorage.setItem('sidebarCollapsed', this.sidebarCollapsed ? '1' : '0');
       // 更新 tooltip
       this.updateSidebarTooltips();
+    });
+  },
+
+  // 🟢 v228.28：底部「更多 / 设置」折叠分组——默认收起，点击头部展开；展开状态记忆
+  initFooterGroup() {
+    const group = document.getElementById('sidebarFooterGroup');
+    const toggle = document.getElementById('sidebarFooterToggle');
+    if (!group || !toggle) return;
+    const KEY = 'sidebarFooterOpen';
+    if (localStorage.getItem(KEY) === '1') group.classList.add('open');
+    const sync = () => toggle.setAttribute('aria-expanded', group.classList.contains('open') ? 'true' : 'false');
+    sync();
+    const flip = () => {
+      const open = group.classList.toggle('open');
+      try { localStorage.setItem(KEY, open ? '1' : '0'); } catch (e) { /* 忽略存储失败 */ }
+      sync();
+    };
+    toggle.addEventListener('click', flip);
+    toggle.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); }
     });
   },
 
@@ -709,6 +782,11 @@ const App = {
           <input type="password" id="admSbKey" value="${typeof escAttr === 'function' ? escAttr(eff.key || '') : (eff.key || '')}" style="width:100%;height:34px;border:1px solid var(--border-color);border-radius:8px;padding:0 10px;font-size:13px;margin-bottom:8px;">
           <button onclick="App._saveSupabaseOverride()" class="btn--primary" style="width:100%;">保存云端凭证（自动下发给所有 keeper 设备）</button>
         </div>
+        ${(typeof SyncManager !== 'undefined' && typeof SyncManager.isBucketMissing === 'function' && SyncManager.isBucketMissing()) ? `
+        <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:#b91c1c;line-height:1.6;">
+          ⚠️ <b>云端存储桶缺失</b>：Supabase 项目里没有 <b>workbench-data</b> 存储桶，云端同步（账号下发 / 盘点同步 / 数据包）整体不可用。<br>
+          修复：登录 Supabase 控制台 → Storage → New bucket → 名称 <b>workbench-data</b>、勾选 <b>Public bucket</b>。重建后刷新本页；任何还有账号的设备会自动把账号补备份回云端。
+        </div>` : ''}
 
         <div style="margin-bottom:10px;">
           <h4 style="font-size:14px;color:var(--text-main);margin-bottom:10px;">👥 库管员账号</h4>
@@ -723,11 +801,23 @@ const App = {
     const dialog = document.getElementById('panelDialog');
     if (overlay) overlay.classList.add('show');
     if (dialog) dialog.classList.add('show');
+    // 🟢 v228.55：记录云端拉取状态（pending/offline/fail/empty/ok），空账号时给出对应恢复指引
+    this._keeperCloudPullState = 'pending';
     this.renderKeeperList();
     // 🟢 v228.07：打开权限面板时主动拉取云端最新库管员账号并刷新列表，
     //   兜底「启动自动连接尚未完成 / 本机本地为空」的情况，确保管理员一定看到云端已配置的账号。
     if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof AppConfig !== 'undefined' && typeof AppConfig.pullKeepersFromCloud === 'function') {
-      AppConfig.pullKeepersFromCloud().then(() => this.renderKeeperList()).catch(e => console.warn('[keepers] 面板拉取失败(已忽略):', e && e.message));
+      AppConfig.pullKeepersFromCloud().then(st => {
+        this._keeperCloudPullState = st || 'fail';
+        this.renderKeeperList();
+      }).catch(e => {
+        this._keeperCloudPullState = 'fail';
+        console.warn('[keepers] 面板拉取失败(已忽略):', e && e.message);
+        this.renderKeeperList();
+      });
+    } else {
+      this._keeperCloudPullState = 'offline';
+      this.renderKeeperList();
     }
   },
 
@@ -1232,7 +1322,25 @@ const App = {
     if (!el) return;
     if (typeof AppConfig === 'undefined' || !AppConfig.getKeepers) { el.innerHTML = ''; return; }
     const list = AppConfig.getKeepers();
-    if (!list.length) { el.innerHTML = '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">暂无账号，请在下方新增。</div>'; return; }
+    if (!list.length) {
+      // 🟢 v228.55：空账号不再静默 —— 按云端拉取状态给出恢复指引
+      //   （真机事件：Supabase 项目被暂停/删除后域名解析失败，云端不可达，
+      //     而账号真相源在各设备本机 localStorage，跨设备全靠云端同步 → 新设备/清过
+      //     浏览器数据的设备会显示"暂无账号"，旧版不说明原因，管理员误以为账号被删。）
+      const st = this._keeperCloudPullState || '';
+      let hint;
+      if (st === 'pending') hint = '正在从云端拉取账号…';
+      else if (st === 'fail') hint = '⚠️ 本机账号列表为空，且云端拉取失败（云端 Supabase 项目不可达，常见原因：项目被暂停/删除后域名无法解析）。'
+        + '请登录 supabase.com 控制台检查该项目状态并 Restore；云端恢复后重新打开本面板，账号会自动从云端拉回。';
+      else if (st === 'offline') hint = '本机账号列表为空，且当前未连接云端，无法自动恢复账号。'
+        + '请先在上方确认云端凭证并保存连接；恢复连接后重新打开本面板会自动拉取。'
+        + '（账号真相源在各设备本机，跨设备依赖云端同步——找一台还留有账号的设备打开应用，账号会自动上云并分发到所有设备。）';
+      else if (st === 'empty') hint = '本机账号列表为空，云端也没有账号数据。'
+        + '可能云端项目已重建/清空——找一台还留有账号的设备打开应用并连接云端，账号会自动重新上云。';
+      else hint = '暂无账号，请在下方新增。';
+      el.innerHTML = '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;line-height:1.6;">' + hint + '</div>';
+      return;
+    }
     el.innerHTML = list.map(k => {
       const disabled = k.disabled ? '（已禁用）' : '';
       const style = k.disabled ? 'opacity:.55;' : '';
@@ -1450,6 +1558,12 @@ const App = {
         const allowed = AppConfig.canAccessEntry(name, key);
         el.style.display = allowed ? '' : 'none';
       });
+      // 🟢 v228.28：分组内 4 个入口全部无权限时，隐藏整个「更多 / 设置」分组，避免空壳
+      const group = document.getElementById('sidebarFooterGroup');
+      if (group) {
+        const allHidden = Array.from(items).every(function (el) { return el.style.display === 'none'; });
+        group.style.display = allHidden ? 'none' : '';
+      }
     } catch (e) {}
   },
 
@@ -1538,7 +1652,7 @@ const App = {
     if (!this.modules[moduleName]) return;
     const meta = this.modules[moduleName];
     document.getElementById('panelTitle').textContent = meta.title;
-    document.getElementById('panelBody').innerHTML = '<div class="loading-spinner" style="margin:60px auto;"></div>';
+    TableUtils.setHtml('panelBody', '<div class="loading-spinner" style="margin:60px auto;"></div>');
     document.getElementById('panelOverlay').classList.add('show');
     document.getElementById('panelDialog').classList.add('show');
     this.closeSearchPanel();
@@ -1638,7 +1752,30 @@ const App = {
     area.querySelectorAll(sel).forEach(el => {
       if (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')) return;
       const t = (el.getAttribute('title') || '').trim();
-      if (t) el.setAttribute('aria-label', t);
+      if (t) { el.setAttribute('aria-label', t); return; }
+      // 🟢 v228.25 W-6：兜底 —— 上轮仅对「带 title」的控件回填，导致 12 个筛选下拉
+      // （supplierType/alertCategory/pricingSupplier/trackSupplier 等）因无 title 而漏网，
+      // 读屏用户在这些模块的筛选区失去语义。此处对无 title 的 select 依据自身结构生成名称：
+      //   ① 能定位到所属 .fb-field 分组 → 取该组的 label 文案
+      //   ② 退而取第一个 option 的文案（通常是全部/不限等占位）
+      if (el.tagName === 'SELECT') {
+        let name = '';
+        const field = el.closest('.fb-field, .filter-field, .filter-group, .form-field');
+        if (field) {
+          const lb = field.querySelector('label, .fb-label, .field-label');
+          if (lb && lb.textContent.trim()) name = lb.textContent.trim();
+        }
+        if (!name) {
+          const first = el.querySelector('option');
+          if (first && first.textContent.trim()) name = first.textContent.trim();
+        }
+        const tip = (el.getAttribute('data-filter-name') || '').trim();
+        if (name) el.setAttribute('aria-label', (tip ? tip : '筛选：' + name));
+      } else {
+        // 非 select 的文本/数字录入框：用 placeholder 兜底（placeholder 不算可访问名称的唯一来源）
+        const ph = (el.getAttribute('placeholder') || '').trim();
+        if (ph) el.setAttribute('aria-label', ph);
+      }
     });
   },
 

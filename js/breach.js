@@ -49,7 +49,7 @@ const BreachModule = {
     const companySet = new Set(records.map(r => r.公司名称).filter(Boolean));
 
     if (rt !== undefined && rt !== App._goToken) return;
-    document.getElementById('breachStats').innerHTML = `
+    TableUtils.setHtml('breachStats', `
       <div class="kpi-card card-danger">
         <div class="kpi-label">违约记录数</div>
         <div class="kpi-value">${records.length}</div>
@@ -66,9 +66,9 @@ const BreachModule = {
         <div class="kpi-label">扣款总额</div>
         <div class="kpi-value">¥${TableUtils.formatMoney(totalAmount)}</div>
       </div>
-    `;
+    `);
 
-    document.getElementById('breachRulesBox').innerHTML = `
+    TableUtils.setHtml('breachRulesBox', `
       <div class="glass-card" style="margin-bottom:0;">
         <div class="glass-card-header">
           <span class="glass-card-title"><span class="title-icon">📋</span>违约扣款规则</span>
@@ -86,7 +86,7 @@ const BreachModule = {
           </tbody>
         </table>
       </div>
-    `;
+    `);
 
     // 计算违约次数（按公司名称聚合的违约记录数）
     const companyCountMap = new Map();

@@ -143,7 +143,7 @@ const SupplierModule = {
     const area = document.getElementById('supplierTableArea');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无供应商数据</div></div>';
-      document.getElementById('supplierPagination').innerHTML = '';
+      TableUtils.setHtml('supplierPagination', '');
       return;
     }
 
@@ -195,7 +195,7 @@ const SupplierModule = {
                     </div>
                   </td>
                   <td>${esc(s.招采部门 ?? '')}</td>
-                  <td><button onclick="SupplierModule.viewDetail(${JSON.stringify(s.id)})" style="border:none;background:var(--accent-mint-light);color:var(--primary-deep);cursor:pointer;border-radius:8px;padding:4px 12px;font-size:12px;">详情</button></td>
+                  <td><button class="btn-detail" onclick="SupplierModule.viewDetail(${JSON.stringify(s.id)})" aria-label="查看供应商 ${escAttr(s.供应商 ?? '')} 详情" title="查看${escAttr(s.供应商 ?? '')}的合同与入库详情">🔍 详情</button></td>
                 </tr>
               `;
             }).join('')}
@@ -222,7 +222,7 @@ const SupplierModule = {
       else safe++;
     });
 
-    document.getElementById('contractStatsArea').innerHTML = `
+    TableUtils.setHtml('contractStatsArea', `
       <div class="contract-stats">
         <div class="contract-stat-item csw">
           <div class="cs-label">即将到期(&lt;30天)</div>
@@ -241,7 +241,7 @@ const SupplierModule = {
           <div class="cs-num">${expired}</div>
         </div>
       </div>
-    `;
+    `);
   },
 
   renderPagination(total, totalPages) {
@@ -310,7 +310,7 @@ const SupplierModule = {
     const trendData = this._calcTrendData(allOrders, allInbound);
 
     document.getElementById('modalTitle').textContent = supplier.供应商;
-    document.getElementById('modalBody').innerHTML = `
+    TableUtils.setHtml('modalBody', `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
         <div><strong>类型:</strong> ${esc(supplier.类型 ?? '')}</div>
         <div><strong>招采部门:</strong> ${esc(supplier.招采部门 ?? '')}</div>
@@ -362,7 +362,7 @@ const SupplierModule = {
           `).join('')}</tbody>
         </table>
       `}
-    `;
+    `);
     document.getElementById('modalOverlay').classList.add('show');
 
     // 渲染趋势图

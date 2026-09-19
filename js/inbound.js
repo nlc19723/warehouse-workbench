@@ -185,7 +185,7 @@ const InboundModule = {
     const area = document.getElementById('inboundTableArea');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无入库数据</div></div>';
-      document.getElementById('inboundPagination').innerHTML = '';
+      TableUtils.setHtml('inboundPagination', '');
       return;
     }
 

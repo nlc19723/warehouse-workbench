@@ -76,7 +76,7 @@ const OrderTrackModule = {
     const totalUninboundAmount = TableUtils.sumMoney(pending, '未入总金额'); // 🟢 AUDIT-003 整数分聚合
 
     if (rt !== undefined && rt !== App._goToken) return;
-    document.getElementById('trackSummary').innerHTML = `
+    TableUtils.setHtml('trackSummary', `
       <div class="kpi-grid">
         <div class="kpi-card card-warning">
           <div class="kpi-label">未入库订单数</div>
@@ -92,7 +92,7 @@ const OrderTrackModule = {
           <div class="kpi-value">¥${TableUtils.formatMoney(totalUninboundAmount)}</div>
         </div>
       </div>
-    `;
+    `);
 
     this.currentData = pending;
 
@@ -136,13 +136,13 @@ const OrderTrackModule = {
     const items = data.slice((page - 1) * pageSize, page * pageSize);
 
     if (items.length === 0) {
-      document.getElementById('trackTableArea').innerHTML = '<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-text">所有订单已全部入库</div></div>';
-      document.getElementById('trackPagination').innerHTML = '';
+      TableUtils.setHtml('trackTableArea', '<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-text">所有订单已全部入库</div></div>');
+      TableUtils.setHtml('trackPagination', '');
       return;
     }
 
-    document.getElementById('trackTableArea').innerHTML = `
-      <table class="data-table">
+    TableUtils.setHtml('trackTableArea', `
+      <table class="data-table" data-table-key="orderTrack">
         <thead>
           <tr>
             <th>订单编号</th>
@@ -194,7 +194,7 @@ const OrderTrackModule = {
           }).join('')}
         </tbody>
       </table>
-    `;
+    `);
 
     // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
     TableUtils.renderPagination('trackPagination', { module: 'OrderTrackModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });

@@ -310,6 +310,8 @@
       const wrap = document.createElement('div');
       const msg = document.createElement('div');
       msg.textContent = message;
+      // 🟢 v228.37：支持多行说明（textContent 不解析 \n，需显式 pre-wrap）
+      msg.style.whiteSpace = 'pre-wrap';
       msg.style.marginBottom = '10px';
       const input = document.createElement('input');
       input.type = opts.type || 'text';
@@ -410,6 +412,24 @@
     t.addEventListener('click', dismiss);
     setTimeout(dismiss, ms);
   }
+
+  /**
+   * 🟢 v228.65：全局轻提示 showToast —— **不弹窗**。
+   *
+   *   为什么现在才补：全站多处都按「存在」的写法调用它 ——
+   *     `if (typeof showToast === 'function') showToast(msg); else WBModal.alert(msg);`
+   *   但这个函数**从未被定义**，于是每一次 toast 都掉进 else 分支，变成需要手动点掉的
+   *   模态弹窗。季度盘点里「正在读取云端…」「已清场」「本轮已结束」等本该一闪而过的提示
+   *   全是弹窗，这正是用户反馈「弹窗太多、点两次麻烦」的隐藏放大器。
+   *
+   *   实现：复用上面已有的 notify（右下角吐司、自动消失、点击可提前关），不新增 UI 范式。
+   *   兜底：notify 也失败时才退回 alert —— 宁可弹窗，也不能让消息静默丢失。
+   */
+  function showToast(message, type, ms) {
+    try { notify(message, type || 'info', ms || 2800); return; } catch (e) { /* 落到兜底 */ }
+    try { alert(String(message == null ? '' : message)); } catch (e) { /* 最后一道防线 */ }
+  }
+  window.showToast = showToast;
 
   window.WBModal = { alert, confirm, prompt, choice, choiceList, notify, close: () => closeDialog(null) };
 })();

@@ -8,6 +8,40 @@ const DB_NAME = 'WarehouseWorkbench';
 //    【切勿把这里改成 8】一旦改成 8，条件变为 version < 7，会把 v6 用户的库当作旧库删除 → 数据全丢。
 //    保持 7：v6/v7 用户的库一律走 Dexie 平滑升级（含 7→8 新增盘点表），数据完整保留。
 const DB_VERSION = 7;  // v7: 订单索引由死字段 存货编码（订单从不存该字段）改为真实持久化字段 存货编号（M5 洁癖）。Dexie 平滑升级、不丢数据
+// 🟢 v228.57：Dexie schema 声明的【最高】版本号（下方 db.version(N) 里最大的那个 N）。
+//   ⚠️ 重要：IndexedDB 原始 version 与 Dexie 声明版本【不是同一个刻度】！
+//      Dexie 3+ 为支持小数版本，会把声明版本号 ×10 后落盘 ——
+//      声明 db.version(9) → IndexedDB 里实际就是 version=90。
+//      所以判断"库版本过高"必须换算：indexedDBVersion / 10 > DEXIE_MAX_VERSION。
+//      （曾经踩坑：直接拿 90 和 9 比较 → 误判为"高版本坏库"→ 每次启动都删库重建 → 启动白等 8~20s。）
+const DEXIE_MAX_VERSION = 9;   // 对应 IndexedDB 原始 version = 90
+const IDB_VERSION_PER_DEXIE = 10;   // Dexie 版本号 → IndexedDB version 的倍率
+
+/**
+ * 🟢 v228.57：带超时 + 阻塞兜底的删库助手。
+ *   为什么需要：indexedDB.deleteDatabase 在「仍有其他连接占用」时只触发 blocked、
+ *   且 onsuccess 之后浏览器可能还需数秒才真正落盘 —— 裸 await 会让启动屏白等 20s+
+ *   （实测：删 v90 库时启动从 0.4s 静默到 21.5s，用户体感就是「一直初始化」）。
+ *   这里最多等 3s，超时即继续走 db.open()（Dexie 会按当前 schema 重建/升级）。
+ */
+function _deleteDBWithTimeout(name, ms) {
+  return new Promise((resolve) => {
+    var done = false;
+    const finish = (why) => {
+      if (done) return;
+      done = true;
+      if (why && why !== 'success') console.warn('[db] 删库结束(' + why + ')，继续启动');
+      resolve();
+    };
+    try {
+      const req = indexedDB.deleteDatabase(name);
+      req.onsuccess = () => { console.log('[db] 数据库已删除：' + name); finish('success'); };
+      req.onerror = () => finish('error');
+      req.onblocked = () => { console.warn('[db] 删库被其他连接阻塞（仍继续等待/超时后放行）'); };
+      setTimeout(() => finish('timeout'), ms || 3000);   // 硬超时，绝不让启动挂死
+    } catch (e) { finish('exception'); }
+  });
+}
 
 // 先删除旧版本数据库（v1/v2 有大量索引导致写入卡死）
 // 必须在 db.open() 之前完成，否则 Dexie 实例会绑定到旧版本
@@ -25,14 +59,21 @@ async function cleanOldDB() {
     const oldDB = dbs.find(d => d.name === DB_NAME);
     // 仅删除「当前版本的前一个版本及更早」的旧库（如 v1–v4）；
     // 当前版本(6)的前一版本(5)已完成日期时区修复且数据正确，走 Dexie 平滑升级、不清空。
-    if (oldDB && typeof oldDB.version === 'number' && oldDB.version > 0 && oldDB.version < DB_VERSION - 1) {
+    // 🟢 v228.57：库版本【高于】Dexie 声明最高版本 → Dexie.open() 会永久挂起，必须删库重建。
+    //   真机事故：库 version=90、Dexie 声明 9 → 启动屏卡在「正在准备数据库...」永不消失。
+    //   这种库无法被降级打开，也无法平滑升级，只能删除后按当前 schema 重建（云端/Excel 会重新垫数据）。
+    // 🟢 v228.57：换算后再比较 —— IndexedDB version 是 Dexie 版本 ×10（见上方常量说明）。
+    //   仅当「换算后的 Dexie 版本」真的高于代码声明最高版本时才算坏库（极少见），
+    //   正常库（如 IndexedDB 90 = Dexie 9）绝不删，避免每次启动白等删库 + 重建。
+    const dexieVerOfDB = oldDB && typeof oldDB.version === 'number' ? (oldDB.version / IDB_VERSION_PER_DEXIE) : 0;
+    const tooHigh = dexieVerOfDB > DEXIE_MAX_VERSION;
+    if (tooHigh) {
+      console.warn('[db] 检测到库版本（Dexie 刻度）v' + dexieVerOfDB + ' 高于代码声明 v' + DEXIE_MAX_VERSION +
+                   '（无法降级打开会被浏览器拒绝），正在删除重建...');
+      await _deleteDBWithTimeout(DB_NAME, 3000);
+    } else if (oldDB && typeof oldDB.version === 'number' && oldDB.version > 0 && oldDB.version < DB_VERSION - 1) {
       console.log('检测到旧版本数据库 v' + oldDB.version + '，正在清理（避免旧 schema 写入卡死）...');
-      await new Promise((resolve) => {
-        const req = indexedDB.deleteDatabase(DB_NAME);
-        req.onsuccess = () => { console.log('旧数据库已清理'); resolve(); };
-        req.onerror = () => resolve();
-        req.onblocked = () => { console.warn('数据库删除被阻塞，强制继续'); resolve(); };
-      });
+      await _deleteDBWithTimeout(DB_NAME, 3000);
     }
     // 当前版本 / 无版本信息 / 探测异常：保留本地数据，不删除
   } catch (e) {
@@ -322,6 +363,14 @@ const DataStore = {
   async restoreOutboundFromSettings() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     try {
+      // 🟢 v228.62：先确保「云端键集 + 整包缓存」就绪再读老键。
+      //   outbound_list 是【没有独立文件的老键】，值只在整包 settings.json 里；
+      //   v228.62 起 getSetting 对老键只读缓存、不再自行触发整包刷新（否则启动期
+      //   这里会连发一轮 19 请求）。预热是幂等的，正常情况 2.5s 前已由连接成功时排过，
+      //   这里只是把「读数据」和「预热」拉成确定的先后关系，避免竞态导致首次恢复空转。
+      if (typeof SyncManager._primeCloudKeySet === 'function') {
+        await SyncManager._primeCloudKeySet().catch(function () { return false; });
+      }
       const rows = await SyncManager.getSetting('outbound_list');
       if (Array.isArray(rows) && rows.length) {
         // 🟢 v207 AUDIT-101：覆盖写本地后必须失效缓存，否则本次会话内 getRows
@@ -340,6 +389,10 @@ const DataStore = {
   async restoreTemporaryOutboundFromSettings() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     try {
+      // 🟢 v228.62：同 restoreOutboundFromSettings —— 预热幂等，此处必为已就绪（零额外请求）
+      if (typeof SyncManager._primeCloudKeySet === 'function') {
+        await SyncManager._primeCloudKeySet().catch(function () { return false; });
+      }
       const rows = await SyncManager.getSetting('temp_outbound_list');
       if (Array.isArray(rows) && rows.length) {
         await this.write('tempOutbound', async () => {
@@ -925,9 +978,22 @@ const DataStore = {
     all[taskId] = { taskId: taskId, deleted: true, updatedAt: new Date().toISOString() };
     this._lsSet('wb_stocktake_tasks', all);
     if (!(opts && opts.skipPush)) await this._pushStocktakeTasksToCloud();
+    else this._notifyTasksChanged();   // 批量路径：skipPush 时推送出口不经过，此处补一次
+  },
+  // 🟢 v228.45：任务变更通知 —— 同浏览器其他标签通过 storage 事件感知并重渲任务区。
+  //   为什么用「哨兵键」而不是直接依赖 wb_stocktake_tasks 自身：
+  //     · localStorage.setItem 写「相同字符串」时浏览器可能不派发 storage 事件（值未变）；
+  //     · 任务写与读在同一标签，storage 事件只在「其他标签」触发，故本标签不会自触发。
+  //   哨兵键写入单调递增的时间戳，保证每次变更都产生一次真实的值变化 → 事件必达。
+  //   跨设备一致性由 3s 轮询的 pullStocktakeTasksFromCloud 负责，本方法只管同机多标签。
+  _notifyTasksChanged() {
+    try { localStorage.setItem('wb_stocktake_tasks_bcast', String(Date.now()) + '-' + Math.random().toString(36).slice(2, 6)); } catch (e) { /* 忽略 */ }
   },
   // 统一的任务上云出口（供 save/delete/作废批次/取消分派复用，保证推的一定是含墓碑的 raw）
   async _pushStocktakeTasksToCloud() {
+    // 🟢 v228.45：此处是「所有任务变更」的必经出口（save/delete/批量删除/取消分派都最终走到这里），
+    //   统一在此发一次同机通知 —— 保证不会有哪个动作漏广播（比散落在各动作点更不易漏）。
+    this._notifyTasksChanged();
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
       // 🟢 v227.16：离线时入队，联网后由 StocktakeModule._flushCloudQueue 补推（仓库弱网常态）
       try { this._enqueueCloud('stocktakeTasks', this._tasksRaw()); } catch (e) {}
@@ -967,7 +1033,10 @@ const DataStore = {
   // 🟢 v225.2：remote 的墓碑会覆盖本地活任务（管理员取消分派 → 盘点人设备同步撤销）；
   //   反向 remote 有更新的活任务时本地墓碑被清（取消后重新分派同一区间 → 正常复活）。
   async pullStocktakeTasksFromCloud() {
-    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return 0;
+    // 🟢 v228.51（P0 读解耦）：未明确离线即允许拉取
+    const _online = (typeof SyncManager === 'undefined') ? false
+      : (SyncManager.isOnline || (typeof navigator !== 'undefined' && navigator.onLine !== false));
+    if (!_online) return 0;
     if (typeof SyncManager.getSetting !== 'function') return 0;
     let remote = null;
     try { remote = await SyncManager.getSetting('stocktakeTasks'); } catch (e) { return 0; }
@@ -1007,24 +1076,11 @@ const DataStore = {
     } catch (e) {}
   },
 
-  // —— 批次汇总快照 ——
-  getStocktakeBatches() { return this._lsGet('wb_stocktake_batches', {}); },
-  getStocktakeBatch(sheetId) { return this.getStocktakeBatches()[sheetId] || null; },
-  addStocktakeBatch(batch) {
-    const all = this.getStocktakeBatches();
-    all[batch.sheetId] = batch;
-    this._lsSet('wb_stocktake_batches', all);
-    return batch;
-  },
+  // 🟢 v228.60：移除批次汇总快照的本地存取（getStocktakeBatches / getStocktakeBatch /
+  //   addStocktakeBatch / deleteStocktakeBatch）—— 唯一消费方「盘点批次汇总」模块已下线
+  //   （js/stocktake-batch.js 已删除），这组方法已无任何调用方。
 
-  // v218：放弃盘点 —— 删除某批次的汇总快照（该批次已无其他盘点人记录时调用）
-  deleteStocktakeBatch(sheetId) {
-    const all = this.getStocktakeBatches();
-    delete all[sheetId];
-    this._lsSet('wb_stocktake_batches', all);
-  },
-
-  // —— 按批次查记录（供汇总聚合，不动 12 列字段）=====
+  // —— 按批次查记录（供季度盘点聚合，不动 12 列字段）=====
   async getStocktakeRecordsBySheet(sheetId) {
     const rows = await this.getStocktakeRecords();
     return (rows || []).filter(r => r.sheetId === sheetId);

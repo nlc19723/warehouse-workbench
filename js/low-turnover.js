@@ -46,7 +46,7 @@ const LowTurnoverModule = {
     const totalUnavailable = items.reduce((s, c) => s + (parseFloat(c.暂无法使用量) || 0), 0);
 
     if (rt !== undefined && rt !== App._goToken) return;
-    document.getElementById('ltSummary').innerHTML = `
+    TableUtils.setHtml('ltSummary', `
       <div class="kpi-grid">
         <div class="kpi-card card-warning">
           <div class="kpi-label">低周转物料种类</div>
@@ -61,7 +61,7 @@ const LowTurnoverModule = {
           <div class="kpi-value">${TableUtils.formatNum(totalUnavailable)}</div>
         </div>
       </div>
-    `;
+    `);
 
     this.currentData = items;
     this.renderTable(rt);
@@ -81,7 +81,7 @@ const LowTurnoverModule = {
     const area = document.getElementById('ltTableArea');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无低周转物料</div></div>';
-      document.getElementById('ltPagination').innerHTML = '';
+      TableUtils.setHtml('ltPagination', '');
       return;
     }
 

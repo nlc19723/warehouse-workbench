@@ -5,7 +5,9 @@
 const OrderCheckModule = {
   currentOrderNo: '',    // 当前编辑的核对单号（空=新增模式）
   editingMode: false,    // true=编辑模式
-  defaultRows: 15,        // 默认空白行数
+  // 🟢 v228.25 W-2：默认空白行 15 → 8。空白录入行过多会让首屏 70% 变成空网格，
+  // 用户输入时自动增行（checkAutoExpand），够用即可。
+  defaultRows: 8,         // 默认空白行数
   autoAddRows: 5,        // 到最后一行时自动增加的行数
   _formDraft: null,      // 🟢 v113：录入草稿（明细行 input 值，切换模块回来时恢复；保存/重置时清空）
   _draftObs: null,       // 🟢 v113：contentArea MutationObserver 引用（模块切换时触发暂存）
@@ -21,6 +23,17 @@ const OrderCheckModule = {
 
     content.innerHTML = `
       <!-- 🟢 v117：删除顶部工具栏（搜索框+6个按钮）；模块职责：新增/编辑核对单的明细录入 -->
+      <!-- 🟢 v228.25 W-2：补模块引导文案。本模块定位是「录入表单」而非「数据列表」，
+           其他 16 个模块都是「筛选栏 → KPI → 表格 → 分页」范式，用户切过来会惯性找筛选栏
+           却找不到 —— 一句话说明职责，消除「是不是坏了 / 筛选去哪了」的困惑。 -->
+      <div class="oc-guide" role="note">
+        <span class="oc-guide-icon" aria-hidden="true">📋</span>
+        <div class="oc-guide-text">
+          <strong>本页是订货核对录入表，不是数据列表</strong>
+          <span>在「存货编码」列输入编码联想选中后自动带出库存信息，填「数量」即可得到建议订货量；也可以直接从 Excel 批量粘贴。要查看/筛选已有订单请到「订单列表」。</span>
+        </div>
+      </div>
+
       <!-- 🟢 v113：明细表格区（已删除「订货核对单信息」面板与「明细列表」卡片标题） -->
       <!-- 🟢 v153：决策 KPI 横幅（粘贴需求后自动汇总） -->
       <div id="ocKpiBanner" class="oc-kpi-banner" style="display:none;margin:8px 0;padding:10px 14px;border-radius:10px;
@@ -130,38 +143,55 @@ const OrderCheckModule = {
   },
 
   _rowHtml(idx, r) {
+    // 🟢 v228.25 W-5：为本行 13 个输入框补可访问名称。
+    // 原本 165 个 input 无 label/aria-label/placeholder 关联，读屏用户听到「编辑框」不知填什么。
+    // 命名取「第 N 行 列名」，随列头语义自动生成；只读列加「（自动带出）」说明来源。
+    const n = idx + 1;
+    const al = (col, extra) => `aria-label="第 ${n} 行 ${col}${extra || ''}"`;
     return `
       <tr data-row="${idx}">
         <td style="text-align:center;color:var(--text-muted);">${idx + 1}</td>
         <td style="text-align:center;position:relative;">
           <input type="text" class="oc-code-input oc-input" placeholder="输入编码联想..."
+            ${al('存货编码')}
             value="${escAttr(r.存货编码 || '')}"
             data-row="${idx}" autocomplete="off">
         </td>
         <td style="text-align:center;"><input type="text" class="oc-name-input oc-detail-input" readonly placeholder=""
+          ${al('存货名称', '（自动带出，只读）')}
           value="${escAttr(r.存货名称 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-spec-input oc-detail-input" readonly placeholder=""
+          ${al('规格型号', '（自动带出，只读）')}
           value="${escAttr(r.规格型号 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="number" class="oc-qty-input" placeholder=""
+          ${al('数量')}
           value="${escAttr(r.数量 !== undefined && r.数量 !== null && r.数量 !== '' ? r.数量 : '')}" data-row="${idx}" min="0" step="any"></td>
         <td style="text-align:center;"><input type="text" class="oc-category-input oc-detail-input" data-grp="meta" readonly placeholder=""
+          ${al('分类', '（自动带出，只读）')}
           value="${escAttr(r.分类 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-stock-input oc-detail-input" data-grp="stock" readonly placeholder=""
+          ${al('现存量', '（自动带出，只读）')}
           value="${escAttr(r.现存量 !== undefined ? r.现存量 : '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-ontheway-input oc-detail-input" data-grp="stock" readonly placeholder=""
+          ${al('在途订单量', '（自动带出，只读）')}
           value="${escAttr(r.在途订单 !== undefined ? r.在途订单 : '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-warehouse-input oc-detail-input" data-grp="meta" readonly placeholder=""
+          ${al('仓库', '（自动带出，只读）')}
           value="${escAttr(r.仓库 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-project-input oc-detail-input" data-grp="meta" readonly placeholder=""
+          ${al('项目', '（自动带出，只读）')}
           value="${escAttr(r.项目 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-low-input oc-detail-input" data-grp="stock" readonly placeholder=""
+          ${al('是否低周转', '（自动带出，只读）')}
           value="${escAttr(r.是否低周转 || '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="text" class="oc-unavailable-input oc-detail-input" data-grp="stock" readonly placeholder=""
+          ${al('暂无法使用量', '（自动带出，只读）')}
           value="${escAttr(r.暂无法使用量 !== undefined ? r.暂无法使用量 : '')}" data-row="${idx}"></td>
         <td style="text-align:center;"><input type="number" class="oc-suggest-input oc-detail-input" data-grp="result" readonly placeholder=""
+          ${al('建议订货量', '（自动计算，只读）')}
           value="${escAttr(r.建议订货量 !== undefined && r.建议订货量 !== null && r.建议订货量 !== '' ? r.建议订货量 : '')}" data-row="${idx}" min="0" step="any" style="font-weight:600;color:var(--primary);"></td>
         <td style="text-align:center;"><span class="oc-decision-cell" data-row="${idx}">${r.决策 || ''}</span></td>
-        <td style="text-align:center;"><button onclick="OrderCheckModule.removeRow(${idx})" style="border:none;background:none;color:var(--status-danger);cursor:pointer;font-size:15px;padding:2px 4px;" title="删除此行">🗑️</button></td>
+        <td style="text-align:center;"><button onclick="OrderCheckModule.removeRow(${idx})" aria-label="删除第 ${n} 行" style="border:none;background:none;color:var(--status-danger);cursor:pointer;font-size:15px;padding:2px 4px;" title="删除此行">🗑️</button></td>
       </tr>`;
   },
 

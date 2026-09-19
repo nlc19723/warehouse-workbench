@@ -122,7 +122,7 @@ const PricingModule = {
     const avgPrice = active.length > 0 ? active.reduce((s, p) => s + (parseFloat(p.含税单价) || 0), 0) / active.length : 0;
 
     if (rt !== undefined && rt !== App._goToken) return;
-    document.getElementById('pricingSummary').innerHTML = `
+    TableUtils.setHtml('pricingSummary', `
       <div class="kpi-grid">
         <div class="kpi-card card-info">
           <div class="kpi-label">价格记录数</div>
@@ -137,7 +137,7 @@ const PricingModule = {
           <div class="kpi-value">¥${TableUtils.formatMoney(avgPrice)}</div>
         </div>
       </div>
-    `;
+    `);
 
     this.currentData = pricing;
     this.renderTable(rt);
@@ -158,7 +158,7 @@ const PricingModule = {
     const area = document.getElementById('pricingTableArea');
     if (items.length === 0) {
       area.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无价格数据</div></div>';
-      document.getElementById('pricingPagination').innerHTML = '';
+      TableUtils.setHtml('pricingPagination', '');
       return;
     }
 
