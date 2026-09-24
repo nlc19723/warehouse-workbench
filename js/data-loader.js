@@ -6,10 +6,10 @@
 // 记录本机最后一次与云端对齐的 savedAt（拉取或推送成功时更新）。
 // 推送前比对云端 savedAt：不一致说明云端已被其它设备改动 → 中止，避免静默覆盖。
 const CLOUD_BASE_KEY = 'wb_cloud_base_savedAt';
-// 🟢 v228.66(P2/C-1)：data.json 云端文件的「最后已知 updated_at」存储键。
-//   引导同步前先比对它：云端文件 mtime 没变 → 必定与本地一致 → 跳过 18MB 整包下载。
-//   这样「每次开机都下载一遍工作数据包只为读 savedAt」的无底洞被彻底堵死。
-const CLOUD_DATA_MTIME_KEY = 'wb_cloud_data_mtime';
+// 🟢 v229.06（Phase 2）：逐表 mtime 映射存储键 { 表名: mtime }
+const CLOUD_MTIME_MAP_KEY = 'wb_cloud_mtime_map';
+// 🟢 v229.06（Phase 3）：逐表「上次成功推送的指纹」映射存储键 { 表名: fingerprint }
+const LAST_PUSHED_FP_KEY = 'wb_last_pushed_fp';
 
 const DataLoader = {
   // Excel 源文件相对路径（与 config.js 中的 app.dataPath 保持一致，避免两处硬编码不同步）
@@ -25,14 +25,45 @@ const DataLoader = {
     catch (e) { this._cloudBaseMem = v || ''; }
   },
 
-  // 🟢 v228.66(P2/C-1)：data.json 云端文件的「最后已知 mtime」读写（localStorage 不可用退化为内存）
-  _cloudDataMtime() {
-    try { return localStorage.getItem(CLOUD_DATA_MTIME_KEY) || null; }
-    catch (e) { return this._cloudDataMtimeMem || null; }
+  // 🟢 v229.06（Phase 2 逐表时间戳跳过）：每张工作表的「云端 mtime」映射 { 表名: mtime }。
+  //   登录/后台同步时逐表比对云端 meta.tables[t].mtime，相等则跳过该表下载（未变不下载）。
+  //   R10 本地清空保护：mtimeMap 仅在「成功下载并应用」后写入，本地被清空的表不会残留旧 mtime。
+  _cloudMtimeMap() {
+    try { const s = localStorage.getItem(CLOUD_MTIME_MAP_KEY); return s ? JSON.parse(s) : null; }
+    catch (e) { return this._cloudMtimeMapMem || null; }
   },
-  _setCloudDataMtime(v) {
-    try { localStorage.setItem(CLOUD_DATA_MTIME_KEY, v || ''); }
-    catch (e) { this._cloudDataMtimeMem = v || ''; }
+  _setCloudMtimeMap(map) {
+    if (!map || typeof map !== 'object') return;
+    try { localStorage.setItem(CLOUD_MTIME_MAP_KEY, JSON.stringify(map)); }
+    catch (e) { this._cloudMtimeMapMem = map; }
+  },
+
+  // 🟢 v229.06（Phase 3 脏表追踪）：单表内容指纹（首/中/尾三行 + 行长采样，O(1) 覆盖绝大多数编辑）。
+  //   返回「行长|首行|中行|尾行」紧凑串；两表内容一致 ⇒ 指纹相等 ⇒ 不重传。
+  _tableFingerprint(rows) {
+    if (!Array.isArray(rows)) return 'null';
+    const n = rows.length;
+    if (n === 0) return '0';
+    const sample = (i) => { try { return JSON.stringify(rows[i]); } catch (e) { return String(rows[i]); } };
+    const mid = Math.floor(n / 2);
+    return n + '|' + sample(0) + '|' + sample(mid) + '|' + sample(n - 1);
+  },
+  // 🟢 v229.06（Phase 3）：逐表「上次成功推送指纹」读写（判断哪些表相对云端已变化，仅传脏表）
+  _lastPushedFp(name) {
+    try {
+      const s = localStorage.getItem(LAST_PUSHED_FP_KEY);
+      if (!s) return null;
+      const o = JSON.parse(s);
+      return (o && o[name]) || null;
+    } catch (e) { return (this._lastPushedFpMem && this._lastPushedFpMem[name]) || null; }
+  },
+  _setLastPushedFp(name, fp) {
+    try {
+      const s = localStorage.getItem(LAST_PUSHED_FP_KEY);
+      const o = s ? JSON.parse(s) : {};
+      o[name] = fp;
+      localStorage.setItem(LAST_PUSHED_FP_KEY, JSON.stringify(o));
+    } catch (e) { this._lastPushedFpMem = this._lastPushedFpMem || {}; this._lastPushedFpMem[name] = fp; }
   },
 
   // 参与云端同步的数据表（meta 是元数据表，单独处理）
@@ -53,13 +84,39 @@ const DataLoader = {
   // 核心必填表（用于"完整性校验"）：这些表为空会直接导致页面/模块空白，必须非空。
   // breach / outbound / materialClass / monthlyStats 可能合法为空（无违约记录、尚未录入出库单等），
   // 不应作为强制条件，否则会误判"数据不完整"→ 每次刷新都强制重导、反复闪屏。
-  REQUIRED_TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'inventoryAlerts', 'orderChecks', 'pricing', 'lowTurnover'],
+  // 云端工作包必含的核心表（完整性/校验基线）。
+  // 注意：inventoryAlerts(库存预警) 为纯派生、orderChecks(订货核对) 为派生+用户决策且决策不跨端同步，
+  // 二者均不进云端 —— 见下方 CLOUD_EXCLUDE_TABLES。
+  REQUIRED_TABLES: ['suppliers', 'orders', 'inbound', 'stock', 'pricing', 'lowTurnover'],
+  // 🟢 v229.05：永不推送到云端的表。
+  //   · inventoryAlerts = 库存预警纯派生表，接收端本地用 buildDerivedAlerts() 从源表实时重算；
+  //   · orderChecks = 订货核对（库存预警派生 + 用户决策），用户确认决策列不跨端同步，整表不上云。
+  //   命中此表的云端还原一律保留本地副本（loadBundleFromCloud 仅清/写 bundle 中存在的表）。
+  CLOUD_EXCLUDE_TABLES: ['inventoryAlerts', 'orderChecks'],
 
   // 主入口：检查并导入数据（本地优先，云端异步）
-  init() {
+  //
+  // 🟢 v228.89（silent 模式）：未登录时的启动数据链路必须【完全不碰全局加载遮罩】。
+  //   背景：v228.89 把登录判定前移，未登录时 _bootData(false) 在登录页背后静默跑数据。
+  //   但 _doInit 内部大量调用 sl()→showLoading()，而 showLoading/hideLoading 是**全局单例遮罩**——
+  //   后台链路一点亮，它就会盖在登录页上（或把登录页顶掉），用户又会看到
+  //   「正在准备数据库...」，正是本次改造要消灭的现象。
+  //   实测缺陷链（tools/verify_login_handoff_v22889.py 分支 B 抓到）：
+  //     t=0ms     _enterWorkbench → showLoading('正在同步数据…')  ← 登录后的等待遮罩，应可见
+  //     t=~900ms  DataLoader._doInit 的 sl('正在准备数据库...')   ← 后台链路点亮，文本被劫持
+  //     t=~1000ms finish() → hideLoading() → go()                 ← 遮罩本该消失
+  //     t=1000ms+ 后台链路的后续 sl() 再次点亮 → **遮罩永久留在工作台上，无人再关**
+  //   表现：登录后进入工作台，加载遮罩挂在界面上不消失，用户被锁住。
+  //   修法：silent=true 时 sl() 退化为只写日志；并且 hide() 绝不调用（本来就没亮，
+  //   调了反而会关掉**别的**代码正当地亮着的遮罩）。
+  //   ⚠️ 必须用独立的 silent 形参传给 _doInit，不能读 this._silent ——
+  //     DataLoader.init() 有单飞锁，第二次调用会复用第一次的 Promise，
+  //     靠实例字段会串味。用形参只影响本次调用链。
+  init(opts) {
     // 🔴 重入保护（S2）：防止启动竞态或快速点击下 init 被并发调用，
     // 导致重复清空+导入（数据清空风险）。单飞锁确保同一时刻仅执行一次。
     if (this._initPromise) return this._initPromise;
+    const silent = !!(opts && opts.silent);   // 🟢 v228.89：静默模式（未登录后台链路）
     this._aborted = false;
     this._booting = true;
     this._done = false;
@@ -70,17 +127,20 @@ const DataLoader = {
 
     // 🟢 v228.22 B-1：看门狗——防止任意内部步骤（云端拉取 / 基准垫底 / Excel 导入）永久挂起，
     //   导致加载遮罩永远不消失、用户被锁死在空白页。超时后强制隐藏遮罩并进入空状态引导。
-    if (typeof LoadingHUD !== 'undefined') LoadingHUD._onSkip = () => this._userSkip();
+    // 🟢 v228.89：静默模式下看门狗仍要有（它同时负责 _finishBoot 落定单飞 Promise），
+    //   但不再有"遮罩永远不消失"的风险 —— 遮罩压根没被点亮过。
+    if (!silent && typeof LoadingHUD !== 'undefined') LoadingHUD._onSkip = () => this._userSkip();
     this._watchdog = setTimeout(() => {
       if (this._done) return;
-      console.warn('[data-loader] 启动加载超过 15s 未结束，强制恢复界面（B-1 看门狗）');
+      console.warn('[data-loader] 启动加载超过 15s 未结束，强制恢复界面（B-1 看门狗）' +
+                   (silent ? '（静默模式，无需恢复界面）' : ''));
       this._aborted = true;
       this._finishBoot(false);
     }, 15000);
 
     (async () => {
       try {
-        const r = await this._doInit();
+        const r = await this._doInit(silent);
         this._finishBoot(r);
       } catch (err) {
         console.error('[data-loader] init 异常:', err);
@@ -116,7 +176,16 @@ const DataLoader = {
     try { const m = await db.meta.get('builtinSeeded'); return !!(m && m.value); } catch (e) { return false; }
   },
 
-  async _doInit() {
+  async _doInit(silent) {
+    // 🟢 v228.89：静默模式 —— 全程不点亮、不关闭全局加载遮罩。
+    //   未登录时这条链路在登录页背后跑，遮罩是登录页/工作台的领地，后台不得插手。
+    const sl = (t, o) => {
+      if (this._aborted) return;
+      if (silent) { console.log('[dl/silent] ' + t); return; }
+      showLoading(t, o);
+    };
+    const hl = () => { if (!silent) hideLoading(); };
+
     // 先初始化云端连接（仅"手动保存过配置"的用户才会 isOnline=true，
     // 详见 SyncManager.init：内置共享配置不再自动上线，未连接用户不会碰云端）
     try {
@@ -124,10 +193,6 @@ const DataLoader = {
     } catch (e) {
     /* ignore */ console.warn('[data-loader.js:47] 异常(已忽略):', e);
   }
-
-    // 🟢 v228.22 B-1：启动加载期间若用户点了「跳过」，本助手函数静默跳过 showLoading，
-    //   避免遮罩在后台任务仍运行时被重新点亮，让用户再次被困。
-    const sl = (t, o) => { if (!this._aborted) showLoading(t, o); };
 
     // 1) 本地已有完整数据 → 立即显示（首屏不阻塞），后台静默从云端拉取并按"云端优先覆盖本地"策略同步
     //
@@ -170,7 +235,7 @@ const DataLoader = {
       const localComplete = await this._allCoreTablesPopulated();
       if (localComplete) {
         console.log('[同步] 本地有完整数据，立即显示；后台静默执行：云端→本地（云端不一致则覆盖本地）');
-        hideLoading();
+        hl();
         // 🟢 v228.62：刚才等的那条后台同步已经把云端最新落地 → 不再重复启动
         if (!wasBgSync) this._syncFromCloudInBackground();  // 云端优先覆盖本地，不阻塞首屏
         return true;
@@ -206,7 +271,7 @@ const DataLoader = {
           await this._withTimeout(this.loadBundleFromCloud(bundle), 15000, '云端数据写入');
           if (this._aborted) return false;   // 🟢 v228.22：用户已跳过，立即收尾
           const restored = await this._allCoreTablesPopulated();
-          hideLoading();
+          hl();
           if (restored) {
             console.log('[同步] 已从云端拉取工作数据并覆盖本地');
             return true;
@@ -225,6 +290,13 @@ const DataLoader = {
       } else try {
         const baseBundle = await this._pullBaseWithTimeout(8000);
         if (baseBundle && baseBundle.tables && this._isBundleComplete(baseBundle)) {
+          // 🟢 v228.79 P2-4：引导清表+垫底前，二次确认用户是否已在引导期间导入/同步真实数据。
+          //   用户跳过启动遮罩(或看门狗强制放行)后导入，与后台引导并发 → 此处仍清表会清掉用户刚导入的数据。
+          if (await DataStore.isDataImported() || this._importing) {
+            console.warn('[data-loader] 用户已在引导期间导入真实数据，跳过云端基准垫底，保留用户数据');
+            hl();
+            return true;
+          }
           await DataStore.clearWorkTables();   // 🔵 v227.97：仅清工作表，保留设置包(outbound)数据
           await new Promise(r => setTimeout(r, 300));
           // 🟢 v228.22 B-1：打底提示补「通常 3-5 秒」说明 + 立即可跳过的逃生按钮（8s 后自动亮出）
@@ -236,7 +308,7 @@ const DataLoader = {
           });
           await this.seedFromBase(baseBundle);
           if (this._aborted) return false;   // 🟢 v228.22：用户已跳过，立即收尾
-          hideLoading();
+          hl();
           if (await this._allCoreTablesPopulated()) {
             console.log('本地空库，已用云端基准数据垫底');
             await this._markBuiltinSeeded();   // 🟢 v228.22 B-3：示例数据标记，供顶部横幅提示
@@ -251,19 +323,29 @@ const DataLoader = {
 
     // 3) 都没有，读取内置 Excel 兜底（用户已跳过则不再尝试，直接进入空状态）
     if (this._aborted) return false;
+    // 🟢 v228.79 P2-4：兜底导入前再确认一次（避免引导期间用户已导入真实数据被内置示例覆盖）
+    if (await DataStore.isDataImported() || this._importing) {
+      console.warn('[data-loader] 引导兜底前检测到用户真实数据，跳过内置示例导入');
+      hl();
+      return true;
+    }
     const seeded = await this.importFromExcel();
     if (seeded) await this._markBuiltinSeeded();   // 🟢 v228.22 B-3：示例数据标记，供顶部横幅提示
     return seeded;
   },
 
-  // 校验云端 bundle 结构完整性（v227.2.1 放宽）
-  // 仅校验"8 张核心表全部存在且为数组"；不再强制 length>0，
-  // 避免"pricing/lowTurnover 等业务表合法为空"被误判为"数据不完整"。
-  // 真正的"残缺"判定：tables 缺失、某核心表不是数组、元数据缺失（savedAt）。
+  // 校验云端 bundle 结构完整性（v227.2.1 放宽 + v229.06 支持逐表部分拉取）
+  // 仅校验「bundle.tables 中出现的核心表」都是数组；未出现的表（Phase 2 逐表跳过的不下载表）
+  // 不校验 —— 部分拉取本就是预期。真正的残缺（tables 非对象 / 缺 savedAt）仍判废。
+  // 配合 loadBundleFromCloud「只写 present 表」，部分拉取是安全的合并而非整包覆盖。
   _isBundleComplete(bundle) {
     if (!bundle || !bundle.tables || typeof bundle.tables !== 'object' || !bundle.savedAt) return false;
     const coreTables = this.REQUIRED_TABLES;
-    return coreTables.every(t => Array.isArray(bundle.tables[t]));
+    for (const t of coreTables) {
+      if (bundle.tables[t] === undefined) continue; // 未包含（逐表跳过）⇒ 不校验
+      if (!Array.isArray(bundle.tables[t])) return false;
+    }
+    return true;
   },
 
   // 统计 bundle 中"非空核心表 / 核心表总数"（用于给用户友好提示：哪些表为空属正常）
@@ -329,63 +411,55 @@ const DataLoader = {
     if (scEl) { scEl.classList.remove('online'); scEl.style.background = 'linear-gradient(135deg,rgba(2,132,199,0.12),rgba(14,165,233,0.08))'; }
 
     try {
-      // 🟢 v228.66(P2/C-1)：引导同步前先「廉价探版本」——查 data.json 的云端 mtime，
-      //   与本地上次记录的 mtime 比对。两者相等 ⇒ 云端工作包必然与本地一致（mtime 与 savedAt 同源变化），
-      //   直接跳过 18MB 整包下载（原本只是为读一个 savedAt）。仅当 mtime 变化 / 无基准时才真正下整包。
-      //   这是开机流量的最大头（每次开应用白下 18MB），跳过它单机开机流量从 18MB 降到一次 list（<1KB）。
-      const dataMeta = (typeof SyncManager !== 'undefined' && SyncManager.getObjectMeta)
-        ? await SyncManager.getObjectMeta(SyncManager.FILE).catch(() => null) : null;
-      const lastMtime = this._cloudDataMtime();
-      if (dataMeta && dataMeta.updated_at && lastMtime && dataMeta.updated_at === lastMtime && this._cloudBase()) {
-        console.log('[同步] data.json 云端未变更（mtime=' + dataMeta.updated_at + '），跳过 18MB 整包下载（省流量）');
-        if (typeof SyncManager !== 'undefined') SyncManager.updateUI();
-        return;
+      // 🟢 v229.06（Phase 2 逐表时间戳跳过）：逐表比对 mtime，仅下载「变化/强制」的模块。
+      //   forceTables = 本地空或从未同步的表（R10 本地清空保护，避免清库后不重下致丢数据）。
+      const localMtime = this._cloudMtimeMap() || {};
+      const forceTables = [];
+      for (const t of this.WORK_TABLES) {
+        if (this.CLOUD_EXCLUDE_TABLES.indexOf(t) >= 0) continue;
+        const populated = await db[t].count().catch(() => 0);
+        if (!localMtime[t] || !populated) forceTables.push(t);
       }
-      const bundle = await this._pullWithTimeout(8000);
-      // 仅处理云端 bundle 完整的情况；残缺/缺失直接跳过（绝不用残缺数据覆盖本地）
-      if (bundle && bundle.tables && bundle.savedAt && this._isBundleComplete(bundle)) {
-        // 🔴 v228.62（真机实测：每次刷新白等 16 秒的根因，勿改回）：
-        //   旧版此处拿 **bundle.savedAt** 去比 **DataStore.getImportTime()** —— 两者语义完全不同：
-        //     · savedAt    = 云端工作包的版本戳（pushAllToCloud 时写入）
-        //     · importTime = 本地「导入完成」时间（markDataImported 时写入）
-        //   实测值：savedAt=2026-09-18T05:49:00.657Z，importTime=2026-09-18T11:50:59.857Z
-        //   → 恒不相等 → cloudNewerOrLocalUnknown 恒为 true → **每次刷新都全量还原 32k 行**，
-        //     而全量还原实测约 16~23s，用户每次刷新都白等（这正是"同步速度慢"的体感来源）。
-        //
-        //   正确的"是否需要覆盖"判据是 **_cloudBase()**（本机最后一次与云端对齐的 savedAt），
-        //   它才是与 bundle.savedAt 同源的量。autoSyncFromCloud 一直用的是正确的基准，
-        //   本函数是漏改的那一处。
-        //   语义保持：localTime 为空（本机从未导入）仍视为需要覆盖。
-        const base = this._cloudBase();
-        const cloudNewerOrLocalUnknown = !base || bundle.savedAt !== base;
-        if (cloudNewerOrLocalUnknown) {
-          console.log('[同步] 云端与本机基准不一致（云端 savedAt=' + bundle.savedAt + ', 本机基准=' + (base || '无') + '），执行云端→本地覆盖');
-          if (stEl) stEl.textContent = '云端更新中…';
-          // 🟢 v228.62：走 _loadBundleOnce 单飞入口 —— 与启动链路的还原互斥，杜绝两份并发还原
+      const bundle = await this._pullChangedWithTimeout(8000, localMtime, forceTables);
+      if (!bundle) {
+        console.log('[同步] 云端数据不可用（缺失/超时），保持本地数据');
+      } else {
+        // 🟢 v229.06：记录云端 mtime（仅已下载表 + 之前已匹配跳过的表；下载失败/缺失的表不记，下次强制重试）
+        const nm = Object.assign({}, localMtime);
+        if (bundle.__cloudMtimes) { for (const t of Object.keys(bundle.tables)) nm[t] = bundle.__cloudMtimes[t]; }
+        this._setCloudMtimeMap(nm);
+        const downloadedCnt = bundle.tables ? Object.keys(bundle.tables).length : 0;
+        if (bundle.tables && bundle.savedAt && this._isBundleComplete(bundle)) {
+          // 🔴 v228.62（真机实测根因，勿改回）：覆盖判据用 _cloudBase()（与 bundle.savedAt 同源），
+          //   不是 importTime。详见上方历史注释。
+          const base = this._cloudBase();
+          const cloudNewerOrLocalUnknown = !base || bundle.savedAt !== base;
+          if (cloudNewerOrLocalUnknown) {
+            console.log('[同步] 云端与本机基准不一致（云端 savedAt=' + bundle.savedAt + ', 本机基准=' + (base || '无') + '），执行云端→本地覆盖（本次下载 ' + downloadedCnt + ' 个模块）');
+            if (stEl) stEl.textContent = '云端更新中…';
           await this._withTimeout(this._loadBundleOnce(bundle), 15000, '云端数据写入');   // 🟢 v228.56 硬超时
           console.log('[同步] 云端数据已覆盖本地');
-          // 🟢 v228.66(P2/C-1)：记下云端 data.json 的 mtime，下次开机据此跳过整包下载
-          if (dataMeta && dataMeta.updated_at) this._setCloudDataMtime(dataMeta.updated_at);
-          // 🟢 v228.61（P1-C 启动解耦）：后台覆盖完成后，主动把跨端共享状态（批次锚点/轮次/
-          //   结束闸门/概览/任务）拉一次，否则盘点模块要等下一次 3s 轮询才会看到云端真实态
-          //   —— 用户体感就是「刚打开页面，批次/轮次显示的还是旧的，过几秒才自己跳过来」。
-          //   放在重渲之前执行，让重渲拿到的是已经收敛过的状态。
-          await this._refreshStocktakeAfterBackgroundSync();
-          // 仅当没有打开的弹窗/侧边面板时才重渲染当前模块，避免打断用户操作
-          const modalOpen = document.getElementById('modalOverlay') && document.getElementById('modalOverlay').classList.contains('show');
-          const panelOpen = document.getElementById('panelOverlay') && document.getElementById('panelOverlay').classList.contains('show');
-          if (!modalOpen && !panelOpen && typeof App !== 'undefined' && App.currentModule) {
-            App.go(App.currentModule);
-          } else {
-            console.log('[同步] 后台覆盖完成，但检测到有打开的弹窗/面板，跳过重渲染');
+          // 🟢 v229.06（Phase 3）：刚拉取应用的表，本地=云端 → 记录指纹，下次推送不重复上传
+          for (const t of Object.keys(bundle.tables)) {
+            try { this._setLastPushedFp(t, this._tableFingerprint(await db[t].toArray())); } catch (e) { /* 忽略 */ }
           }
+            await this._refreshStocktakeAfterBackgroundSync();
+            const modalOpen = document.getElementById('modalOverlay') && document.getElementById('modalOverlay').classList.contains('show');
+            const panelOpen = document.getElementById('panelOverlay') && document.getElementById('panelOverlay').classList.contains('show');
+            if (!modalOpen && !panelOpen && typeof App !== 'undefined' && App.currentModule) {
+              App.go(App.currentModule);
+            } else {
+              console.log('[同步] 后台覆盖完成，但检测到有打开的弹窗/面板，跳过重渲染');
+            }
+          } else {
+            console.log('[同步] 云端与本机基准一致，无需覆盖（基准=' + base + '）');
+          }
+        } else if (downloadedCnt === 0 && bundle.savedAt) {
+          // 所有模块按 mtime 比对均为最新 → 未下载任何表文件（仅一次 meta 读取），省流量
+          console.log('[同步] 所有模块均已是最新（按 mtime 比对跳过下载，省流量）');
         } else {
-          console.log('[同步] 云端与本机基准一致，无需覆盖（基准=' + base + '）');
-          // 🟢 v228.66(P2/C-1)：一致也记下 mtime（此时 dataMeta.updated_at 必等于已存值，幂等）
-          if (dataMeta && dataMeta.updated_at) this._setCloudDataMtime(dataMeta.updated_at);
+          console.log('[同步] 云端数据不完整（缺失表），保持本地数据');
         }
-      } else {
-        console.log('[同步] 云端数据不可用（缺失/不完整/超时），保持本地数据');
       }
     } catch (e) {
       console.warn('[同步] 后台同步失败:', e.message || e);
@@ -446,6 +520,26 @@ const DataLoader = {
     });
   },
 
+  // 🟢 v229.06（Phase 2 逐表时间戳跳过）：带超时的「按 mtime 比对」拉取。
+  //   mtimeMap = 本机上次同步的各表 mtime；forceTables = 必须下载的表（本地空/未同步，见 R10）。
+  //   内部走 SyncManager.pullData({mtimeMap, forceTables})：仅下载「mtime 变化或强制」的表，其余跳过。
+  //   无变化时不下任何表文件（仅一次 meta 读取），登录流量从「整包」降到「按需」。
+  _pullChangedWithTimeout(ms, mtimeMap, forceTables) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        console.warn('云端按表拉取超时(' + ms + 'ms)，回退本地');
+        resolve(null);
+      }, ms);
+      SyncManager.pullData({ mtimeMap, forceTables }).then(result => {
+        clearTimeout(timer);
+        resolve(result);
+      }).catch(err => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  },
+
   // 带超时的云端「基准」拉取
   _pullBaseWithTimeout(ms) {
     return new Promise((resolve) => {
@@ -491,15 +585,18 @@ const DataLoader = {
     const tables = bundle.tables || {};
     // 🔵 v227.97：工作包还原只清/写 WORK_TABLES（不含 outbound/tempOutbound），
     //    绝不触碰设置包表，避免工作包还原把用户从 settings 恢复出来的出库单冲掉（各包各管、互不污染）。
+    // 🟢 v229.05：改为仅清/写「bundle 中实际存在的表」(incomingNames)。库存预警/订货核对已不进云端，
+    //    若仍按全 WORK_TABLES 清空，会把接收端本地的派生表/订货决策误清空 —— 故只动 bundle 带来的表。
     const workTables = this.WORK_TABLES;
-    const allNames = workTables.concat(['meta']);
+    const incomingNames = workTables.filter(name => Array.isArray(tables[name]));
+    const allNames = incomingNames.concat(['meta']);
     // 🟢 v209 AUDIT-304：清空 + 写入同事务，中途失败整体回滚（不再「全库清空」半截）
     await db.transaction('rw', allNames, async () => {
-      // 同事务内只清空工作表（不再清全部，保护设置包数据）
-      for (const name of workTables) { if (db[name]) await db[name].clear(); }
+      // 同事务内只清空「bundle 中存在的表」（保护设置包 & 保护未上云的派生/决策表）
+      for (const name of incomingNames) { if (db[name]) await db[name].clear(); }
       await db.meta.delete('dataImported');
-      for (const name of workTables) {
-        const rows = Array.isArray(tables[name]) ? tables[name] : [];
+      for (const name of incomingNames) {
+        const rows = tables[name];
         if (rows.length) {
           try {
             await this.bulkAddSafe(db[name], rows);
@@ -512,6 +609,16 @@ const DataLoader = {
       }
       await DataStore.markDataImported();
     });
+    // 🟢 v229.05：库存预警(inventoryAlerts)已不进云端，接收端需本地用源表重算，
+    //    否则订货核对 autoFill 会读到旧/空的派生表。重建为幂等操作，失败仅告警不阻断同步。
+    try {
+      if (typeof InventoryAlertModule !== 'undefined' && InventoryAlertModule.buildDerivedAlerts) {
+        const alerts = await InventoryAlertModule.buildDerivedAlerts();
+        await db.inventoryAlerts.clear();
+        if (alerts && alerts.length) await this.bulkAddSafe(db.inventoryAlerts, alerts);
+        console.log(`[同步] 本地重建派生库存预警 ${alerts ? alerts.length : 0} 条`);
+      }
+    } catch (e) { console.warn('[同步] 派生库存预警重建失败(已忽略):', e); }
     return true;
   },
 
@@ -538,9 +645,14 @@ const DataLoader = {
 
   // 打包全量数据并推送到云端（覆盖式），导入/重新导入后自动调用
   // v164+：内置双版本滚动——推送前把云端现有 bundle 的 tables 存为 prevWork（上一份）
+  // 🟢 v229.06（Phase 3 脏表追踪）：仅上传「相对上次推送内容真正变化」的表，未变表不重传。
   async pushAllToCloud() {
     this._lastPushReason = null;
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) { this._lastPushReason = 'offline'; return false; }
+    // 🟢 v229.07：在途防重入——上次推送未结束（或超时后自愈校验中）时静默跳过，
+    //   避免双击/自动轮询并发推送触发「自己 vs 自己」的乐观锁误冲突。
+    if (this._pushBusy) { this._lastPushReason = 'busy'; return false; }
+    this._pushBusy = true;
     // 防御：仅当 9 张核心表全部有数据时才推送，绝不把残缺 bundle 推到云端
     // （防止分享链接变空白）。manualPush / pushOutboundToCloud 兜底都走这里，统一拦截。
     const allPopulated = await this._allCoreTablesPopulated();
@@ -550,33 +662,49 @@ const DataLoader = {
       return false;
     }
     try {
-      const tables = {};
-      // 🔵 v227.97：工作包只收集 WORK_TABLES，出库单(outbound/tempOutbound)不进 data.json
+      // 🟢 v229.06（Phase 3）：先收齐所有工作表，再逐表比对指纹，仅保留脏表进 bundle
+      const allTables = {};
       for (const name of this.WORK_TABLES) {
-        tables[name] = await db[name].toArray();
+        if (this.CLOUD_EXCLUDE_TABLES.includes(name)) continue;
+        allTables[name] = await db[name].toArray();
       }
-      // 双版本滚动：把云端现有 bundle 的 tables 降级为 prevWork（上一份）
-      let prevWork = null;
-      let existing = null;   // 🟢 v208：提到 try 外，供下方乐观锁复用（避免二次网络往返）
-      try {
-        existing = await SyncManager.pullDataPrivate();
-        if (existing && existing.tables && Object.keys(existing.tables).length) {
-          prevWork = { savedAt: existing.savedAt || null, tables: existing.tables };
-        }
-      } catch (e) {
-    /* 首次推送无 existing，忽略 */ console.warn('[data-loader.js:309] 异常(已忽略):', e);
-  }
+      const dirty = {};
+      for (const name of Object.keys(allTables)) {
+        const fp = this._tableFingerprint(allTables[name]);
+        if (fp !== this._lastPushedFp(name)) dirty[name] = allTables[name];
+      }
+      if (Object.keys(dirty).length === 0) {
+        // 无变化：不打扰云端（省流量）。prevWork / 乐观锁基准均不更新（本就无写入）。
+        console.log('[data-loader] 本地数据相对上次推送无变化，跳过上传（省流量）');
+        this._lastPushReason = 'noop';
+        return true;
+      }
+      // 🟢 v229.11（措施2）：不再全量拉取云端 bundle；pushData 内部 pullMetaOnly 取 meta（≈548B），
+      //   并按脏表单独拉取上一版本生成 prev 快照，避免推送前下载 ≈14.9MB 全量表。
+      const changedNames = Object.keys(dirty);
       const bundle = {
         version: DB_VERSION,
         savedAt: new Date().toISOString(),
-        tables,
-        prevWork
+        tables: dirty,
+        __changedTables: changedNames
       };
-      // 🟢 v208 AUDIT-303：带乐观锁推送。existing 已在上一步拉取，直接复用避免二次往返。
-      const ok = await this._withTimeout(
-        SyncManager.pushData(bundle, { expectedSavedAt: this._cloudBase(), _existing: existing }),
-        25000, 'pushData'
-      );
+      // 🟢 v208 AUDIT-303：带乐观锁推送。pushData 自行 pullMetaOnly 取云端 savedAt 校验版本，
+      //   不在此预拉全量（省流量）。
+      // 🟢 v229.07：超时 25s→120s。首推迁移需一次性上传 prev+分包表+legacy 双写 ≈60MB，
+      //   25s 必超时：上传后台仍在继续并最终成功，但本机基准不推进 → 下次推送误报 conflict
+      //   （2026-09-23 生产实测复现：31s 完成落云，前端却报「上传失败」+「同步冲突」）。
+      let ok;
+      try {
+        ok = await this._withTimeout(
+          SyncManager.pushData(bundle, { expectedSavedAt: this._cloudBase(), _changedTables: changedNames }),
+          120000, 'pushData'
+        );
+      } catch (eTimeout) {
+        // 🟢 v229.07 自愈校验：超时 ≠ 失败——pushData 不会被超时取消，仍在后台上传。
+        //   轮询云端 meta，若 savedAt 已等于本次 bundle.savedAt 则按成功处理。
+        console.warn('[推送] pushData 超时，启动落云自愈校验:', eTimeout.message);
+        ok = await this._verifyPushLanded(bundle.savedAt) ? true : false;
+      }
       if (ok === 'conflict') {
         // 云端已被其它设备改动 → 坚决不覆盖，让用户先拉取再推
         console.warn('[乐观锁] 云端数据已被其它设备更新，本次推送已中止');
@@ -587,22 +715,17 @@ const DataLoader = {
               '⚠ 云端数据已被其它设备更新，本次推送已中止，避免覆盖他人改动。\n请先点「同步」拉取最新数据，确认后再推送。',
               { title: '同步冲突' }
             );
-          } catch (e) {
-    /* 弹窗不可用时忽略 */ console.warn('[data-loader.js:331] 异常(已忽略):', e);
-  }
+          } catch (e) { /* 弹窗不可用时忽略 */ }
         }
         return false;
       }
       if (ok) {
         this._setCloudBase(bundle.savedAt);   // 推送成功 → 基准推进到本次
-        // 🟢 v228.66(P2/C-1)：记下推送后 data.json 的新 mtime，使下次开机据此跳过整包下载
-        //   （本地已含本次推送内容，无需再下 18MB）。getObjectMeta 失败不影响推送结果。
-        try {
-          const m = (typeof SyncManager !== 'undefined' && SyncManager.getObjectMeta)
-            ? await SyncManager.getObjectMeta(SyncManager.FILE).catch(() => null) : null;
-          if (m && m.updated_at) this._setCloudDataMtime(m.updated_at);
-        } catch (e) { /* 忽略 */ }
-        console.log('已推送到云端（双版本滚动已生效）');
+        // 🟢 v229.06（Phase 3）：更新脏表指纹，下次仅真变化才再传
+        for (const name of Object.keys(dirty)) {
+          this._setLastPushedFp(name, this._tableFingerprint(allTables[name]));
+        }
+        console.log('已推送到云端（仅 ' + Object.keys(dirty).length + ' 个变化模块：' + Object.keys(dirty).join('/') + '）');
         return ok;
       }
       this._lastPushReason = 'upload';
@@ -611,7 +734,27 @@ const DataLoader = {
       console.error('打包推送失败:', e);
       this._lastPushReason = 'upload';
       return false;
+    } finally {
+      this._pushBusy = false;
     }
+  },
+
+  // 🟢 v229.07：推送超时后的「落云自愈校验」——轮询云端 data-meta.json，确认本次 savedAt 是否已写入。
+  //   背景：_withTimeout 超时只 reject 外层 await，不会取消 pushData 的后台上传；首推迁移体积大
+  //   （prev+分包表+legacy 双写 ≈60MB）极易超时，云端最终成功而调用方按失败处理、乐观锁基准不推进，
+  //   导致下一次推送误报「同步冲突（被其它设备更新）」。此处确认落云即按成功补救。
+  async _verifyPushLanded(savedAt, maxWaitMs) {
+    if (typeof SyncManager === 'undefined' || !SyncManager._cloudGet) return false;
+    const deadline = Date.now() + (maxWaitMs || 60000);
+    while (Date.now() < deadline) {
+      try {
+        await new Promise(r => setTimeout(r, 3000));
+        const meta = await SyncManager._cloudGet(SyncManager.META_FILE);
+        if (meta && meta.savedAt === savedAt) return true;
+        if (meta && meta.savedAt && meta.savedAt !== savedAt) return false; // 已被另一次推送推进
+      } catch (e) { /* 网络抖动，继续重试 */ }
+    }
+    return false;
   },
 
   // 恢复上一份工作数据：把云端 bundle.prevWork.tables 提为当前 tables，prevWork 清空
@@ -622,33 +765,103 @@ const DataLoader = {
       return false;
     }
     const bundle = await SyncManager.pullDataPrivate();
-    if (!bundle || !bundle.prevWork || !bundle.prevWork.tables) {
+    if (!bundle || !bundle.prevWork || !bundle.prevWork._fromFile) {
       WBModal.alert('云端暂无可恢复的上一份数据。\n仅「两次及以上导入/上传」后才存在上一份；若已恢复过则不可再恢复。\n需回到更早数据，请用「🔄 重新导入基准」。');
       return false;
     }
+    // 🟢 v229.11：上一份快照已收窄为「上次改动模块」的上一版本（见 sync.pushData），
+    //   故整份恢复 = 回退这些模块。委托按模块恢复，复用其「合并当前云 + 替换选中表 + 推送」逻辑，
+    //   避免直接 push 全量 prevTables 把本地其它未动模块抹掉。
+    const prevTables = await SyncManager.pullPrevWork();
+    const names = (bundle.revertibleTables && bundle.revertibleTables.length)
+      ? bundle.revertibleTables
+      : (prevTables && prevTables.tables ? Object.keys(prevTables.tables) : []);
+    if (!names.length) {
+      WBModal.alert('恢复失败：上一份快照不含可回退的模块（可能上次未改动任何模块）');
+      return false;
+    }
+    // 🟢 v229.12：把已下载的 bundle/prevTables 直接传下去复用，
+    //   避免 restorePrevWorkModules 内部重复拉取（原 3×全量data + 2×prev ≈75MB → 1×data + 1×prev ≈30MB）
+    return this.restorePrevWorkModules(names, bundle, prevTables);
+  },
+
+  // 🟢 v229.08：按模块恢复上一份。
+  // 语义：把「选定模块」回退到上一份快照（data-prev.json）的对应表，其余模块保持当前不变。
+  //   用于「导入改坏了某几个模块，只想撤销这几个」的场景，避免整份回滚连累未动的模块。
+  //   prevWork 仅一层，故等价于「撤销这些模块的最近一次改动」。
+  // names 为空/非数组 → 退回整份恢复（restorePrevWork），保持向后兼容。
+  async restorePrevWorkModules(names, bundle, prevTables) {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+      WBModal.alert('请先连接云端后再恢复上一份数据');
+      return false;
+    }
+    if (!Array.isArray(names) || names.length === 0) {
+      return this.restorePrevWork(); // 未勾选 → 整份回滚
+    }
+    // 🟢 v229.12：优先复用上游传入的 bundle/prevTables（整份恢复链路已拉取），缺失时再兜底拉取（独立按模块 UI 路径）
+    if (!bundle) {
+      bundle = await SyncManager.pullDataPrivate();
+    }
+    if (!bundle || !bundle.prevWork || !bundle.prevWork._fromFile) {
+      WBModal.alert('云端暂无可恢复的上一份数据。\n仅「两次及以上导入/上传」后才存在上一份；若已恢复过则不可再恢复。');
+      return false;
+    }
     try {
-      showLoading('正在恢复上一份工作数据...', { variant:'capsule' });
-      // 把 prevWork 提为当前，prevWork 清空（原 v2 被丢弃，符合"最新+上一份"两份约定）
+      showLoading('正在恢复所选模块的上一份数据...', { variant: 'capsule' });
+      if (!prevTables) {
+        prevTables = await SyncManager.pullPrevWork();
+      }
+      if (!prevTables || !prevTables.tables) {
+        WBModal.alert('恢复失败：上一份数据读取异常');
+        hideLoading();
+        return false;
+      }
+      // 仅把选中模块替换为「上一份」对应表；未选模块保持云端当前值。
+      // 🟢 v229.12：cur 与 bundle 本就是同一份「当前云端全量」，直接复用 bundle.tables，不再第三次拉取
+      const merged = Object.assign({}, (bundle.tables) || {});
+      let applied = 0;
+      for (const name of names) {
+        if (Object.prototype.hasOwnProperty.call(prevTables.tables, name)) {
+          merged[name] = prevTables.tables[name];
+          applied++;
+        }
+      }
+      if (applied === 0) {
+        WBModal.alert('恢复失败：上一份快照不含所选模块（可能该模块上次未改动）');
+        hideLoading();
+        return false;
+      }
       const restored = {
         version: DB_VERSION,
         savedAt: new Date().toISOString(),
-        tables: bundle.prevWork.tables,
-        prevWork: null
+        tables: merged,
+        prevWork: null,
+        __changedTables: names.slice()
       };
-      const ok = await SyncManager.pushData(restored);
-      if (!ok) { WBModal.alert('恢复失败：云端写入异常'); return false; }
-      // 拉取回本地，覆盖当前工作数据
+      const ok = await SyncManager.pushData(restored, { _changedTables: names.slice() });
+      if (!ok || ok === 'conflict') { WBModal.alert('恢复失败：云端写入异常或冲突，请先「同步」后重试'); hideLoading(); return false; }
       await this._applyBundleToLocal(restored);
       hideLoading();
-      WBModal.alert('✅ 已恢复上一份工作数据（' + (bundle.prevWork.savedAt ? new Date(bundle.prevWork.savedAt).toLocaleString('zh-CN') : '未知时间') + '）');
+      const label = names.map(n => this._tableLabel(n)).join('、');
+      WBModal.alert('✅ 已恢复所选模块的上一份数据：' + label);
       if (typeof App !== 'undefined' && App.currentModule) App.go(App.currentModule);
       return true;
     } catch (e) {
       hideLoading();
-      console.error('恢复上一份失败:', e);
+      console.error('按模块恢复上一份失败:', e);
       WBModal.alert('恢复失败：' + (e.message || e));
       return false;
     }
+  },
+
+  // 表名 → 中文模块名（供恢复界面展示，缺省回落表名）
+  _tableLabel(name) {
+    const M = {
+      suppliers: '供应商', orders: '订单系统', inbound: '入库', stock: '库存',
+      pricing: '定价', lowTurnover: '滞销', breach: '违约台账',
+      inventoryAlerts: '库存预警', orderChecks: '订货核对'
+    };
+    return M[name] || name;
   },
 
   // 把云端 bundle 写入本地 IndexedDB（恢复/初始化共用）
@@ -679,7 +892,11 @@ const DataLoader = {
       showLoading('正在打包基准数据并上传到云端...', { variant:'truck' });
       const tables = {};
       // 🔵 v227.97：基准包只收 WORK_TABLES，出库单不进 base.json（只走 settings 包）
+      // 🟢 v229.05：与工作包 pushAllToCloud 一致，CLOUD_EXCLUDE_TABLES（库存预警/订货核对）
+      //            为派生/不跨端表，永不进基准包——否则 base.json 仍会把两表（含决策列）带上云，
+      //            与「派生不进云、决策不跨端」决策自相矛盾。
       for (const name of this.WORK_TABLES) {
+        if (this.CLOUD_EXCLUDE_TABLES.includes(name)) continue;
         tables[name] = await db[name].toArray();
       }
       const bundle = {
@@ -1289,10 +1506,9 @@ const DataLoader = {
       return;
     }
     const latest = (bundle && bundle.tables) ? bundle : null;
-    const prev = (bundle && bundle.prevWork && bundle.prevWork.tables) ? bundle.prevWork : null;
+    const prev = (bundle && bundle.prevWork) ? bundle.prevWork : null;
     const fmt = (iso) => iso ? new Date(iso).toLocaleString('zh-CN') : '未知时间';
     const latestCnt = latest ? (latest.tables.suppliers || []).length : 0;
-    const prevCnt = prev ? (prev.tables.suppliers || []).length : 0;
     modalTitle.textContent = '☁️ 云端恢复 · 选择备份';
     // 无可用备份：引导去上传/基准
     if (!latest && !prev) {
@@ -1326,8 +1542,11 @@ const DataLoader = {
             <span style="font-size:13px;font-weight:600;">🟡 上一份</span>
             <span style="font-size:11.5px;color:var(--text-secondary);">${fmt(prev.savedAt)}</span>
           </div>
-          <div style="font-size:11.5px;color:var(--text-secondary);margin-bottom:10px;">供应商 ${prevCnt} 家</div>
-          <button onclick="DataLoader._cloudRestorePick('prev')" class="btn--ghost" style="width:100%;padding:9px 0;font-size:12.5px;">恢复此份</button>
+          <div style="font-size:11.5px;color:var(--text-secondary);margin-bottom:10px;">上一份完整快照。可整份回滚，或只把「上次改过的模块」单独退回。</div>
+          <div style="display:flex;gap:8px;">
+            <button onclick="DataLoader._cloudRestorePick('prev')" class="btn--ghost" style="flex:1;padding:9px 0;font-size:12.5px;">整份恢复</button>
+            <button onclick="DataLoader.showPrevModuleChooser()" class="btn--primary" style="flex:1;padding:9px 0;font-size:12.5px;">按模块恢复</button>
+          </div>
         </div>` : `
         <div style="border:1px dashed var(--border,#e5e7eb);border-radius:10px;padding:12px 14px;text-align:center;">
           <span style="font-size:12px;color:var(--text-secondary);">🟡 上一份 · 暂无（需两次及以上备份才生成）</span>
@@ -1345,6 +1564,82 @@ const DataLoader = {
     const ov = document.getElementById('modalOverlay'); if (ov) ov.classList.remove('show');
     if (which === 'latest') return this.restoreFromCloudWork();
     return this.restorePrevWork();
+  },
+
+  // 🟢 v229.08：按模块恢复选择器——列出「上次推送真改过的模块」（meta.revertibleTables），
+  //   勾选后只把这些模块退回到上一份，其余模块维持当前。仅一层 prev，即「撤销这些模块最近一次改动」。
+  async showPrevModuleChooser() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
+      WBModal.alert('请先连接云端后再恢复上一份数据');
+      return;
+    }
+    const modalBody = document.getElementById('modalBody');
+    const modalTitle = document.getElementById('modalTitle');
+    if (!modalBody || !modalTitle) return;
+    let bundle = null;
+    try {
+      showLoading('正在读取上一份快照...', { variant: 'capsule' });
+      bundle = await SyncManager.pullDataPrivate();
+      hideLoading();
+    } catch (e) {
+      hideLoading();
+      WBModal.alert('读取云端备份失败：' + (e.message || e));
+      return;
+    }
+    if (!bundle || !bundle.prevWork || !bundle.prevWork._fromFile) {
+      WBModal.alert('云端暂无可恢复的上一份数据。\n仅「两次及以上导入/上传」后才存在上一份。');
+      return;
+    }
+    // 可恢复模块：优先用 meta.revertibleTables（上次真改动集）；为空时回退列出全部存在的表。
+    let names = Array.isArray(bundle.revertibleTables) ? bundle.revertibleTables.slice() : [];
+    if (names.length === 0) {
+      try {
+        const prevFull = await SyncManager.pullPrevWork();
+        names = Object.keys((prevFull && prevFull.tables) || {});
+      } catch (e) { names = []; }
+    }
+    names = names.filter(n => !this.CLOUD_EXCLUDE_TABLES.includes(n));
+    modalTitle.textContent = '🟡 恢复上一份 · 按模块';
+    if (names.length === 0) {
+      modalBody.innerHTML = `
+        <div style="font-size:12.5px;color:var(--text-secondary);line-height:1.6;text-align:center;padding:10px 0;">
+          没有可单独恢复的模块。<br>请改用「整份恢复」。
+        </div>
+        <div class="btn-group" style="border-top:none;margin-top:14px;display:flex;justify-content:center;">
+          <button onclick="DataLoader.showCloudRestoreChooser()" class="btn--ghost" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">← 返回</button>
+        </div>`;
+      document.getElementById('modal').classList.add('modal-compact');
+      const ov = document.getElementById('modalOverlay'); if (ov) ov.classList.add('show');
+      return;
+    }
+    const rows = names.map(n => `
+      <label style="display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid var(--border,#e5e7eb);border-radius:9px;cursor:pointer;">
+        <input type="checkbox" class="wb-prevmod" value="${n}" checked style="width:16px;height:16px;flex:0 0 auto;">
+        <span style="font-size:12.5px;">${this._tableLabel(n)}</span>
+      </label>`).join('');
+    modalBody.innerHTML = `
+      <p style="font-size:12px;color:var(--text-secondary);margin:0 0 12px;line-height:1.5;">
+        勾选要退回「上一份」的模块，<b>未勾选的模块保持当前不变</b>。<br>
+        仅可撤销这些模块最近一次改动（只能回退一步）。
+      </p>
+      <div style="display:flex;flex-direction:column;gap:8px;">${rows}</div>
+      <div class="btn-group" style="border-top:none;margin-top:14px;display:flex;justify-content:center;gap:10px;">
+        <button onclick="DataLoader.showCloudRestoreChooser()" class="btn--ghost" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">← 返回</button>
+        <button onclick="DataLoader._confirmPrevModules()" class="btn--primary" style="flex:0 0 calc(50% - 5px);max-width:180px;padding:9px 0;font-size:12.5px;">恢复所选模块</button>
+      </div>`;
+    document.getElementById('modal').classList.add('modal-compact');
+    const ov = document.getElementById('modalOverlay'); if (ov) ov.classList.add('show');
+  },
+
+  // 读取勾选的模块并执行按模块恢复
+  async _confirmPrevModules() {
+    const boxes = Array.from(document.querySelectorAll('.wb-prevmod'));
+    const names = boxes.filter(b => b.checked).map(b => b.value);
+    if (names.length === 0) { WBModal.alert('请至少勾选一个模块'); return; }
+    const label = names.map(n => this._tableLabel(n)).join('、');
+    if (!await WBModal.confirm('确定把「' + label + '」恢复到上一份吗？\\n未勾选的模块不受影响。', { title: '恢复上一份 · 按模块' })) return;
+    const ov = document.getElementById('modalOverlay'); if (ov) ov.classList.remove('show');
+    await this.restorePrevWorkModules(names);
   },
 
   // 从上传的文件导入

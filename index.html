@@ -6,9 +6,9 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="库管工作台">
-  <link rel="apple-touch-icon" href="icons/icon-192.png?v=228.75" type="image/png">
-  <link rel="icon" href="icons/icon-192.png?v=228.75" type="image/png">
-  <link rel="manifest" href="manifest.json?v=228.75">
+  <link rel="apple-touch-icon" href="icons/icon-192.png?v=229.17" type="image/png">
+  <link rel="icon" href="icons/icon-192.png?v=229.17" type="image/png">
+  <link rel="manifest" href="manifest.json?v=229.17">
   <meta name="theme-color" content="#357ABD">
   <!-- 🟢 AUDIT-228-08（v228.18）：CSP 说明 —— 此处**不写** meta CSP，原因有二：
        ① Content-Security-Policy-Report-Only **不支持通过 <meta> 传递**（浏览器会报
@@ -284,8 +284,8 @@ body{
     <!-- 🟢 v228.09 性能优化 P0-2：首屏关键 CSS 已内联（上方 CRITICAL_CSS 块，8.4KB），
          全量 style.css(211KB) 改为【非阻塞】加载：preload 拉取 → onload 转 stylesheet。
          首屏只依赖 8.4KB 内联样式，loading 遮罩即可正确显示；全量样式在遮罩期间并行加载完成。 -->
-    <link rel="preload" href="css/style.css?v=228.75" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="css/style.css?v=228.75"></noscript>
+    <link rel="preload" href="css/style.css?v=229.17" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="css/style.css?v=229.17"></noscript>
     <script>
       // 兜底：极老旧内核可能不触发 preload 的 onload。延迟 3s 检测，仅在样式确实未生效时
       // 才补一个阻塞式 link —— 延迟是为了避免正常情况下误触发、反而抵消异步收益。
@@ -296,7 +296,7 @@ body{
         }
         if (!ok) {
           var l = document.createElement('link');
-          l.rel = 'stylesheet'; l.href = 'css/style.css?v=228.75';
+          l.rel = 'stylesheet'; l.href = 'css/style.css?v=229.17';
           document.head.appendChild(l);
         }
       }, 3000);
@@ -311,7 +311,7 @@ body{
          · qrcode.min.js(57KB)  → 现存量二维码 / 存货档案二维码（v228.17 恢复加载，见下方 <script>） -->
   <script defer src="lib/dexie.min.js?v=55"></script>
   <script defer src="lib/supabase.min.js?v=55"></script>
-  <script defer src="js/lazy-lib.js?v=228.75"></script>
+  <script defer src="js/lazy-lib.js?v=229.17"></script>
 <!-- 🟢 v228.53：beacon 统计脚本改为「动态异步注入」。
      旧版（M4）用 defer：defer 脚本会阻塞 DOMContentLoaded，而 App.init()（app.js）也绑在
      DOMContentLoaded 上 —— 一旦 beacon.cdn.qq.com 在用户网络下慢/不可达（DNS 挂起、办公网
@@ -448,7 +448,7 @@ body{
         <!-- 🟢 v228.33：4 个系统入口（云端同步 / 数据导入 / 设置 / 源码）折叠进「更多 / 设置」分组，
              默认收起在底部，点击头部才展开 —— 解决低频入口长期占地盘、移动端/小屏更明显的问题；
              - 分组内各 item 仍保留 data-entry，App._applyEntryVisibility() / _wireEntryGuards() 显隐与权限门照常生效；
-             - 折叠态用 grid-template-rows 0fr→1fr 平滑过渡；展开状态记忆在 localStorage('sidebarFooterOpen') -->
+             - 折叠态用 grid-template-rows 0fr→1fr 平滑过渡；🟢 v228.95 起每次进入默认收起，不再记忆展开状态 -->
         <div class="sidebar-footer-group" id="sidebarFooterGroup">
           <div class="sidebar-footer-toggle" id="sidebarFooterToggle" role="button" tabindex="0" aria-expanded="false">
             <span class="item-icon" style="background:var(--accent-lavender-light)">⚙️</span>
@@ -630,44 +630,46 @@ body{
     </div>
   </div>
 
-  <script defer src="js/table-utils.js?v=228.75"></script>
+  <script defer src="js/table-utils.js?v=229.17"></script>
   <!-- 🟢 v228.17：恢复 qrcode.min.js 预载。二维码列（现存量列表 / 存货档案）依赖全局 qrcode 函数，
        此前 P0-1 性能优化误将其移除，导致 QR.thumb 全部返回“—”。文件仅 57KB，继续 defer 不阻塞首屏。 -->
   <script defer src="lib/qrcode.min.js?v=55"></script>
-  <script defer src="js/qr-util.js?v=228.75"></script>
-  <script defer src="js/qr-scan.js?v=228.75"></script>
-  <script defer src="js/search-select.js?v=228.75"></script>
-  <script defer src="js/entity-links.js?v=228.75"></script>
-  <script defer src="js/db.js?v=228.75"></script>
-  <script defer src="js/config.js?v=228.75"></script>
+  <script defer src="js/qr-util.js?v=229.17"></script>
+  <script defer src="js/qr-scan.js?v=229.17"></script>
+  <script defer src="js/search-select.js?v=229.17"></script>
+  <script defer src="js/entity-links.js?v=229.17"></script>
+  <script defer src="js/db.js?v=229.17"></script>
+  <script defer src="js/config.js?v=229.17"></script>
   <!-- 🟢 v200：工作台主题弹窗（替换浏览器原生 alert/confirm/prompt） -->
-  <script defer src="js/modal.js?v=228.75"></script>
-  <script defer src="js/sync.js?v=228.75"></script>
-  <script defer src="js/data-loader.js?v=228.75"></script>
-  <script defer src="js/dashboard.js?v=228.75"></script>
-  <script defer src="js/supplier.js?v=228.75"></script>
-  <script defer src="js/query.js?v=228.75"></script>
-  <script defer src="js/reconciliation.js?v=228.75"></script>
-  <script defer src="js/order-track.js?v=228.75"></script>
-  <script defer src="js/inventory-alert.js?v=228.75"></script>
-  <script defer src="js/order-check.js?v=228.75"></script>
-  <script defer src="js/filter-layout.js?v=228.75"></script>
-  <script defer src="js/components/datepicker.js?v=228.75"></script>
-  <script defer src="js/orders.js?v=228.75"></script>
-  <script defer src="js/inbound.js?v=228.75"></script>
-  <script defer src="js/stock.js?v=228.75"></script>
-  <script defer src="js/pricing.js?v=228.75"></script>
-  <script defer src="js/low-turnover.js?v=228.75"></script>
-  <script defer src="js/breach.js?v=228.75"></script>
-  <script defer src="js/outbound.js?v=228.75"></script>
-  <script defer src="js/stock-detail.js?v=228.75"></script>
-  <script defer src="js/supplier-detail.js?v=228.75"></script>
-  <script defer src="js/order-detail.js?v=228.75"></script>
-  <script defer src="js/stocktake.js?v=228.75"></script>
-  <script defer src="js/stocktake-records.js?v=228.75"></script>
-  <script defer src="js/color-theme.js?v=228.75"></script>
-  <script defer src="js/app.js?v=228.75"></script>
-  <script defer src="js/globals.js?v=228.75"></script>
+  <script defer src="js/modal.js?v=229.17"></script>
+  <script defer src="js/sync.js?v=229.17"></script>
+  <script defer src="js/data-loader.js?v=229.17"></script>
+  <script defer src="js/dashboard.js?v=229.17"></script>
+  <script defer src="js/supplier.js?v=229.17"></script>
+  <script defer src="js/query.js?v=229.17"></script>
+  <script defer src="js/reconciliation.js?v=229.17"></script>
+  <script defer src="js/order-track.js?v=229.17"></script>
+  <script defer src="js/stock-alert-config.js?v=229.17"></script>
+  <script defer src="js/stock-alert-rules.js?v=229.17"></script>
+  <script defer src="js/inventory-alert.js?v=229.17"></script>
+  <script defer src="js/order-check.js?v=229.17"></script>
+  <script defer src="js/filter-layout.js?v=229.17"></script>
+  <script defer src="js/components/datepicker.js?v=229.17"></script>
+  <script defer src="js/orders.js?v=229.17"></script>
+  <script defer src="js/inbound.js?v=229.17"></script>
+  <script defer src="js/stock.js?v=229.17"></script>
+  <script defer src="js/pricing.js?v=229.17"></script>
+  <script defer src="js/low-turnover.js?v=229.17"></script>
+  <script defer src="js/breach.js?v=229.17"></script>
+  <script defer src="js/outbound.js?v=229.17"></script>
+  <script defer src="js/stock-detail.js?v=229.17"></script>
+  <script defer src="js/supplier-detail.js?v=229.17"></script>
+  <script defer src="js/order-detail.js?v=229.17"></script>
+  <script defer src="js/stocktake.js?v=229.17"></script>
+  <script defer src="js/stocktake-records.js?v=229.17"></script>
+  <script defer src="js/color-theme.js?v=229.17"></script>
+  <script defer src="js/app.js?v=229.17"></script>
+  <script defer src="js/globals.js?v=229.17"></script>
   <script>
   /* 🟢 v228.57：脚本加载完整性守护 —— 解决「发布网关间歇性 502 → 核心 JS 没下来 →
         App is not defined → 永久白屏」，且用户刷新还可能再撞上同一份坏缓存。
@@ -735,7 +737,7 @@ body{
       window.addEventListener('load', function() {
         // 🟢 v227.21：注册 URL 带版本戳 + updateViaCache:'none'，确保每次发版浏览器都重新拉取 SW 脚本，
         //   避免「改了 CACHE_NAME 但旧 ?v= 被 CDN 缓存、SW 永不更新」的卡死。
-        navigator.serviceWorker.register('service-worker.js?v=228.75', { updateViaCache: 'none' }).then(function(reg) {
+        navigator.serviceWorker.register('service-worker.js?v=229.17', { updateViaCache: 'none' }).then(function(reg) {
           console.log('[PWA] Service Worker 注册成功:', reg.scope);
         }).catch(function(err) {
           console.warn('[PWA] Service Worker 注册失败:', err);
@@ -774,10 +776,17 @@ body{
       });
 
       // 3. 禁止文本选择（防简单复制）
+      //    🟢 v228.80 修复：selectstart 的 e.target 在纯文本单元格里是「文本节点(Text)」，
+      //       它**没有 closest 方法**；原判断 `e.target.closest && e.target.closest('.data-table')`
+      //       对文本节点恒为 falsy，导致表格内拖选被误拦、无法复制。
+      //       修复：若 target 是文本节点，先归一化到其父元素再判断。
       document.addEventListener('selectstart', function (e) {
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        var el = e.target;
+        if (el && el.nodeType === 3) el = el.parentElement; // 文本节点 → 父元素
+        if (!el) return;
+        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return;
         // 允许在数据表格内选择
-        if (e.target.closest && e.target.closest('.data-table')) return;
+        if (el.closest && el.closest('.data-table')) return;
         e.preventDefault();
       });
 
@@ -824,6 +833,7 @@ body{
         'bridge/decrypt_bridge.py', 'bridge/dump_one.py', 'bridge/start_bridge.bat',
         'bridge/test_bridge.py', 'bridge/README.md', 'bridge/FRONTEND_INTEGRATION.md',
         'js/table-utils.js', 'js/db.js', 'js/config.js', 'js/sync.js', 'js/data-loader.js',
+        'js/stock-alert-config.js', 'js/stock-alert-rules.js',
         'js/dashboard.js', 'js/supplier.js', 'js/query.js', 'js/reconciliation.js',
         'js/order-track.js', 'js/inventory-alert.js', 'js/orders.js', 'js/inbound.js',
         'js/stock.js', 'js/pricing.js', 'js/low-turnover.js', 'js/breach.js',
@@ -850,7 +860,7 @@ body{
       // 这样以后新增任何文件，无需手动更新 SOURCE_FILES.json，下载的源码包都会自动包含。
       // 仅当服务器不支持目录列表（如 GitHub Pages）时，才回退到 SOURCE_FILES.json / 内置清单。
       var SCAN_ROOTS = ['js', 'lib', 'css', 'icons', 'bridge', 'docs'];
-      var SKIP_DIRS  = new Set(['node_modules', '.git', 'tools', 'scripts', 'releases']);
+      var SKIP_DIRS  = new Set(['node_modules', '.git', 'tools', 'releases']);
       var ROOT_FILES = ['index.html', 'manifest.json', 'service-worker.js',
                         '.gitignore', '.gitlab-ci.yml', '.nojekyll', 'SOURCE_FILES.json',
                         '.github/workflows/deploy.yml', 'releases/app-manifest.json'];
@@ -1050,7 +1060,10 @@ body{
           var url = URL.createObjectURL(blob);
           var a = document.createElement('a');
           a.href = url;
-          a.download = 'warehouse-workbench-source-v' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.zip';
+          // 🟢 v228.95：压缩包命名由「日期」改为「版本号」，与发布版本一致，便于追溯
+          var _verNum = (window.AppConfig && AppConfig.app && AppConfig.app.version) || 'v???';
+          _verNum = String(_verNum).replace(/^v/i, '');  // 去掉前导 v，避免文件名出现双 v
+          a.download = 'warehouse-workbench-source-v' + _verNum + '.zip';
           document.body.appendChild(a); a.click(); a.remove();
           setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
           console.log('[download] 源代码打包完成 (' + fetched + '/' + total + ' 文件)');

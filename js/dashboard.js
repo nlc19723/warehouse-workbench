@@ -715,7 +715,7 @@ const DashboardModule = {
 
     // TOP10 按总入库量排序
     const top10 = Object.entries(matQty)
-      .map(([name, months]) => ({ name, total: Object.values(months).reduce((a, b) => a + b, 0), months }))
+      .map(([name, months]) => ({ name, total: TableUtils.sumQty(Object.values(months), null, 4), months }))
       .sort((a, b) => b.total - a.total)
       .slice(0, 10);
 
@@ -724,7 +724,7 @@ const DashboardModule = {
 
     const datasets = top10.map((item, idx) => ({
       label: item.name.length > 8 ? item.name.substring(0, 8) + '…' : item.name,
-      data: sixMonths.map(m => item.months[m] || 0),
+      data: sixMonths.map(m => TableUtils.roundQty(item.months[m] || 0, 4)),
       backgroundColor: colors[idx % colors.length] + (isDark ? 'CC' : '99'),
       borderColor: colors[idx % colors.length],
       borderWidth: 1, borderRadius: 3,

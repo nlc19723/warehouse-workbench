@@ -146,7 +146,8 @@ const LowTurnoverModule = {
   },
   goPage(p) { this.currentPage = p; this.renderTable(); },
   exportData() {
-    // 🟢 O1：统一导出（行为与原逻辑一致）
-    TableUtils.exportToExcel(this.currentData, `低周转_${new Date().toISOString().split('T')[0]}.xlsx`, '低周转');
+    // 🟢 v229.03：导出列 = 工作台表格当前 6 列（仓库名称列表头为「仓库」）
+    const cols = [{ key: '仓库名称', title: '仓库' }, '存货编码', '存货名称', '规格型号', '现存数量', '暂无法使用量'];
+    TableUtils.exportToExcel(this.currentData, `低周转_${new Date().toISOString().split('T')[0]}.xlsx`, '低周转', cols);
   }
 };

@@ -269,7 +269,21 @@ const PricingModule = {
   goPage(p) { this.currentPage = p; this.renderTable(); },
 
   exportData() {
-    // 🟢 O1：统一导出（行为与原逻辑一致）
-    TableUtils.exportToExcel(this.currentData, `合同价格_${new Date().toISOString().split('T')[0]}.xlsx`, '合同价格');
+    // 🟢 v229.03：导出列 = 工作台表格当前 12 列（单位列数据字段为「主计量」，不含税单价为「单价」，
+    //   状态列按生效/失效日期实时计算文本，与页面 tag 文案一致）
+    const now = new Date();
+    const rows = this.currentData.map(p => {
+      let status = '未知';
+      if (p.生效日期 && p.失效日期) {
+        if (now < new Date(p.生效日期)) status = '未生效';
+        else if (now > new Date(p.失效日期)) status = '已失效';
+        else status = '有效';
+      }
+      return Object.assign({}, p, { 状态: status });
+    });
+    const cols = ['供应商', '类型', '存货编码', '存货名称', '规格型号',
+      { key: '主计量', title: '单位' }, '含税单价', '税率', { key: '单价', title: '不含税单价' },
+      '生效日期', '失效日期', '状态'];
+    TableUtils.exportToExcel(rows, `合同价格_${new Date().toISOString().split('T')[0]}.xlsx`, '合同价格', cols);
   }
 };

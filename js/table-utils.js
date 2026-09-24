@@ -218,24 +218,24 @@ window._installedWraps = window._installedWraps || new WeakSet();
 
 // 🟢 v227.50：移动端收起态按模块指定保留列（列头文字匹配，抗索引漂移：stock 批量模式首列插复选框、stocktake showInOut 动态列）
 const COLLAPSE_KEEP = {
-  inbound:           ['存货名称','规格型号','入库量'],
-  oblTableArea:      ['存货名称','规格型号','出库数量'],   // 出库列表（表头叫“出库数量”）
-  orders:            ['存货名称','规格型号','订单量'],
-  trackTableArea:    ['存货名称','规格型号','未入库订单量'], // 订单跟踪（表头叫“未入库订单量”）
-  stockTableArea:    ['存货名称','规格型号','现存数量'],   // 现存量（表头叫“现存数量”）
-  inventoryAlert:    ['存货名称','规格型号','补货值'],
-  stArea:            ['存货名称','规格型号','现存量','盘点数量'],
-  stRecArea:         ['存货名称','规格型号','现存量','盘点数量'],   // 盘点记录列表：v228.43 同步补「现存量」
-  pricingTableArea:  ['存货名称','规格型号','含税单价'],
-  recTableArea:      ['存货名称','规格型号','含税金额'],
+  inbound:           ['存货编码','存货名称','规格型号','入库量'],
+  oblTableArea:      ['存货编码','存货名称','规格型号','出库数量'],   // 出库列表（表头叫“出库数量”）
+  orders:            ['存货编码','存货名称','规格型号','订单量'],
+  trackTableArea:    ['存货编码','存货名称','规格型号','未入库订单量'], // 订单跟踪（表头叫“未入库订单量”）
+  stockTableArea:    ['存货编码','存货名称','规格型号','现存数量'],   // 现存量（表头叫“现存数量”）
+  inventoryAlert:    ['存货编码','存货名称','规格型号','补货值'],
+  stArea:            ['存货编码','存货名称','规格型号','现存量','盘点数量'],
+  stRecArea:         ['存货编码','存货名称','规格型号','现存量','盘点数量'],   // 盘点记录列表：v228.43 同步补「现存量」
+  pricingTableArea:  ['存货编码','存货名称','规格型号','含税单价'],
+  recTableArea:      ['存货编码','存货名称','规格型号','含税金额'],
   supplierTableArea: ['供应商','合同到期日','已入库金额'], // 供应商管理（特殊3列：表头“供应商/合同到期日/已入库金额(元)”）
   'stk-alert':       ['分类','现存量','补货值'],           // 档案页-库存预警
 };
 const QUERY_KEEP = {
-  stock:   ['存货名称','规格型号','现存量'],
-  orders:  ['存货名称','规格型号','订单量'],
-  inbound: ['存货名称','规格型号','入库量'],
-  pricing: ['存货名称','规格型号','含税单价'],
+  stock:   ['存货编码','存货名称','规格型号','现存量'],
+  orders:  ['存货编码','存货名称','规格型号','订单量'],
+  inbound: ['存货编码','存货名称','规格型号','入库量'],
+  pricing: ['存货编码','存货名称','规格型号','含税单价'],
 };
 
 const TableStickyOverlay = {
@@ -275,6 +275,8 @@ const TableStickyOverlay = {
   //   背景：状态原先只存在 wrap._colCollapsed 内存属性上，切换模块后 DOM 整体重建 → 回到默认「收起」，
   //   用户「展开 → 离开 → 回来」会被强制收起。现在按表格 key 落盘，回来保持离开前的状态。
   //   未手动切换过的表格仍默认收起（保持原有首屏行为，不改动既有体验）。
+  // 🟢 v228.93：取消持久化——按需求改为每次进入工作台都默认收起，不再记忆上次展开状态。
+  //   故下方 _collapseStateSet / _collapseStateGet 已不再被调用（保留方法以防其它引用，无害）。
   COLLAPSE_STATE_KEY: 'wb_table_col_collapsed',
   _collapseStateAll() {
     try { return JSON.parse(localStorage.getItem(this.COLLAPSE_STATE_KEY) || '{}') || {}; }
@@ -320,18 +322,28 @@ const TableStickyOverlay = {
     wrap._colCollapseBtn = btn;
     btn.addEventListener('click', () => {
       wrap._colCollapsed = !wrap._colCollapsed;
-      this._collapseStateSet(table, wrap._colCollapsed); // 🟢 v228.14：记住用户选择，跨模块/重渲染保持
-      this._applyCollapse(wrap, table);
+      this._applyCollapse(wrap, table);   // 🟢 v228.93：仅当次会话展开，不落盘记忆（每次进入默认收起）
     });
     if (wrap._colCollapsed === undefined) {
-      // 🟢 v228.14：优先用已记忆的状态；从未切换过的表格才默认折叠
-      const saved = this._collapseStateGet(table);
-      wrap._colCollapsed = (saved === null) ? true : saved;
+      wrap._colCollapsed = true;   // 🟢 v228.93：每次进入默认收起，不读取历史记忆状态
     }
     this._applyCollapse(wrap, table);
   },
 
+  // 🟢 v228.77：幂等写入助手 —— 值没变就不碰 DOM。
+  //   背景（实测）：_applyCollapse 会被 initColumnResizers / installColumnCollapse 反复重跑，
+  //   旧实现无条件 btn.textContent = '展开剩余 N 列 ▾' → 替换文本节点 → childList mutation
+  //   → 触发 app.js 的 MutationObserver → rAF 里再跑 initColumnResizers → 无限自激
+  //   （headless 实测 5 次/秒，真机 rAF 可达 60fps）。后果：① CPU 空转 → 滑动「停顿一下」；
+  //   ② 每一轮都重跑 fitMobileTables → 高度被重写 → 内层 scrollTop 被钳 → 「回滚 2 行」。
+  _setText(el, s) { if (el && el.textContent !== s) el.textContent = s; },
+  _setCss(el, prop, v) { if (el && el.style[prop] !== v) el.style[prop] = v; },
+
   _applyCollapse(wrap, table) {
+    this._applyCollapseCore(wrap, table);
+  },
+
+  _applyCollapseCore(wrap, table) {
     const ths = table.querySelectorAll('thead th');
     const colCount = ths.length;
     const btn = wrap._colCollapseBtn;
@@ -394,7 +406,8 @@ const TableStickyOverlay = {
       if (colCount <= keepMin) { if (btn) btn.style.display = 'none'; return; }
       if (!wrap._colCollapsed) {
         table.style.tableLayout = 'fixed'; table.style.width = 'auto'; table.style.minWidth = '0';
-        if (btn) { btn.style.display = ''; btn.textContent = '收起 ▴'; btn.dataset.state = 'expanded'; }
+        // 🟢 v228.77：幂等写入（不替换文本节点 → 不再触发 MutationObserver 自激环）
+        if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, '收起 ▴'); btn.dataset.state = 'expanded'; }
         return;
       }
       let hidden = 0;
@@ -407,8 +420,8 @@ const TableStickyOverlay = {
       const visThs = Array.from(table.querySelectorAll('thead th')).filter(th => !th.classList.contains('col-collapsed'));
       if (visThs.length > 0) this._equalizeCols(table, visThs, wrap);
       else { table.style.width = ''; table.style.minWidth = '0'; }
-      if (hidden === 0) { if (btn) btn.style.display = 'none'; }
-      else { if (btn) { btn.style.display = ''; btn.textContent = `展开剩余 ${hidden} 列 ▾`; btn.dataset.state = 'collapsed'; } }
+      if (hidden === 0) { if (btn) this._setCss(btn, 'display', 'none'); }
+      else { if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, `展开剩余 ${hidden} 列 ▾`); btn.dataset.state = 'collapsed'; } }
       return;
     }
 
@@ -418,7 +431,7 @@ const TableStickyOverlay = {
       table.style.tableLayout = 'fixed';
       table.style.width = 'auto';
       table.style.minWidth = '0';
-      if (btn) { btn.style.display = ''; btn.textContent = '收起 ▴'; btn.dataset.state = 'expanded'; }
+      if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, '收起 ▴'); btn.dataset.state = 'expanded'; }
       return;
     }
     let hidden = 0;
@@ -436,9 +449,9 @@ const TableStickyOverlay = {
     else { table.style.width = ''; table.style.minWidth = '0'; }
 
     if (hidden === 0) {
-      if (btn) btn.style.display = 'none';
+      if (btn) this._setCss(btn, 'display', 'none');
     } else {
-      if (btn) { btn.style.display = ''; btn.textContent = `展开剩余 ${hidden} 列 ▾`; btn.dataset.state = 'collapsed'; }
+      if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, `展开剩余 ${hidden} 列 ▾`); btn.dataset.state = 'collapsed'; }
     }
   },
 
@@ -581,7 +594,19 @@ const TableStickyOverlay = {
 
     let ro = null;
     if (window.ResizeObserver) {
+      // 🔴🟢 v228.77：RO「初始回调」死循环 —— observe() 后浏览器**必然**先派发一次通知，
+      //   旧实现收到就 setTimeout(rebuild,180) → rebuild 里 uninstall + install → install 又
+      //   new ResizeObserver → 再一次初始回调 → …… 每 180ms 无条件重装一次整个浮层。
+      //   实测：3 秒 32 次重装，每次 _applyCollapse 重写 ~300 个 td/th 的 style/class
+      //   （≈3000 次 DOM 写/秒，真机即掉帧「停顿」）。
+      //   修法：RO 回调只认「尺寸真的变了」；初始回调仅用于记基线，不重建。
+      const snap = () => `${Math.round(wrap.clientWidth)}x${Math.round(wrap.clientHeight)}|${Math.round(table.offsetWidth)}x${Math.round(table.offsetHeight)}`;
+      let lastSnap = null, primed = false;
       ro = new ResizeObserver(() => {
+        const s = snap();
+        if (!primed) { primed = true; lastSnap = s; return; }   // observe() 的初始通知：只记基线
+        if (s === lastSnap) return;                             // 尺寸未变（重装自身引起的抖动）→ 不重建
+        lastSnap = s;
         clearTimeout(wrap._mobileStickyResizeT);
         wrap._mobileStickyResizeT = setTimeout(rebuild, 180);
       });
@@ -2050,6 +2075,23 @@ const TableUtils = {
     return rows.reduce((s, r) => s + Math.round((parseFloat(get(r)) || 0) * 100), 0) / 100;
   },
 
+  // 🟢 AUDIT-228-108（v229.05）：定点数量累加 —— sumMoney 的数量泛化版（金额见上）。
+  //   digits 默认 4：库存/入库数量常见 2 位小数、盘点换算可产生 4 位；10^4 整数单位累加
+  //   足以消除 1e-13 级浮点尾差（0.1+0.2 类），又不丢 4 位内精度。getVal 可传取数函数或 null（直取元素）。
+  sumQty(arr, getVal, digits = 4) {
+    const list = Array.isArray(arr) ? arr : (arr == null ? [] : [arr]);
+    const get = typeof getVal === 'function' ? getVal : (v) => v;
+    const p = Math.pow(10, digits);
+    return list.reduce((s, it) => s + Math.round((parseFloat(get(it)) || 0) * p), 0) / p;
+  },
+  //   单值规整：把浮点尾差截断到 digits 位（如 roundQty(0.30000000000000004, 4) === 0.3）
+  roundQty(num, digits = 4) {
+    const n = parseFloat(num);
+    if (!isFinite(n)) return 0;
+    const p = Math.pow(10, digits);
+    return Math.round(n * p) / p;
+  },
+
   // 数量格式化（M3 统一入口：最多 4 位小数、去尾随 0、千分位、空值返回 ''；不再 Math.round 丢精度）
   formatNum(num, maxFractionDigits = 4) {
     if (num == null || num === '') return '';
@@ -2139,17 +2181,51 @@ const TableUtils = {
       let rz = null;
       window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => this.fitMobileTables(), 120); });
       window.addEventListener('orientationchange', () => setTimeout(() => this.fitMobileTables(), 250));
+      // 🟢 v228.76「滚动天花板」兜底钳制（用户完整规格①：外层拉到表头顶格就滑不动）：
+      //   几何校准（fitMobileTables 区域分支）已把「原生最大滚动量」精确压到天花板（= 表格上方
+      //   内容高），原生滚动到顶自然停住；本监听只兜三类残余——① 校准触 360px 下限的异常模块
+      //   ② iOS 触摸回弹瞬时越界 ③ 重适配后遗留的越界 scrollTop。
+      //   scroll 事件不冒泡，必须用捕获才能在 document 上收到各滚动容器的事件。
+      //   天花板值由 fitMobileTables 写在容器 _wbRegionCeiling 上（非区域模式为 null → 不干预）。
+      if (!document._wbCeilingGuard) {
+        document._wbCeilingGuard = true;
+        document.addEventListener('scroll', (e) => {
+          const sc = e.target;
+          const ceiling = sc ? sc._wbRegionCeiling : null;
+          if (ceiling != null && sc.scrollTop - ceiling > 1) sc.scrollTop = ceiling;
+        }, true);
+      }
     }
     requestAnimationFrame(() => this.fitMobileTables());
   },
+  // 🟢 v228.79 P2-8：PC 宽表横向溢出时，给 .table-wrapper 打 data-hscroll 标记，
+  //   CSS 据此显示右侧渐隐阴影 + 滚动提示，避免"最后一列看不见"的错觉。
+  //   幂等：仅当标记变化时才写 DOM，避免触发重排风暴。仅在非触屏（PC）生效。
+  markTableHorizontalOverflow() {
+    if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return; // 触屏靠滑动，无需阴影提示
+    const sel = '#contentArea .table-wrapper, #contentArea .ob-list-table-wrapper, #contentArea .oc-entry-table-wrapper, #contentArea .ob-entry-table-wrapper';
+    try {
+      document.querySelectorAll(sel).forEach(w => {
+        let flag = '';
+        try { if (w.scrollWidth - w.clientWidth > 4) flag = '1'; } catch (e) {}
+        if ((w.dataset.hscroll || '') !== flag) w.dataset.hscroll = flag;
+      });
+    } catch (e) { /* 防御：检测失败不影响其它逻辑 */ }
+  },
+
   fitMobileTables() {
+    // 🟢 v228.79 P2-8：PC 宽表横向溢出标记（桌面端也会执行，早于下方的桌面提前返回）
+    this.markTableHorizontalOverflow();
     const sel = '#contentArea .table-wrapper, #contentArea .ob-list-table-wrapper, #contentArea .oc-entry-table-wrapper, #contentArea .ob-entry-table-wrapper';
     const wrappers = document.querySelectorAll(sel);
     if (window.innerWidth > 768) {
       // 桌面端：清除移动端注入，交还 CSS（640px 上限）
-      wrappers.forEach(w => w.style.removeProperty('--wb-fit-h'));
+      wrappers.forEach(w => { w.style.removeProperty('--wb-fit-h'); w._wbFitH = null; w._wbFitSig = null; });
       document.querySelectorAll('.wb-multi-table').forEach(s => s.classList.remove('wb-multi-table'));
       document.querySelectorAll('.wb-table-region').forEach(s => s.classList.remove('wb-table-region'));
+      // 🟢 v228.76：同步清空滚动天花板标记（否则窗口从 ≤768 拉宽后桌面滚动会被残留钳制）
+      document.querySelectorAll('.content-scroll, #contentArea').forEach(s => { s._wbRegionCeiling = null; });
+      if (document.body) document.body._wbRegionCeiling = null;
       return;
     }
     if (!wrappers.length) return;
@@ -2196,7 +2272,60 @@ const TableUtils = {
         regionMode = true;
       }
       h = Math.max(h, 160);                             // 保底可用高度
-      w.style.setProperty('--wb-fit-h', h + 'px');
+      // 🔴🟢 v228.77：高度写入「幂等 + 起点复用 + 内层滚动保护」三件套
+      //   旧实现致命缺陷（实测订单页）：每轮都先把**未校准**的 h 写进 --wb-fit-h（724px），
+      //   再逐轮回削到校准值（662px）。写下 724px 的那一刻浏览器立即 layout ——
+      //     · wrapper.clientHeight +62 → 内部 scrollTop 被按新容量钳掉 ~62px（≈2 行数据）；
+      //     · 外层内容 +62 → 天花板处表格尾部被顶出可视区（最后两行看不到）。
+      //   → 正是用户报的「拉到底停顿一下 → 回滚倒退 2 行 → 最后两行显示不出来 → 停不住」。
+      //   ① applyH 幂等：值未变不写 DOM（稳态零写入、零 layout）；
+      //   ② 几何签名未变则以上次校准值为起点（DOM 里本就是它，测量即真实状态）
+      //      → 稳态 over≈0，一次测量即收敛，不再产生 62px 过冲中间态；
+      //   ③ restoreInner 兜底：真发生高度变化（换页/筛选/转屏）时按新容量还原内层滚动位置。
+      const sig = `${regionMode ? 1 : 0}|${isMulti ? 1 : 0}|${Math.round(offsetInSc)}|${Math.round(scAvailH)}|${Math.round(pagerH)}`;
+      if (w._wbFitSig === sig && typeof w._wbFitH === 'number' && w._wbFitH >= 160) h = w._wbFitH;
+      const applyH = (v) => {
+        h = v;
+        const s = v + 'px';
+        if (w.style.getPropertyValue('--wb-fit-h') !== s) w.style.setProperty('--wb-fit-h', s);
+      };
+      applyH(h);
+      const keepInner = w.scrollTop;
+      const restoreInner = () => {
+        const max = w.scrollHeight - w.clientHeight;
+        const want = Math.max(0, Math.min(keepInner, max));
+        if (Math.abs(w.scrollTop - want) > 0.5) w.scrollTop = want;
+      };
+      if (regionMode && sc !== document.body) {
+        // 🟢 v228.76「滚动天花板」几何校准（用户完整规格）：
+        //   目标：页面最大滚动量 S_max = scrollHeight − clientHeight **精确等于** offsetInSc
+        //   （= 表格上方内容高）。达成后的终态恰好是用户要的三段式——
+        //     · 外层拉到头 ⇔ 表格区域顶边正好落在可视区顶（顶格），再拉原生就滑不动；
+        //     · thead 的吸附基准是 wrapper 顶边（style.css 3620 sticky!important），
+        //       wrapper 顶边永不出界 → 「标题行不消失」；
+        //     · 分页条随文档流恰好同时贴底出现 → 「表头顶格 + 翻页键同屏」；
+        //     · 数据行由表格自身内部滚动条滚动 → 「中间数据用表格下拉条看」。
+        //   分页条以下的 padding/间隙不可预知（实测订单页 70px，其中 tabbar 56），
+        //   只能实测回削：over = (scrollHeight − clientHeight) − offsetInSc，over>0 削表高、
+        //   over<0 增表高（依赖下方 .wb-table-region min-height 定高规则，数据不足也撑满），
+        //   一轮测量一轮修正，pad 恒定 → 1~2 轮收敛。360px 下限防御异常模块（此时由
+        //   document 捕获监听钳制兜底）。
+        //   注：此处先打 .wb-table-region 再校准 —— min-height 定高规则依赖该 class，
+        //   若等 post-loop 打标，首轮校准会在「无定高」状态下测量而出错；class 幂等，
+        //   post-loop 的统一对账（摘标逻辑）不受影响。
+        sc.classList.add('wb-table-region');
+        let guard = 0;
+        while (guard++ < 5) {
+          const over = (sc.scrollHeight - sc.clientHeight) - offsetInSc;  // >0 还能再滚(表头会被顶出)；<0 到不了顶
+          if (Math.abs(over) <= 1) break;
+          const nh = h - over;
+          if (nh < 360) { applyH(360); break; }
+          applyH(nh);
+        }
+        sc._wbRegionCeiling = offsetInSc;               // 天花板写入容器，供 document 捕获监听兜底钳制
+      } else {
+        sc._wbRegionCeiling = null;                     // 经典吸底 / 多表格 / body 滚动：无天花板概念
+      }
       if (regionMode) regionScs.add(sc);
       // 🔴 校准循环（v228.73 实测补丁）：Chrome 对 position:sticky;bottom:0 的分页条有
       // 「预置位」行为——只要滚动容器内容溢出 N px，吸底条在 scrollTop=0 时就预先钉在
@@ -2208,17 +2337,26 @@ const TableUtils = {
       if (!isMulti && !regionMode && sc !== document.body) {
         let guard = 0;
         while (sc.scrollHeight > sc.clientHeight + 1 && guard++ < 4) {
-          h -= (sc.scrollHeight - sc.clientHeight) + 2;
-          if (h < 160) { h = 160; w.style.setProperty('--wb-fit-h', h + 'px'); break; }
-          w.style.setProperty('--wb-fit-h', h + 'px');
+          const nh = h - (sc.scrollHeight - sc.clientHeight) - 2;
+          if (nh < 160) { applyH(160); break; }
+          applyH(nh);
         }
       }
+      w._wbFitH = h;                                    // 🟢 v228.77：记住本轮校准结果供下轮复用
+      w._wbFitSig = sig;
+      restoreInner();                                   // 🟢 v228.77：高度变过就把内层滚动还回去
     });
     // 🟢 v228.75：区域模式打标 / 摘标（筛选收起展开、图表显隐会改变上方内容高 → 模式随之切换）
     document.querySelectorAll('.wb-table-region').forEach(s => {
       if (!regionScs.has(s)) s.classList.remove('wb-table-region');
     });
     regionScs.forEach(s => s.classList.add('wb-table-region'));
+    // 🟢 v228.76：重适配后若当前滚动已越过新天花板（如筛选收起 → offsetInSc 变小、
+    //   或模式从经典切到区域），立即拉回天花板 —— 否则表头停在出界状态直到下次滚动。
+    regionScs.forEach(s => {
+      const c = s._wbRegionCeiling;
+      if (c != null && s.scrollTop - c > 1) s.scrollTop = c;
+    });
   },
 
   /**
@@ -2416,7 +2554,7 @@ const TableUtils = {
   // 统一 Excel 导出（O1 去重）：rows 为空时提示并返回，行为与原各模块一致
   // 🟢 v228.08：XLSX 改为按需加载，本函数升级为 async。
   //   内部已处理「加载提示 + 失败提示」，13 处外部调用点无需改动（不 await 亦可正常下载）。
-  async exportToExcel(rows, filename, sheetName) {
+  async exportToExcel(rows, filename, sheetName, columns) {
     if (!rows || !rows.length) { WBModal.alert('没有数据'); return; }
     // 首次导出需下载 XLSX 组件，给出加载提示，避免点击后无反馈（不牺牲体验）
     let needHide = false;
@@ -2427,7 +2565,18 @@ const TableUtils = {
     }
     try {
       const XLSX = await LazyLib.xlsx();
-      const ws = XLSX.utils.json_to_sheet(rows);
+      // 🟢 v229.03：列白名单 —— 传入 columns（key 数组或 {key,title} 数组）时，
+      //   只导出这些列且列头/列序与工作台表格完全一致；未传则保持旧行为（全部字段原样导出）。
+      let data = rows;
+      if (Array.isArray(columns) && columns.length) {
+        const cols = columns.map(c => (typeof c === 'string') ? { key: c, title: c } : c);
+        data = rows.map(r => {
+          const o = {};
+          cols.forEach(({ key, title }) => { o[title] = r[key]; });
+          return o;
+        });
+      }
+      const ws = XLSX.utils.json_to_sheet(data);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, sheetName || '数据');
       XLSX.writeFile(wb, filename);

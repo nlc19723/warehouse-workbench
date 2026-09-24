@@ -393,8 +393,11 @@ const InboundModule = {
 
   async exportData() {
     const result = await DataStore.getInbound(this.currentFilter, 1, 100000);
-    // 🟢 O1：统一导出（行为与原逻辑一致）
-    TableUtils.exportToExcel(result.items, `入库列表_${new Date().toISOString().split('T')[0]}.xlsx`, '入库列表');
+    // 🟢 v229.03：导出列 = 工作台表格当前 11 列（列名与表头一致）
+    const cols = [{ key: '表体订单号', title: '订单编号' }, '入库日期', '入库单号', '供应商',
+      { key: '项目名称', title: '项目' }, '存货编码', '存货名称', '规格型号',
+      { key: '数量', title: '入库量' }, { key: '原币含税单价', title: '含税单价' }, { key: '原币价税合计', title: '含税金额' }];
+    TableUtils.exportToExcel(result.items, `入库列表_${new Date().toISOString().split('T')[0]}.xlsx`, '入库列表', cols);
   },
 
 };

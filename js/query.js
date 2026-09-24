@@ -27,7 +27,7 @@ const QueryModule = {
     { id: 'stock', label: '存量', icon: '🏪' },
     { id: 'orders', label: '订单', icon: '📝' },
     { id: 'inbound', label: '入库', icon: '📥' },
-    { id: 'pricing', label: '供应商价格', icon: '💰' },
+    { id: 'pricing', label: '价格', icon: '💰' },
   ],
 
   // 🟢 O11：表头单一数据源 —— 始终从实际数据对象键动态派生，不再维护冗余 columns 列表
@@ -136,69 +136,44 @@ const QueryModule = {
   async fetchTabData() {
     switch (this.currentTab) {
       case 'stock': {
-        const alerts = await DataStore.getRows('inventoryAlerts');
-        // 从 stock（中心库房现存量）表获取真实库存数据
-        const stockRows = await DataStore.getRows('stock');
-        const stockByCode = new Map();
-        const stockByNameSpec = new Map();
-        stockRows.forEach(s => {
-          if (s.存货编码) stockByCode.set(String(s.存货编码), s.现存数量);
-          if (s.存货名称) {
-            const key = TableUtils.buildStockKey(s.存货名称, s.规格型号);
-            stockByNameSpec.set(key, s.现存数量);
-          }
-        });
-
-        return alerts.map((a, idx) => {
-          // 交叉获取真实现存量
-          let realStock = a.现存量 || 0;
-          if (!realStock || realStock === 0) {
-            if (a.存货编码 && stockByCode.has(String(a.存货编码))) {
-              realStock = stockByCode.get(String(a.存货编码));
-            } else if (a.存货名称) {
-              const key = TableUtils.buildStockKey(a.存货名称, a.规格型号);
-              if (stockByNameSpec.has(key)) realStock = stockByNameSpec.get(key);
-              else {
-                for (const [k, v] of stockByNameSpec) {
-                  if (k.startsWith((a.存货名称 || '').replace(/\s+/g, ''))) { realStock = v; break; }
-                }
-              }
-            }
-          }
-          return {
-            '序号': idx + 1,
-            '存货编码': a.存货编码 || '',
-            '存货名称': a.存货名称 || '',
-            '规格型号': a.规格型号 || '',
-            '月均入库量': a.近一年月均入库量 || 0,
-            '现存量': realStock,
-            // 🟢 v228.03：这两列值为 0 时留空（不显示 0），避免满屏 0 干扰阅读；非 0 值照常显示
-            '是否需补货': a.补货值 || '',
-            '在途订单': a.在途订单 || '',
-            '所上或库房': a.所上或库房 || '',
-            '工程项目': a.工程项目 || '',
-          };
-        });
+        // 🟢 v229.04：存量板块全部列派生自库存预警模块（buildDerivedAlerts 共享装配）。
+        // 圈红三列对标库存预警列名：是否需补货→补货值、所上或库房→仓库、工程项目→项目。
+        const alerts = (typeof InventoryAlertModule !== 'undefined')
+          ? await InventoryAlertModule.buildDerivedAlerts()
+          : [];
+        return alerts.map((a, idx) => ({
+          '序号': idx + 1,
+          '存货编码': a.存货编码 || '',
+          '存货名称': a.存货名称 || '',
+          '规格型号': a.规格型号 || '',
+          '月均入库量': a.近一年月均入库量 || 0,
+          '现存量': a.现存量 || 0,
+          // 0 值留空（v228.03 行为延续），避免满屏 0 干扰阅读
+          '补货值': a.补货值 || '',
+          '在途订单': a.在途订单 || '',
+          '仓库': a.所上或库房 || '',
+          '项目': a.工程项目 || '',
+        }));
       }
       case 'orders': {
-        const orders = await DataStore.getRows('orders');
-        let list = orders.map(o => ({
+        // 🟢 v229.04：派生订单列表模块（DataStore.getOrders 同源装配，含 _存货编码 归一），日期过滤同款
+        const result = await DataStore.getOrders({ startDate: this.startDate, endDate: this.endDate }, 1, 1000000);
+        return (result.items || []).map(o => ({
           '订单编号': o.订单编号 || '',
           '日期': o.日期 || '',
           '项目名称': o.项目名称 || '',
           '供应商': o.供应商 || '',
-          '存货编号': o.存货编号 || '',
+          '存货编号': o._存货编码 || o.存货编号 || '',
           '存货名称': o.存货名称 || '',
           '规格型号': o.规格型号 || '',
           '订单量': o.数量 || 0,
           '未入库订单量': o.未入库量 || 0,
         }));
-        list = this._filterByDateRange(list, '日期');
-        return list;
       }
       case 'inbound': {
-        const inbound = await DataStore.getRows('inbound');
-        let list = inbound.map(i => ({
+        // 🟢 v229.04：派生入库列表模块（DataStore.getInbound 同源装配），日期过滤同款
+        const result = await DataStore.getInbound({ startDate: this.startDate, endDate: this.endDate }, 1, 1000000);
+        return (result.items || []).map(i => ({
           '订单编号': i.表体订单号 || '',  // 🟢 v190：列名与入库列表对齐（与入库表单体订单号同字段）
           '入库日期': i.入库日期 || '',
           '项目名称': i.项目名称 || '',
@@ -209,10 +184,9 @@ const QueryModule = {
           '规格型号': i.规格型号 || '',
           '入库量': i.数量 || 0,
         }));
-        list = this._filterByDateRange(list, '入库日期');
-        return list;
       }
       case 'pricing': {
+        // 🟢 v229.04：板块更名「价格」，派生供应商价格（合同价格）模块同源数据
         const pricing = await DataStore.getRows('pricing');
         return pricing.map(p => ({
           '供应商': p.供应商 || '',
@@ -444,18 +418,6 @@ const QueryModule = {
     if (endInput) this.endDate = endInput.value;
     this.page = 1;
     this.loadTabData();
-  },
-
-  // 按日期区间过滤（仅对订单 / 入库生效）
-  _filterByDateRange(list, dateField) {
-    if (!this.startDate && !this.endDate) return list;
-    return list.filter(item => {
-      const d = item[dateField];
-      if (!d) return false;
-      if (this.startDate && d < this.startDate) return false;
-      if (this.endDate && d > this.endDate) return false;
-      return true;
-    });
   },
 
   goPage(p) {

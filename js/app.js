@@ -52,6 +52,7 @@ const App = {
     this.bindPanel();
     this.bindModal();
     this.bindGlobalSearch();
+    this.wireKeeperAttention();   // 🟢 v228.84：B-精 注意力拉取（人在看/用时秒级感知权限变更）
     this.startClock();
     this.initTheme();
     // 🟢 v159：配色引擎注入分组变量（确保模块 render 内 _paintCells 加的类能读到变量）
@@ -79,64 +80,161 @@ const App = {
     this._renderTopbarAccount();    // 🟢 v227.41：把当前账号写进顶部胶囊
     this._applyEntryVisibility();   // 🟢 v227.37：4 个系统入口按权限显隐
     this._wireEntryGuards();         // 🟢 v227.37：入口 onclick 加守卫
+    this._initKeepersChannel();      // 🟢 v228.81：账号/权限哨兵的跨标签即时通道
 
-    // 先清理旧版本数据库
-    showLoading('正在准备数据库...');
-    await cleanOldDB();
-    await db.open();
-    console.log('IndexedDB opened, version:', db.verno);
+    // 🟢 v228.91：数据就绪后做一次「库存预警 ↔ 现存量」存货编码数量对账，
+    //   不一致则自动 Toast 提醒（用户需求：两表编码数量对不上要主动提醒）。
+    //   挂在 _whenBootDone —— 无论已登录交互链路还是未登录后台链路，数据收口后都触发一次。
+    this._whenBootDone(() => this._checkInvStockCodeMismatch());
 
-    // v164：云端设置数据初始化（连接 + 恢复搜索历史/出库列表跨设备记忆）
-    // 🟢 v226-fix：必须 await init() 完成（连接探测是异步的），否则 restoreOutboundFromSettings()
-    //   会在 isOnline 仍为 false 时同步 return，导致另一台设备刷新后拉不到出库列表。
-    if (typeof SyncManager !== 'undefined') {
-      try { await SyncManager.init(); } catch (e) { console.warn('SyncManager init 失败:', e); }
+    // ============================================================
+    // 🟢 v228.89：登录态前置判定 —— 「先弹登录窗，加载全静默」
+    //
+    // 改造前（用户实测反馈）：
+    //   新用户 / 退出后再进入，页面先整屏显示「正在准备数据库...」加载遮罩，
+    //   一路跑完 cleanOldDB → db.open → SyncManager.init → 拉云配置 → 后台同步
+    //   → restore* → DataLoader.init()，**在链条最末尾**（原第 171 行）才发现没登录，
+    //   这才 hideLoading + showLoginView。用户被迫看几秒到十几秒的无关加载。
+    //
+    // 为什么能提前：
+    //   AppConfig.isLoggedIn() 是**纯同步的 localStorage 读取**（config.js:629 →
+    //   !!this.getCurrentUser()，无网络、无 await）。判定它根本不花时间，
+    //   原先放在末尾只是历史书写顺序，没有任何依赖约束。
+    //
+    // 改造后：
+    //   未登录 → 立即 hideLoading() + showLoginView()（登录页 z-index 4000，
+    //   本身就会盖住加载遮罩），数据链路转为**真正后台静默**地继续跑。
+    //
+    // ⚠️ 三条铁律（改动此处务必保持）：
+    //   ① 数据链路**不能省**，只换成后台跑：xlsx/IndexedDB/SyncManager 都在下面初始化，
+    //      直接 return 会让数据链彻底失效，登录后又拿不到数据。
+    //   ② **绝不能 await** 它：一 await 就退化成改造前的行为，白等原样复现。
+    //   ③ 失败只 console.warn：后台没人接的 Promise 若 reject 会在控制台留
+    //      UnhandledRejection，且可能被误当致命错误。
+    // ============================================================
+    const _loggedIn = (typeof AppConfig !== 'undefined' && typeof AppConfig.isLoggedIn === 'function')
+      ? !!AppConfig.isLoggedIn()
+      : true;   // AppConfig 缺失属于异常场景，按"已登录"处理 → 走原有链路，避免误把人锁在登录页
+    if (AppConfig && AppConfig.isLoggedIn && !_loggedIn) {
+      hideLoading();
+      this.currentModule = '';
+      this.showLoginView();
+      // 后台静默启动数据链路（不 await）。它内部完成后的 go() 会被下面的守卫拦掉。
+      this._bootDataInBackground();
+      return;
     }
-    // 🟢 v227.37 / v228.72：启动后若已连云端，拉取一次共享云配置并跟随（管理员改凭证后全员自动切）
-    //   （云端 cloudConfig 为权威；已是最新则 pull 内部直接返回，不会重复连）
-    if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof AppConfig !== 'undefined' && typeof AppConfig.pullCloudConfigFromCloud === 'function') {
-      try { await AppConfig.pullCloudConfigFromCloud(); } catch (e) { console.warn('[cloudConfig] 启动自动拉取失败(已忽略):', e && e.message); }
-    }
-    if (typeof DataStore !== 'undefined') {
+
+    await this._bootData(true);
+  },
+
+  // ============================================================
+  // 🟢 v228.89：启动数据链路（原 App.init 中段整段抽出）
+  //
+  //   interactive=true  —— 已登录：维持原有行为（加载遮罩 + 数据到后跳首模块）
+  //   interactive=false —— 未登录：后台静默模式。**不显示加载遮罩、不导航**，
+  //                        只把 IndexedDB / SyncManager / 数据包 / 云配置准备好。
+  //
+  // 抽出的意义：让"何时判断登录"与"如何准备数据"解耦 —— 这两件事本来就没有先后依赖，
+  //   只是历史上写在了同一个方法里。解耦后登录页可以立刻出现，数据在背后安静地就位。
+  // ============================================================
+  async _bootData(interactive) {
+    // 未登录的后台模式：一律不亮遮罩。showLoading/hideLoading 是全局单例，
+    // 后台亮起来会把登录页顶掉（数据显示层 z-index 1000 < 登录页 4000，看似无害，
+    // 但一旦用户点「登录」触发_doLogin 的交互提示，两处会互相 hide，状态就乱了）。
+    //
+    // 🟢 v228.89-fix（实测缺陷，务必保持"动态判定"）：
+    //   缺陷链（tools/verify_login_handoff_v22889.py 抓到）：
+    //     interactive 是**进入 _bootData 那一刻**的快照。若用户在数据链路跑完之前登录，
+    //     链路上后续的 sl()/hl() 仍按旧快照（interactive=false → 全部静默）执行，
+    //     本身没问题；但反过来，一旦有第二条链路按 interactive=true 进来，
+    //     它的 sl('正在准备数据库...') 会在**登录后的等待遮罩之上**再点亮一次，
+    //     而它末尾的 hl() 与登录链路的 hideLoading() 互相看不见对方 → 遮罩永久留在工作台上。
+    //     实测：登录后 0.5s 起遮罩 display=flex、文案「正在准备数据库...」，一直不消失。
+    //   修法：不再只看进入时的快照，**每次调用前实时判定**当前遮罩归谁：
+    //     · 登录页还在 DOM 上        → 后台链路，静默
+    //     · 登录后等待遮罩正在持有    → 后台链路，静默（等待遮罩归 _awaitBootThenEnter 管）
+    //     · 两者都不在               → 正常交互链路，可以点亮
+    const isBackgroundNow = () => {
+      if (!interactive) return true;
       try {
-        // 🟢 v227.96：已连云端 → 进入即自动同步最新「工作/设置/盘点」三包（静默、时间戳门控，不弹确认）
-        //
-        // 🔴 v228.62（真机实测：启动白等 19 秒的元凶，务必保持"后台化"）：
-        //   旧版这里对 autoSyncFromCloud / pullCloudRecords 都是 `await`。
-        //   实测（18.4MB 工作包）：
-        //       DL.autoSyncFromCloud START      t=400ms
-        //         pullDataPrivate（下载）        t=400→1658ms   ← 只占 1.26s
-        //       DL.autoSyncFromCloud END        t=19620ms      ← 总计 19.2s！
-        //   即 17.9s 全部花在下载之后的 loadBundleFromCloud()（把 18.4MB 还原进 IndexedDB），
-        //   而它被 await 卡在 App.init() 的主链上 → **用户要白等约 19 秒才看到界面**，
-        //   15s 看门狗先触发，还会打出"启动加载超过 15s"的告警。
-        //   更糟的是它拉完一次后，DataLoader.init()（t=20102ms）又拉了一次同一份 31.7MB
-        //   data.json —— 一次启动两份全量包，这正是用户反馈"同步速度有点慢"的直接来源。
-        //
-        //   修法：把这两个"静默后台同步"真正后台化（不 await）。
-        //     ① 它们本来就是**后台静默**语义（注释原文："静默、时间戳门控，不弹确认"），
-        //        阻塞启动没有任何收益；
-        //     ② 数据是否替换由各自内部的时间戳门控 + 完整性校验决定，与"何时开始"无关；
-        //     ③ DataLoader.init() 在下方紧接着执行，它自带「本地已完整→立即显示，后台再同步」
-        //        的完整策略，云端覆盖这一职责本就由它承担，此处只是提前预热缓存、加速它。
-        //   ⚠️ 顺序不变、门控不变、失败处理不变，只去掉「阻塞」。
-        if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
-          if (typeof DataLoader !== 'undefined' && typeof DataLoader.autoSyncFromCloud === 'function') {
-            DataLoader.autoSyncFromCloud().catch(e => console.warn('[autoSync] 失败(已忽略):', e && e.message));
-          }
-          if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.pullCloudRecords === 'function') {
-            StocktakeModule.pullCloudRecords().catch(e => console.warn('[stocktake] 自动同步失败(已忽略):', e && e.message));
-          }
-        }
-        await DataStore.migrateSearchHistoryToCloud();
-        await DataStore.restoreOutboundFromSettings();
-        // 🟢 v227.77：临时出库独立云端数据包，启动时一并恢复
-        await DataStore.restoreTemporaryOutboundFromSettings();
-      } catch (e) { console.warn('设置数据恢复失败:', e); }
-    }
+        if (document.getElementById('loginScreen')) return true;
+        if (this._bootWaiting) return true;
+      } catch (e) { /* DOM 异常按前台处理 */ }
+      return false;
+    };
+    const sl = (t, o) => { if (!isBackgroundNow()) showLoading(t, o); };
+    const hl = () => { if (!isBackgroundNow()) hideLoading(); };
 
     try {
-      const imported = await DataLoader.init();
+      // 先清理旧版本数据库
+      sl('正在准备数据库...');
+      await cleanOldDB();
+      await db.open();
+      console.log('IndexedDB opened, version:', db.verno);
+
+      // v164：云端设置数据初始化（连接 + 恢复搜索历史/出库列表跨设备记忆）
+      // 🟢 v226-fix：必须 await init() 完成（连接探测是异步的），否则 restoreOutboundFromSettings()
+      //   会在 isOnline 仍为 false 时同步 return，导致另一台设备刷新后拉不到出库列表。
+      let syncInitOk = false;
+      if (typeof SyncManager !== 'undefined') {
+        try { await SyncManager.init(); syncInitOk = true; } catch (e) { console.warn('SyncManager init 失败:', e); }
+      }
+      // 🟢 v228.89：连接探测落定后回填登录页的云端状态标（见 showLoginView 的「检测中」态）。
+      //   只在登录页仍挂在 DOM 上时才写 —— 用户可能在这 1 秒内已经登录进工作台了。
+      if (!interactive) this._refreshLoginCloudBadge();
+      // 🟢 v227.37 / v228.72：启动后若已连云端，拉取一次共享云配置并跟随（管理员改凭证后全员自动切）
+      //   （云端 cloudConfig 为权威；已是最新则 pull 内部直接返回，不会重复连）
+      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof AppConfig !== 'undefined' && typeof AppConfig.pullCloudConfigFromCloud === 'function') {
+        try { await AppConfig.pullCloudConfigFromCloud(); } catch (e) { console.warn('[cloudConfig] 启动自动拉取失败(已忽略):', e && e.message); }
+      }
+      if (typeof DataStore !== 'undefined') {
+        try {
+          // 🟢 v227.96：已连云端 → 进入即自动同步最新「工作/设置/盘点」三包（静默、时间戳门控，不弹确认）
+          //
+          // 🔴 v228.62（真机实测：启动白等 19 秒的元凶，务必保持"后台化"）：
+          //   旧版这里对 autoSyncFromCloud / pullCloudRecords 都是 `await`。
+          //   实测（18.4MB 工作包）：
+          //       DL.autoSyncFromCloud START      t=400ms
+          //         pullDataPrivate（下载）        t=400→1658ms   ← 只占 1.26s
+          //       DL.autoSyncFromCloud END        t=19620ms      ← 总计 19.2s！
+          //   即 17.9s 全部花在下载之后的 loadBundleFromCloud()（把 18.4MB 还原进 IndexedDB），
+          //   而它被 await 卡在 App.init() 的主链上 → **用户要白等约 19 秒才看到界面**，
+          //   15s 看门狗先触发，还会打出"启动加载超过 15s"的告警。
+          //   更糟的是它拉完一次后，DataLoader.init()（t=20102ms）又拉了一次同一份 31.7MB
+          //   data.json —— 一次启动两份全量包，这正是用户反馈"同步速度有点慢"的直接来源。
+          //
+          //   修法：把这两个"静默后台同步"真正后台化（不 await）。
+          //     ① 它们本来就是**后台静默**语义（注释原文："静默、时间戳门控，不弹确认"），
+          //        阻塞启动没有任何收益；
+          //     ② 数据是否替换由各自内部的时间戳门控 + 完整性校验决定，与"何时开始"无关；
+          //     ③ DataLoader.init() 在下方紧接着执行，它自带「本地已完整→立即显示，后台再同步」
+          //        的完整策略，云端覆盖这一职责本就由它承担，此处只是提前预热缓存、加速它。
+          //   ⚠️ 顺序不变、门控不变、失败处理不变，只去掉「阻塞」。
+          if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
+            if (typeof DataLoader !== 'undefined' && typeof DataLoader.autoSyncFromCloud === 'function') {
+              DataLoader.autoSyncFromCloud().catch(e => console.warn('[autoSync] 失败(已忽略):', e && e.message));
+            }
+            if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.pullCloudRecords === 'function') {
+              StocktakeModule.pullCloudRecords().catch(e => console.warn('[stocktake] 自动同步失败(已忽略):', e && e.message));
+            }
+          }
+          await DataStore.migrateSearchHistoryToCloud();
+          await DataStore.restoreOutboundFromSettings();
+          // 🟢 v227.77：临时出库独立云端数据包，启动时一并恢复
+          await DataStore.restoreTemporaryOutboundFromSettings();
+        } catch (e) { console.warn('设置数据恢复失败:', e); }
+      }
+
+      // 🟢 v228.89：interactive=false 时把 silent 透传给 DataLoader ——
+      //   后台链路绝不点亮全局加载遮罩（否则登录后的等待遮罩会被后台劫持，
+      //   且链路末尾的 hideLoading 关不掉后台后续再点亮的遮罩，遮罩会永久挂在工作台上）。
+      const imported = await DataLoader.init({ silent: !interactive });
+      // 🟢 v228.89：数据链路收口信号 —— 无论界面模式如何都要置位，
+      //   登录页可能在后台等它（_awaitBootThenEnter）。
+      this._markBootDone();
+      // 🟢 v228.89：后台静默模式下，数据链路**到此为止** —— 不 hideLoading（本来就没亮）、
+      //   不导航。界面归属由用户登录后的 showLoginView → _enterWorkbench 决定。
+      if (!interactive) return;
       if (imported) {
         hideLoading(); // 先关闭加载遮罩，再渲染模块
         // 🟢 v228.49-fix4（回归套件 v22845 的 C-8 偶发失败抓到，跨端走查同源）：
@@ -168,6 +266,7 @@ const App = {
           console.warn('[app] 启动兜底阶段用户已进入「' + this.currentModule + '」模块，保留当前界面不覆盖');
         } else if (typeof AppConfig !== 'undefined' && AppConfig.isLoggedIn && !AppConfig.isLoggedIn()) {
           // 🟢 v227.36：未登录优先显示「请先登录」占位页（模块已按权限隐藏）；已登录但无数据才显示空状态引导
+          // 🟢 v228.89：签名分支已前移到 init() 顶部，这里只是历史兜底（例如后台跑完时用户刚好退出了登录）
           this.showNotLoggedInState();
         } else {
           this.showEmptyState();
@@ -176,12 +275,38 @@ const App = {
     } catch (err) {
       // 防御：初始化任何意外异常都不能导致整页永久空白且无提示
       console.error('应用初始化失败:', err);
+      this._markBootDone();   // 🟢 v228.89：异常也算收口，否则登录页会一直等
+      if (!interactive) return;   // 🟢 v228.89：后台模式无界面可恢复，只留日志
       hideLoading();
       // 🟢 v228.49-fix4：异常兜底同样不得把用户从已打开的模块踢回仪表盘
       const errNavAway = !!(this.currentModule && this.currentModule !== 'dashboard');
       try { this.go(errNavAway ? this.currentModule : 'dashboard'); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
       WBModal.alert('初始化出现异常，已尝试继续加载；如仍空白请刷新重试。\n' + (err && err.message ? err.message : err));
     }
+  },
+
+  // 🟢 v228.89：未登录时的后台数据链路入口 —— 把 Promise 挂起来只是为了让「不 await」
+  //   这件事在代码上显式可见（.catch 兜底，杜绝 UnhandledRejection）。
+  _bootDataInBackground() {
+    try {
+      this._bootData(false).catch(e => console.warn('[boot] 后台数据准备失败(已忽略):', e && e.message));
+    } catch (e) {
+      console.warn('[boot] 后台数据准备同步异常(已忽略):', e && e.message);
+    }
+  },
+
+  // 🟢 v228.89：登录页云端状态标异步回填（三态：检测中 → 已同步 / 未连接）
+  //   调用时机：SyncManager.init() 落定之后。若那时登录页已被移除（用户已登录）则静默跳过。
+  _refreshLoginCloudBadge() {
+    const el = document.getElementById('loginCloud');
+    if (!el) return;
+    // 二次确认：登录页在场但用户已登录（异常时序）→ 不写，让 _enterWorkbench 收尾
+    if (typeof AppConfig !== 'undefined' && AppConfig.isLoggedIn && AppConfig.isLoggedIn()) return;
+    const online = (typeof SyncManager !== 'undefined') ? !!SyncManager.isOnline : false;
+    el.classList.remove('is-checking');
+    el.classList.toggle('online', online);
+    el.innerHTML = '<span class="dot"></span>' + (online ? '云端已同步' : '云端未连接');
+    console.log('[boot] 登录页云端状态标已回填：' + (online ? '已同步' : '未连接'));
   },
 
   // 🟢 M7：无可用数据时的空状态引导页（新链接 / 清空本地后首屏）
@@ -335,18 +460,16 @@ const App = {
     });
   },
 
-  // 🟢 v228.28：底部「更多 / 设置」折叠分组——默认收起，点击头部展开；展开状态记忆
+  // 🟢 v228.28：底部「更多 / 设置」折叠分组——默认收起，点击头部展开
+  // 🟢 v228.93：按需求改为每次进入都默认收起（不再记忆上次展开状态）
   initFooterGroup() {
     const group = document.getElementById('sidebarFooterGroup');
     const toggle = document.getElementById('sidebarFooterToggle');
     if (!group || !toggle) return;
-    const KEY = 'sidebarFooterOpen';
-    if (localStorage.getItem(KEY) === '1') group.classList.add('open');
     const sync = () => toggle.setAttribute('aria-expanded', group.classList.contains('open') ? 'true' : 'false');
     sync();
     const flip = () => {
-      const open = group.classList.toggle('open');
-      try { localStorage.setItem(KEY, open ? '1' : '0'); } catch (e) { /* 忽略存储失败 */ }
+      group.classList.toggle('open');
       sync();
     };
     toggle.addEventListener('click', flip);
@@ -822,17 +945,26 @@ const App = {
   },
 
   // 🟢 v227.37：保存云端凭证（同时下发给云端供其他设备拉取）
-  _saveSupabaseOverride() {
+  // 🟢 v228.92：保存后本机立即重连到新桶（修复：旧逻辑只写 override + 上云、不重连，
+  //   导致管理员本机 SyncManager 永远停在旧桶；auto-follow 又因 override 已新而判「已是最新」跳过）
+  async _saveSupabaseOverride() {
     const u = document.getElementById('admSbUrl');
     const k = document.getElementById('admSbKey');
     if (!u || !k) return;
     if (!u.value.trim() || !k.value.trim()) { WBModal.alert('URL 与 Key 均需填写'); return; }
-    AppConfig.setSupabaseOverride(u.value.trim(), k.value.trim());
-    // 下发到云端 settings.cloudConfig
+    const url = u.value.trim();
+    const key = k.value.trim();
+    const bucket = (typeof AppConfig !== 'undefined' && AppConfig.supabase && AppConfig.supabase.bucket) || 'workbench-data';
+    AppConfig.setSupabaseOverride(url, key);
+    // ① 先把新凭证签名写入「当前仍连接的旧桶」，让还连旧桶的设备能自动读到并切换（见 pullCloudConfigFromCloud）
     if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof AppConfig.syncCloudConfig === 'function') {
-      AppConfig.syncCloudConfig();
+      try { await AppConfig.syncCloudConfig(); } catch (e) { console.warn('[cloudConfig] 上云失败(已忽略):', e && e.message); }
     }
-    WBModal.alert('云端凭证已更新并下发给所有 keeper 设备');
+    // ② 本机立即重连到新桶（修复核心：管理员这边也马上切过去，不再卡在旧桶）
+    if (typeof SyncManager !== 'undefined' && typeof SyncManager.connect === 'function') {
+      try { await SyncManager.connect(url, key, bucket); } catch (e) { console.warn('[cloudConfig] 本机重连新桶失败(已忽略):', e && e.message); }
+    }
+    WBModal.alert('云端凭证已更新并下发给所有 keeper 设备，本机已切换至新桶');
   },
 
   // 🟢 v228.72：删除「无下发的重复版本」，仅保留带 syncCloudConfig 下发的 _saveSupabaseOverride（见上）
@@ -955,7 +1087,14 @@ const App = {
       screen.className = 'login-screen';
       document.body.appendChild(screen);
     }
-    const online = (typeof SyncManager !== 'undefined') ? SyncManager.isOnline : false;
+    // 🟢 v228.88：连接探测是否已有结论。showLoginView 现在可能在**数据链路尚未跑完**时
+    //   就被调用（登录页立即弹出），此时 isOnline 还是初始 false —— 但那不代表"连不上"，
+    //   只代表"还没测"。用 _syncProbed 区分，避免给用户看一句错误结论。
+    const online = (typeof SyncManager !== 'undefined') ? !!SyncManager.isOnline : false;
+    const probed = (typeof SyncManager !== 'undefined') ? !!SyncManager._syncProbed : true;
+    const cloudCls = probed ? (online ? ' online' : '') : ' is-checking';
+    const cloudTxt = probed ? (online ? '云端已同步' : '云端未连接') : '检测中…';
+    const cloudHtml = '<span class="login-cloud' + cloudCls + '" id="loginCloud"><span class="dot"></span>' + cloudTxt + '</span>';
     // 🟢 v227.40：背景图（本地 SVG，缺图自动回退极光渐变），选择持久化到 localStorage
     const bgMap = {
       warehouse: 'assets/login-bg/warehouse.svg',
@@ -1008,7 +1147,7 @@ const App = {
           '<button type="button" class="login-submit" id="loginSubmit">登 录</button>' +
         '</div>' +
         '<div class="login-footer">' +
-          '<span class="login-cloud' + (online ? ' online' : '') + '" id="loginCloud"><span class="dot"></span>' + (online ? '云端已同步' : '云端未连接') + '</span>' +
+          cloudHtml +
           '<span class="login-ver">' + ((typeof AppConfig !== 'undefined' && AppConfig.app && AppConfig.app.version) || '') + '</span>' +
         '</div>' +
       '</div>';
@@ -1090,6 +1229,12 @@ const App = {
   },
 
   // 🟢 v227.38：登录成功 → 整页淡出后进入工作台
+  //
+  // 🟢 v228.89（登录态前置改造的收口）：现在登录可能在**后台数据链路尚未跑完**时发生
+  //   （登录页不再等数据），所以这里必须先判断"数据到位没有"，不能再无条件 go()：
+  //     · 数据已就绪（日常：本地已有完整数据）→ 原行为，直接进首模块；
+  //     · 数据在途（新设备首次登录 / 冷启动）→ 亮轻量「正在同步…」遮罩等数据链路收口，
+  //       完成后自动进入。**有超时**，极端情况下不会把用户锁在等待遮罩里。
   _enterWorkbench() {
     const screen = document.getElementById('loginScreen');
     if (screen) {
@@ -1102,7 +1247,86 @@ const App = {
     this._wireEntryGuards();
     const ov = document.getElementById('modalOverlay'); if (ov) ov.classList.remove('show');
     const first = this._firstAllowedModule();
-    this.go(first || 'dashboard');
+
+    // 数据链路是否已收口（_bootDone 由 _bootData 结束时置位，见下方 _markBootDone）
+    if (this._bootDone) { this.go(first || 'dashboard'); return; }
+    this._awaitBootThenEnter(first || 'dashboard');
+  },
+
+  // 🟢 v228.89：数据链路的进度信号（供登录后的「数据就绪衔接」使用）
+  _bootDone: false,
+  _bootDoneCbs: [],
+  _markBootDone() {
+    if (this._bootDone) return;
+    this._bootDone = true;
+    const cbs = this._bootDoneCbs.slice();
+    this._bootDoneCbs.length = 0;
+    cbs.forEach(cb => { try { cb(); } catch (e) { console.warn('[boot] 就绪回调异常(已忽略):', e && e.message); } });
+  },
+  _whenBootDone(cb) {
+    if (this._bootDone) { cb(); return; }
+    this._bootDoneCbs.push(cb);
+  },
+
+  // 🟢 v228.91：库存预警 ↔ 现存量 存货编码数量对账提醒（仅做 A：自动 Toast）
+  //
+  // 机制：
+  //   ① 取两表「去重后的存货编码集合」比较数量（inventoryAlerts.存货编码 vs stock.存货编码）。
+  //   ② 一致 → 清掉 localStorage baseline；下次再不一致会重新提醒。
+  //   ③ 不一致但 baseline 记录的旧数量与本次【完全相同】 → 不弹，避免每次启动都骚扰。
+  //   ④ 不一致且数量有变化（首次 / 预警变多 / 变少）→ 弹 warn Toast，并把本次数量写入 baseline。
+  //   ⑤ 方向区分提示语：预警比现存【多】= 预警悬空（有预警无档案）；
+  //      预警比现存【少】= 缺覆盖（有货未纳入预警）。
+  // 注：仅比"编码数量"，不比数值 —— 数量差已是用户能直接处理的症状信号；
+  //   跨表字段名口径分裂（如 orders 用「存货编号」）不在本提醒范围。
+  _INVSTOCK_MISMATCH_KEY: 'wb_invstock_mismatch_baseline',
+  _checkInvStockCodeMismatch() {
+    const self = this;
+    const _norm = (v) => (v == null ? '' : String(v).trim());
+    const _getBase = () => { try { return JSON.parse(localStorage.getItem(self._INVSTOCK_MISMATCH_KEY) || 'null'); } catch (e) { return null; } };
+    const _setBase = (v) => {
+      try { if (v) localStorage.setItem(self._INVSTOCK_MISMATCH_KEY, JSON.stringify(v)); else localStorage.removeItem(self._INVSTOCK_MISMATCH_KEY); } catch (e) { /* 隐私模式忽略 */ }
+    };
+    Promise.all([
+      (typeof DataStore !== 'undefined') ? DataStore.getRows('inventoryAlerts') : Promise.resolve([]),
+      (typeof DataStore !== 'undefined') ? DataStore.getRows('stock') : Promise.resolve([])
+    ]).then(([alerts, stock]) => {
+      const alertCodes = new Set((alerts || []).map(a => _norm(a.存货编码)).filter(Boolean));
+      const stockCodes = new Set((stock || []).map(s => _norm(s.存货编码)).filter(Boolean));
+      const alertCount = alertCodes.size, stockCount = stockCodes.size;
+      if (alertCount === stockCount) { _setBase(null); return; }   // 一致 → 清 baseline
+      const prev = _getBase();
+      if (prev && prev.alertCount === alertCount && prev.stockCount === stockCount) return;  // 差异未变 → 不重复弹
+      _setBase({ alertCount, stockCount });
+      const diff = alertCount - stockCount;
+      const msg = (diff > 0)
+        ? `库存预警 ${alertCount} 个存货编码，比现存量 ${stockCount} 个多 ${diff} 个（预警有、现存量查无档案）`
+        : `库存预警 ${alertCount} 个存货编码，比现存量 ${stockCount} 个少 ${Math.abs(diff)} 个（有货未纳入预警）`;
+      if (typeof window.showToast === 'function') window.showToast(msg, 'warn', 9000);
+    }).catch(e => console.warn('[对账] 库存预警↔现存量 编码比对失败(已忽略):', e && e.message));
+  },
+
+  // 🟢 v228.89：登录后等数据就绪再进工作台。
+  //   ⚠️ 关键约束：超时后进入也**不能**取消/打断数据链路 —— 它自己会跑完并把数据落库，
+  //      用户此时看到的是"界面先到、数据随后到"，与改造前的最终结果一致，只是不再空等。
+  //      并且必须调 DataLoader 的重渲能力把当前模块刷新一遍，否则用户会停留在该模块的
+  //      空骨架页面（数据到了但没人告诉界面去重渲）。__bootDataSettled 回调即为此。
+  _awaitBootThenEnter(target) {
+    if (this._bootWaiting) { return; }   // 防重入（登录按钮连点）
+    this._bootWaiting = true;
+    const HARD_MS = 20000;   // 兜底上限：超过则先放行，数据链路继续在后台收尾
+    let done = false;
+    const finish = (reason) => {
+      if (done) return;
+      done = true;
+      this._bootWaiting = false;
+      hideLoading();
+      console.log('[boot] 登录后进入工作台（' + reason + '）');
+      this.go(target || 'dashboard');
+    };
+    showLoading('正在同步数据…', { variant: 'capsule', sub: '首次登录需同步一次数据，通常几秒' });
+    this._whenBootDone(() => finish('数据已就绪'));
+    setTimeout(() => finish('等待超时，先放行'), HARD_MS);
   },
 
   // 🟢 v227.38：UI 无关的登录校验（库管员 + 管理员，含 v227.36 在线首验/离线复用门禁）
@@ -1587,6 +1811,79 @@ const App = {
     });
   },
 
+  // 🟢 v228.81：账号/权限哨兵的跨标签即时通道。
+  //   · BroadcastChannel('wb_keepers')：管理员在 A 标签改账号/权限 → B 标签近乎零延迟拉取刷新，
+  //     不依赖 5s 轮询那一跳（跨设备仍走 5s 哨兵，此通道只覆盖同浏览器多标签）。
+  //   · storage 事件兜底：同源多标签共享 localStorage('wb_keepers')，编辑标签写入会触发他标签 storage，
+  //     同样唤醒 keepersWatchTick（其内部按云端 meta 去重，不会重复拉）。
+  //   二者都复用 AppConfig.keepersWatchTick（与 5s 轮询同一函数），保证"多处触发、一次去重拉取"。
+  _keepersCh: null,
+  _initKeepersChannel() {
+    if (this._keepersChInited) return;
+    this._keepersChInited = true;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        this._keepersCh = new BroadcastChannel('wb_keepers');
+        this._keepersCh.onmessage = () => { try { if (typeof AppConfig !== 'undefined' && AppConfig.keepersWatchTick) AppConfig.keepersWatchTick(); } catch (e) {} };
+      } catch (e) { this._keepersCh = null; }
+    }
+    try {
+      window.addEventListener('storage', (ev) => {
+        if (ev && ev.key === 'wb_keepers') { try { if (typeof AppConfig !== 'undefined' && AppConfig.keepersWatchTick) AppConfig.keepersWatchTick(); } catch (e) {} }
+      });
+    } catch (e) { /* 忽略 */ }
+  },
+
+  // 🟢 v228.81：账号/权限变更后触发的静默刷新回调（由 AppConfig.keepersWatchTick 在拉取成功后调用）。
+  //   设计原则：静默刷新界面，不跳模块、不打断当前操作；仅在"身份被删/禁用"或"当前模块权限被收回"时给轻提示。
+  _onKeepersChanged() {
+    if (document.getElementById('loginScreen')) return; // 登录页无需重渲（本地账号已通过 pull 更新，登录时即时生效）
+    // 🟢 v228.85：**先快照**权限面板的编辑对象，再执行任何会重绘 DOM 的操作。
+    //   根因（e2e 实测）：renderAccountBar() 内部的顶部胶囊/侧边栏/入口重绘会把 modalBody 上
+    //   用于传递编辑对象的 data-editor-name 一并冲掉，导致随后的重渲判定读到空值而静默跳过 ——
+    //   表现为「数据已同步、权限面板复选框却不勾」。故：开头取值 → 之后再重渲（值用快照）。
+    let editingName = '';
+    try {
+      const body = document.getElementById('modalBody');
+      editingName = (body && body.getAttribute('data-editor-name')) || '';
+    } catch (e) { /* 忽略 */ }
+    try { this.renderAccountBar(); } catch (e) { /* 重渲失败不阻断 */ }
+    const _rerenderEditor = () => {
+      try { if (editingName && typeof this.openKeeperEditor === 'function') this.openKeeperEditor(editingName); } catch (e) { /* 不阻断 */ }
+    };
+    _rerenderEditor();
+    // 兜底：若 renderAccountBar 之后的异步重绘在下一帧覆盖了 modal，再补渲一次（幂等）。
+    try { if (typeof requestAnimationFrame === 'function') requestAnimationFrame(_rerenderEditor); else setTimeout(_rerenderEditor, 0); } catch (e) { /* 忽略 */ }
+    try { this._checkKeeperSessionValidity(); } catch (e) { /* 校验失败不阻断 */ }
+  },
+
+  // 🟢 v228.81：当前登录身份/权限被远程变更后的轻提示（绝不强制踢出，尊重用户正在进行的作业）。
+  //   · 账号被删除 → 提示重新登录；
+  //   · 账号被禁用 → 提示被禁用；
+  //   · 当前所在模块的访问权限被收回 → 提示该模块权限被收回（界面已通过 _applySidebarVisibility 隐藏入口）。
+  _checkKeeperSessionValidity() {
+    const cfg = (typeof AppConfig !== 'undefined') ? AppConfig : null;
+    if (!cfg || !cfg.getCurrentUser) return;
+    const u = cfg.getCurrentUser();
+    if (!u || !u.username) return;
+    if (u.username === '管理员') return; // 内置管理员始终有权
+    const list = cfg.getKeepers();
+    const rec = (Array.isArray(list)) ? list.find(k => k.username === u.username) : null;
+    if (!rec) {
+      if (typeof window.showToast === 'function') window.showToast('账号「' + u.username + '」已被管理员删除，请重新登录', 'warn', 4500);
+      return;
+    }
+    if (rec.disabled) {
+      if (typeof window.showToast === 'function') window.showToast('账号「' + u.username + '」已被管理员禁用', 'warn', 4500);
+      return;
+    }
+    const cur = this.currentModule;
+    if (cur && cur !== 'dashboard' && !this._canAccessModule(cur)) {
+      const label = (cfg.MODULES_MAP && cfg.MODULES_MAP[cur]) || cur;
+      if (typeof window.showToast === 'function') window.showToast('你对「' + label + '」的访问权限已被管理员收回', 'warn', 4500);
+    }
+  },
+
   // 🟢 v227.37：4 个系统入口的对外方法（index.html onclick 直接调用；内部已自带权限判断）
   openCloudEntry() {
     if (!AppConfig.canAccessEntry(this._currentUserName(), 'cloud')) { WBModal.alert('无权限：请联系管理员在「权限设置 → 编辑权限」中勾选「云端同步」'); return; }
@@ -1782,6 +2079,9 @@ const App = {
 
   async go(moduleName, params) {
     if (!this.modules[moduleName]) return;
+    // 🟢 v228.79 P1-2：切模块先清掉上一个模块残留的吐司提示（含底部玻璃 toast 与历史胶囊），
+    //   避免"当前模块出错"的误导。统一提示系统见 modal.js 的 window.showToast / dismissAllToasts。
+    if (typeof dismissAllToasts === 'function') { try { dismissAllToasts(); } catch (e) {} }
     // v217 模块权限拦截：无权限账号禁止进入，并落地到第一个有权限模块
     if (!this._canAccessModule(moduleName)) {
       // 🟢 v227.36：未登录 → 显示「请先登录」占位（不弹空白/不告警），账号条提供登录入口
@@ -1967,6 +2267,23 @@ const App = {
   // 🟢 v227.41：顶部搜索框已替换为账号胶囊，全局搜索功能下线入口；保留方法以避免外部调用报错
   bindGlobalSearch() {
     /* noop — 顶部搜索框已被账号胶囊替代，全局搜索入口移除 */
+  },
+
+  // 🟢 v228.84（B-精）：注意力拉取 —— 人在「看 / 用」设备时，权限变更秒级到账；空闲时不轮询、零流量。
+  //   仅挂一次性监听，收到事件即调既有的 AppConfig.keepersWatchTick()（其逻辑/CDN 绕过/拉取/_onKeepersChanged 一律不变）。
+  //   触发点：标签页重新可见、窗口获焦、以及「用户首次交互」（点击/按键）——覆盖「盯着静止页时管理员正好改了」的瞬时感知。
+  //   不改动任何其它模块逻辑；所有调用包在 try/catch 内，绝不外泄。
+  wireKeeperAttention() {
+    try {
+      if (window.__keeperAttentionWired) return;
+      window.__keeperAttentionWired = true;
+      const fire = () => { try { if (typeof AppConfig !== 'undefined' && AppConfig.keepersWatchTick) AppConfig.keepersWatchTick(); } catch (e) {} };
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) fire(); });
+      window.addEventListener('focus', fire);
+      const once = () => { fire(); };
+      window.addEventListener('click', once, { once: true });
+      window.addEventListener('keydown', once, { once: true });
+    } catch (e) { /* 监听挂载失败不影响主流程 */ }
   },
 
   async showSearchResults(kw) {

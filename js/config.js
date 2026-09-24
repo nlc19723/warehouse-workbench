@@ -264,7 +264,7 @@ window.AppConfig = {
     // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
     // 🟢 v228.48：真实走查修复 —— 启动兜底「空状态」不再覆盖用户已打开的界面
     // 🟢 v228.45：季度盘点跨端一致性 —— 同一账号 PC/移动端任务、进度、批次区间完全统一
-    version: 'v228.75',
+    version: 'v229.17',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
@@ -396,10 +396,124 @@ window.AppConfig = {
   },
 
   // 写全部账号（同步落本地）+ 异步上云（best-effort，不阻塞）
-  setKeepers(arr) {
+  // 🟢 v228.81：新增 opts.bumpMeta（默认 true）。账号真相变更（新增/改密/改权限/禁用/删除）走默认，
+  //   写完后 bump 云端 keepersMeta 时间戳键 → 其他设备哨兵轮询秒级感知；
+  //   接收端拉取（pullKeepersFromCloud）传 {bumpMeta:false}，避免回写触发"全设备互拉"死循环。
+  // 🟢 v228.82：先等云端账号列表上云完成，再 bump 时间戳 —— 消除「meta 已新、keepers 尚旧」的竞态窗口。
+  //   旧版 syncKeepers() 与 _bumpKeepersMeta() 并发未 await，若 meta 先于 keepers 上云，其他设备会在
+  //   meta 变化后 pull 到「旧 keepers」并写回本地、且把 _keepersLastMetaTs 卡为新值 → 永不二次 pull →
+  //   跨设备权限变更丢失（典型表现：PC 改权限后移动端已登录库管员迟迟不解锁）。
+  //   仅 sync 成功才 bump：离线/失败则不通知其他设备（它们也离线，无意义，且避免误导）。
+  // 🔴 v228.84（真实根因修复）：新增 opts.pushCloud（默认 true）。**接收端拉取路径必须传 false**。
+  //   事故链（真机复现，桩日志实证）：接收端 pull 到云端 keepers 后调 setKeepers(合并结果)，
+  //   而 setKeepers 第一步就是 syncKeepers() 把【本机列表】推上云 —— 一旦这次 pull 因任何原因
+  //   读到了陈旧值（短缓存 / CDN 旧值 / 恰好落在对方 PUT 之前），接收端就会用【旧列表】覆盖云端，
+  //   把管理员刚授权的权限抹掉；同时 _keepersLastMetaTs 已被记为最新 → 永不重拉 → 权限永久丢失。
+  //   这正是"PC 改权限后移动端/库管员端不解锁"的真实机制（不只是没拉到，而是拉取动作反向污染云端）。
+  //   → 接收端只落本地，**绝不回写云端**；云端真相只由"本机发生账号变更"的那一端写入。
+  async setKeepers(arr, opts) {
+    opts = opts || {};
     try { localStorage.setItem(this._keeperLSKey(), JSON.stringify(Array.isArray(arr) ? arr : [])); }
     catch (e) { /* 隐私模式忽略 */ }
-    this.syncKeepers();
+    if (opts.pushCloud === false) return;   // 🟢 v228.84：接收端合并结果只落本地，不回写云端
+    let synced = false;
+    try { await this.syncKeepers(); synced = true; } catch (e) { /* 离线/失败：本端已落本地，仅不通知其他设备 */ }
+    if (synced && opts.bumpMeta !== false) { try { await this._bumpKeepersMeta(); } catch (e) {} }
+  },
+
+  // 🟢 v228.81：账号/权限哨兵 —— 轻量时间戳键。
+  //   · 仅存 {ts}，几十字节；与全量 keepers（几 KB）解耦，使"常轮询"只探 tiny 键、全量仅在真变更时拉。
+  //   · 写云端 keepersMeta + 同浏览器多标签 BroadcastChannel 广播；并设置本端 _keepersLastMetaTs
+  //     跳过自家 watch 的自拉（编辑端已是最新，无需再 pull）。
+  _keepersChannel: undefined,
+  _keepersLastMetaTs: 0,
+  // 🟢 v228.84：D1 搭车用的「物理文件时间戳」——记录上次从数据同步心跳 list 里看到的
+  //   settings/keepersMeta.json 的 updated_at（ISO→ms）。与 _keepersLastMetaTs（逻辑 ts，来自文件内容 {ts}）
+  //   分开记录，二者都在同一次 bump 时变化，故可用于去重、避免每次心跳都误触发拉取。
+  _keepersLastMetaUpdatedAt: 0,
+  _cloudCfgLastMetaUpdatedAt: 0,   // 🟢 v228.94：云端配置(cloudConfig.json)物理时间戳，复用数据同步心跳做零额外请求探测
+  async _bumpKeepersMeta() {
+    const ts = Date.now();
+    this._keepersLastMetaTs = ts; // 本端刚写，跳过自家 5s watch 的自拉
+    try {
+      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
+        await SyncManager.setSetting('keepersMeta', { ts });
+      }
+    } catch (e) { /* 忽略：哨兵键写入失败不阻断账号保存 */ }
+    const ch = this._getKeepersChannel();
+    if (ch) { try { ch.postMessage({ type: 'keepersChanged', ts }); } catch (e) {} }
+  },
+  _getKeepersChannel() {
+    if (this._keepersChannel === undefined) {
+      this._keepersChannel = null;
+      if (typeof BroadcastChannel !== 'undefined') {
+        try { this._keepersChannel = new BroadcastChannel('wb_keepers'); } catch (e) { this._keepersChannel = null; }
+      }
+    }
+    return this._keepersChannel;
+  },
+  // 🟢 v228.81：哨兵tick —— 由 sync.js 的 5s 轮询与 app.js 的 BroadcastChannel/storage 事件共用。
+  //   只读云端 keepersMeta（单键直读，~1 请求）；ts 变化才 pullKeepersFromCloud（全量仅在真变更时拉），
+  //   拉取成功后触发 App._onKeepersChanged() 做静默刷新。返回是否发生了变更拉取。
+  async keepersWatchTick() {
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
+    // 🟢 v228.82：开启 CDN 绕过窗口，使本次 watch 对 keepersMeta / keepers 的读取走
+    //   _readSettingFileBusted（?t= 直读），绕过 Supabase Storage 3~10s 的 CDN 旧值，
+    //   让「PC 改权限 → 移动端秒级感知」在公有桶下成立；私有桶下该路径回退 SDK 下载，
+    //   由 5s 轮询自然收敛，无副作用。
+    // 🔴 v228.84 修复：原写法 `if (typeof SyncManager._bustUntil !== 'undefined')` 是**恒假守卫**——
+    //   `_bustUntil` 只在 beginReadRound()（数据轮询）里被赋过数字值，若本会话没跑过数据轮询，
+    //   它一直是 undefined，`typeof undefined === 'undefined'` → 条件为 false → **bust 永不设置**
+    //   → 本次 watch 不会走 _readSettingFileBusted 直读 → 命中 2s 短缓存里的陈旧 keepersMeta
+    //   → 误判「无变更」→ 永不 pull → 跨设备权限变更彻底失效（真机复现：桩日志确认 tick 期间零 busted 请求）。
+    //   改为无条件赋值（_bustUntil 是纯数字字段，赋值零副作用）。
+    SyncManager._bustUntil = Date.now() + 1500;
+    let ts = 0;
+    try { const m = await SyncManager.getSetting('keepersMeta'); ts = (m && m.ts) || 0; } catch (e) { return false; }
+    if (!ts) return false;
+    if (ts !== this._keepersLastMetaTs) {
+      this._keepersLastMetaTs = ts;
+      const st = await this.pullKeepersFromCloud();
+      if (st === 'ok' || st === 'empty') {
+        if (typeof App !== 'undefined' && App._onKeepersChanged) { try { App._onKeepersChanged(); } catch (e) {} }
+        // 🟢 v228.94：权限变更与桶切换常由同一管理员动作触发；顺带检查新桶下发，复用本 60s 看门狗
+        try { if (typeof this.pullCloudConfigFromCloud === 'function') this.pullCloudConfigFromCloud(); } catch (e) {}
+        return true;
+      }
+    }
+    return false;
+  },
+
+  // 🟢 v228.84（D1 搭车）：复用「数据同步心跳」的 list('settings') 结果做权限变更探测，零额外请求。
+  //   数据同步在空闲 30s / 盘点中 1.5s 的心跳里本就会 list 一次并带回各文件 updated_at（含 keepersMeta.json）。
+  //   本函数由 SyncManager.getSettingsMeta() 在返回前以「只读 + try/catch 保护」方式调用，
+  //   绝不改写 meta、绝不改变数据同步的节奏或返回结构，因此不影响盘点 / 库存等任何其它模块。
+  //   仅当 keepersMeta.json 的物理 updated_at 变化时才触发既有的 keepersWatchTick()（其内逻辑、CDN 绕过、拉取、_onKeepersChanged 一律不变）。
+  _checkKeepersViaSettingsMeta(meta) {
+    try {
+      if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
+      if (!Array.isArray(meta)) return;
+      // ① 权限变更探测（原有）
+      const m = meta.find(o => o && o.name === 'keepersMeta.json');
+      if (m && m.updated_at) {
+        const kts = Date.parse(m.updated_at);
+        if (!isNaN(kts) && this._keepersLastMetaUpdatedAt !== kts) {
+          this._keepersLastMetaUpdatedAt = kts; // 记录物理时间戳（ISO→ms），避免每次心跳重复触发
+          if (typeof this.keepersWatchTick === 'function') this.keepersWatchTick(); // 真有变更才走既有检测/拉取
+        }
+      }
+      // ② 🟢 v228.94：新桶下发(cloudConfig)变更探测——复用同一份 settings 列表，零额外请求。
+      //   cloudConfig.json 的 updated_at 随 syncCloudConfig 写入而变化；检测到即触发跟随切换，
+      //   无需独占 60s 定时器（详见本文件 pullCloudConfigFromCloud / sync.js keepers 看门狗）。
+      const c = meta.find(o => o && o.name === 'cloudConfig.json');
+      if (c && c.updated_at) {
+        const cts = Date.parse(c.updated_at);
+        if (!isNaN(cts) && this._cloudCfgLastMetaUpdatedAt !== cts) {
+          this._cloudCfgLastMetaUpdatedAt = cts;
+          if (typeof this.pullCloudConfigFromCloud === 'function') this.pullCloudConfigFromCloud();
+        }
+      }
+    } catch (e) { /* 探测失败绝不外泄到数据同步路径 */ }
   },
 
   // 加盐哈希：hash = sha256(trim(username) + ':' + pwd + ':' + SALT)
@@ -592,6 +706,15 @@ window.AppConfig = {
   async pullKeepersFromCloud() {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return 'offline';
     try {
+      // 🟢 v228.82：跨设备权限变更的「最后一公里」兜底 —— 强制绕过 2s 短缓存直读云端最新账号。
+      //   消除「meta 已变、但 _readSettingFile 命中 2s 缓存旧值并把 _keepersLastMetaTs 卡死」的残余窗口：
+      //   管理员改权限后，其他已登录设备一定拉到最新，而非被本地 TTL 缓存的脏数据糊弄。
+      // 🔴 v228.84：同时清掉 _settingsKeyCache（**真正存值**的地方）—— 只清 _keyTsCache 只是让 TTL 失效，
+      //   若值缓存仍在，_readSettingFile 仍会把旧值当「cached」返回（尤其 ⓪/⓪-1/失败回退分支），拉取形同虚设。
+      if (SyncManager._keyTsCache) { try { delete SyncManager._keyTsCache['keepers']; } catch (e) {} }
+      if (SyncManager._keyEpochCache) { try { delete SyncManager._keyEpochCache['keepers']; } catch (e) {} }
+      if (SyncManager._settingsKeyCache) { try { delete SyncManager._settingsKeyCache['keepers']; } catch (e) {} }
+      SyncManager._bustUntil = Date.now() + 1500;   // 🟢 v228.84：直读绕过 CDN 旧值（无条件赋值，见 keepersWatchTick 注释）
       const cloud = await SyncManager.getSetting('keepers');
       // 🟢 v228.55：云端无值时区分「真没有」和「连不上」——
       //   getSettings 本次 list+download 全失败（_lastSettingsReadOk===false）说明云端项目不可达，
@@ -619,11 +742,23 @@ window.AppConfig = {
       cloud.forEach(k => {
         if (deleted.indexOf(k.username) !== -1) { cloudHasDeleted = true; return; }  // 墓碑中的账号跳过
         const ex = map[k.username];
-        if (!ex) map[k.username] = k;                                   // 云端独有账号 → 同步到本地
-        else if (!ex.disabled && k.disabled) ex.disabled = 1;           // 云端已禁用 → 同步禁用
-        // 本地已禁用而云端未禁用：本地优先（管理员刚在本机禁用是最终意图）
+        if (!ex) { map[k.username] = k; return; }                     // 云端独有账号 → 整条同步到本地
+        // 同步权限/入口/密码哈希（云端为权威，确保"设置权限/改密码"能跨设备即时生效）
+        if (!ex.disabled && k.disabled) ex.disabled = 1;               // 云端已禁用 → 同步禁用
+        // 本地已禁用而云端未禁用：本地优先（管理员刚在本机禁用是最终意图），其余字段也不覆盖
+        if (!ex.disabled) {
+          if (Array.isArray(k.modules)) ex.modules = k.modules.slice();
+          if (Array.isArray(k.entries)) ex.entries = k.entries.slice();
+          if (k.pwdHash) ex.pwdHash = k.pwdHash;                       // 密码变更跨设备生效
+          if (k.username) ex.username = k.username;
+          if (k.createdAt) ex.createdAt = k.createdAt;
+        }
       });
-      this.setKeepers(Object.values(map));
+      // 🟢 v228.81：接收端回写不 bump，避免互拉死循环。
+      // 🔴 v228.84：**改为 pushCloud:false** —— 接收端合并结果只落本地、绝不回写云端。
+      //   原因见 setKeepers 注释：接收端回写会用（可能陈旧的）本地列表覆盖管理员的授权，
+      //   是"PC 改权限、其他端不解锁/权限被抹"的真实机制。云端真相只由发生变更的那一端写。
+      this.setKeepers(Object.values(map), { bumpMeta: false, pushCloud: false });
       // 墓碑自愈：云端已无此号（删除推送已生效）→ 清掉对应墓碑；
       // 若云端仍有（推送失败/他机旧数据回写），保留墓碑继续拦截，并立即补推一次最新列表。
       if (deleted.length) {
@@ -654,8 +789,14 @@ window.AppConfig = {
         console.warn('[cloudConfig] 签名校验未通过，疑似被篡改，已忽略本次云端配置（不会自动切换）');
         return false;
       }
-      const cur = this.getEffectiveSupabase();
-      if (cur && cur.url === cfg.url && cur.key === cfg.key) return false; // 已是最新
+      // 🟢 v228.92：修复「已是最新」判重 —— 改为比对「实际连接」而非 getEffectiveSupabase（override）。
+      //   旧逻辑用 override 比对：管理员点保存后 override 已是新桶，与云端 cloudConfig 相等 → 误判「已是最新」→ 永不重连，本机永远卡旧桶。
+      //   新逻辑用 SyncManager 当前连接的 url/key 比对：实际还连旧桶就视为「不一致」→ 真正执行 connect 切换。
+      const live = (typeof SyncManager === 'object' && SyncManager && SyncManager.config) ? SyncManager.config : null;
+      const liveUrl = live && live.url ? live.url : null;
+      const liveKey = live && live.key ? live.key : null;
+      if (liveUrl === cfg.url && liveKey === cfg.key) return false; // 实际连接已是云端下发值，无需重连
+      if (!liveUrl) console.warn('[cloudConfig] 本机尚未建立任何云端连接，按云端下发值自动连接');
       try {
         localStorage.setItem('wb_supabase_override', JSON.stringify({
           url: cfg.url, key: cfg.key,
@@ -682,6 +823,8 @@ window.AppConfig = {
       const payload = _cloudConfigPayload(eff.url, eff.key, bucket, ts);
       const sig = _hmacSha256Hex(payload, _cfgSigSecret());
       await SyncManager.setSetting('cloudConfig', { url: eff.url, key: eff.key, bucket: bucket, ts: ts, sig: sig });
+      // 🟢 v228.94：捎带 bump keepersMeta，使「未跑数据同步心跳」的设备也能经 60s 权限看门狗感知桶切换
+      try { await this._bumpKeepersMeta(); } catch (e) {}
       return true;
     }
     catch (e) { console.warn('[cloudConfig] 上云失败(已忽略):', e && e.message); return false; }

@@ -431,5 +431,16 @@
   }
   window.showToast = showToast;
 
-  window.WBModal = { alert, confirm, prompt, choice, choiceList, notify, close: () => closeDialog(null) };
+  // 🟢 v228.79 P1-2：切模块时主动清掉所有残留吐司（含底部玻璃 #wbToastHost 与历史胶囊 .ob-toast-notification），
+  //   杜绝上一个模块的提示跨模块残留误导"当前模块出错"。由 App.go 在导航时调用。
+  function dismissAllToasts() {
+    try {
+      const host = document.getElementById('wbToastHost');
+      if (host) host.innerHTML = '';
+      document.querySelectorAll('.ob-toast-notification').forEach(t => t.remove());
+    } catch (e) { /* 防御：清理失败不影响导航 */ }
+  }
+  window.dismissAllToasts = dismissAllToasts;
+
+  window.WBModal = { alert, confirm, prompt, choice, choiceList, notify, showToast, dismissAllToasts, close: () => closeDialog(null) };
 })();

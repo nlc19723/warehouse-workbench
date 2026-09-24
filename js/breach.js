@@ -173,7 +173,9 @@ const BreachModule = {
     this.loadData();
   },
   exportData() {
-    // 🟢 O1：统一导出（行为与原逻辑一致）
-    TableUtils.exportToExcel(this.currentData, `违约台账_${new Date().toISOString().split('T')[0]}.xlsx`, '违约台账');
+    // 🟢 v229.03：导出列 = 工作台表格当前 13 列（含税单价列数据字段为「单价」）
+    const cols = ['公司名称', '涉及订单号', '存货编码', '存货名称', '规格型号',
+      { key: '单价', title: '含税单价' }, '数量', '到货时间', '延迟天数', '扣款比例', '扣款金额', '违约次数', '备注'];
+    TableUtils.exportToExcel(this.currentData, `违约台账_${new Date().toISOString().split('T')[0]}.xlsx`, '违约台账', cols);
   }
 };

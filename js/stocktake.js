@@ -56,6 +56,9 @@ const StocktakeModule = {
   //   谁也看不见对方，于是同一账户两端「批次号不同、任务行不同、进度不同」。
   //   结构 { [sheetId]: { no, type, finished, date, updatedAt } }，逐键取「updatedAt 较新者」合并。
   NO_MAP_KEY: 'wb_stocktake_no_map',
+  // 🟢 v229.17（L3）：批次索引 —— 统一元数据入口。结构 { [sheetId]: { batchNo, round, openedAt, closedAt, empty } }。
+  //   界面只显 batchNo；删除判定（closedAt + empty）一行过滤即可。本地即可，无需云端（各端独立判定）。
+  BATCH_INDEX_KEY: 'wb_stocktake_batch_index',
   // 🟢 v228.48：当前季度**批次身份**的跨端共享锚点。
   //
   //   语义纠正：季度盘点 = 对「现存量快照」做一次多人分片盘点，**不存在日期区间概念**。
@@ -155,7 +158,12 @@ const StocktakeModule = {
     //   这里按内存中的视图状态补回标记：有盘点现场 → 'sheet'，否则按记忆恢复。
     // 🟢 v228.74（子视图记忆修复）：旧版对「无现场」一律回落 'quarter-picker'，导致用户停在
     //   【日常盘点】选择界面时切走模块再回来，被 3s 轮询按标记补渲成季度工作台（用户截图实锤）。
-    //   现按 _lastStView 恢复：日常选择器 → 直接重渲日常界面；其余无现场场景维持季度兜底。
+    //   现按 _lastStView 恢复：日常选择器 → 直接重渲日常界面；季度工作台 → 交由轮询按标记补渲。
+    // 🟢 v228.78（首次进入落点修复）：「真·首次进入」（刷新/登录后第一次点入盘点模块，
+    //   _lastStView 尚无记忆）旧版也兜底 'quarter-picker'，3s 轮询便据此把整个季度工作台
+    //   渲进 #stArea —— 用户预期是先看到模块初始界面（空态引导），而不是被动落进季度视图。
+    //   现在：只有「从其它模块切回且离开前就停在季度工作台」才恢复 quarter-picker；
+    //   真首次进入渲染空态（含未结束会话/草稿提示条），由用户自己点【日常盘点】或【季度盘点】。
     if (this.sheet) {
       // 有未结束现场（日常/季度）：标记为 sheet，防止轮询把季度选择器盖到进行中的盘点上
       this._setStocktakeView('sheet');
@@ -163,8 +171,14 @@ const StocktakeModule = {
       this._setStocktakeView('daily-picker');
       // 直接重渲日常盘点选择界面（纯本地取数，不 await —— 不阻塞任务栏同步链路）
       try { this._renderDailySetup(); } catch (e) { console.warn('[stocktake] 恢复日常盘点界面失败(已忽略):', e && e.message); }
-    } else {
+    } else if (isReturningFromOtherModule && this._lastStView === 'quarter-picker') {
+      // 切模块回来且离开前就停在季度工作台 → 维持记忆恢复（轮询会按标记补渲内容）
       this._setStocktakeView('quarter-picker');
+    } else {
+      // 真·首次进入：初始界面 = 空态引导（请选择日期区间 → 点【日常盘点】或【季度盘点】）
+      this._setStocktakeView('');
+      const stArea0 = document.getElementById('stArea');
+      if (stArea0) stArea0.innerHTML = this.renderEmptyState();
     }
 
     // 🟢 v225.2 / v227.35：进入模块后再后台同步「他人分派给我的任务」（云端 settings 通道）。
@@ -174,17 +188,16 @@ const StocktakeModule = {
     if (!isReturningFromOtherModule) {
       // 🟢 v227：有「新」分派给自己的季度任务 → 进模块即弹窗提示（同一任务只提示一次）
       this._notifyNewTasks();
-      // 🟢 v227：有未结束的盘点 → 进模块即提醒必须点【盘点结束】（v226 需求5 的承诺）。
-      // 🟢 v227.93 P3-3：若本次进入是"对往期盘点继续修改"（_editHistoricalDaily 路径），跳过此提示——
-      //   修改行为本身会把当前批次标为未结束（_markOpenSession），若再弹未结束提示即自我打脸。
-      if (!this._isEditingHistorical) this._notifyUnfinished();
-      this._isEditingHistorical = false;
+      // 🟢 v228.99：移除进模块的「未结束盘点」弹窗（_notifyUnfinished）—— 与顶部状态条、
+      //   空态提示条三处重复播报，体感冗余；统一收敛为空态区的一张状态卡（_unfinishedBannerHtml）。
     }
   },
 
   // 盘点模块根布局（任务栏 + filter-bar + stArea），供 render 与 v227.3 的「返回保留现场」分支复用
+  // 🟢 v228.99：未结束盘点状态卡从顶部移入 #stArea 空态区中部（由 renderEmptyState 渲染），
+  //   不再挤在模块顶部与按钮争位置。
   _rootHtml() {
-    return `${this._unfinishedBannerHtml()}
+    return `
       <div class="filter-bar">
         <button class="btn--primary" onclick="StocktakeModule.startDaily()">📋 日常盘点</button>
         <button class="btn--primary" onclick="StocktakeModule.startQuarter()">🗓️ 季度盘点</button>
@@ -195,9 +208,9 @@ const StocktakeModule = {
   },
 
   /**
-   * 🟢 v227.4：盘点工作台「常驻未结束盘点」状态条（非弹窗）。
-   * 兜底 v227.3「模块切换不弹窗」弱化的提醒 —— 用户保存后忘了点【盘点结束】时，
-   * 每次回到盘点模块根界面都能看到这条常驻提示，点【继续盘点】直接回现场、点【放弃本次】清除会话。
+   * 🟢 v227.4：盘点工作台「常驻未结束盘点」状态卡（非弹窗）。
+   * 🟢 v228.99：位置从模块顶部移至空态区中部；样式重做为蓝调玻璃卡；文案精简为一句要点。
+   * 点【继续盘点】直接回现场、点【放弃本次】清除会话。
    * 仅在 localStorage 存在未结束会话（wb_stocktake_open_session，开局写入、结束/放弃才清除）时显示。
    */
   _unfinishedBannerHtml() {
@@ -206,9 +219,7 @@ const StocktakeModule = {
       if (!s || !s.sheetType) return '';
       const typeCn = s.sheetType === 'daily' ? '日常' : '季度';
       const no = s.batchNo || s.sheetId || '';
-      // 🟢 v228.35（P2）：横幅带出进度与上次暂存时间。
-      //   旧版只播报「你有 1 次未结束的盘点」，用户没有判断依据，容易误点「放弃」把工作丢掉。
-      //   这里读一次草稿统计已填条数（同步、纯本地，无网络开销），把"盘了多少"说到字面上。
+      // 🟢 v228.35（P2）：带出进度与上次暂存时间，让用户有判断依据、不易误点「放弃」。
       let prog = '';
       try {
         const counter = String((s && s.counter) || '').trim();
@@ -216,17 +227,20 @@ const StocktakeModule = {
         const n = Object.keys((d && d.qty) || {}).length;
         const at = this._draftSavedAt(d);
         const hhmm = at && at.length >= 16 ? at.slice(11, 16) : '';
-        if (n > 0) prog += ` 已暂存 <b>${n}</b> 条`;
-        if (hhmm) prog += (prog ? ' · ' : ' ') + `上次暂存 ${hhmm}`;
+        if (n > 0) prog += ` · 已暂存 <b>${n}</b> 条`;
+        if (hhmm) prog += ` · 上次暂存 ${hhmm}`;
       } catch (e) { /* 忽略：进度拿不到就只显示基本提示 */ }
       return `<div class="st-unfinished-banner" role="alert">
-        <span class="st-ub-icon">⏸️</span>
-        <span class="st-ub-text">你有 1 次<b>未结束</b>的${typeCn}盘点（盘点号 <b>${esc(no)}</b>）。${prog}<br>
-          <span style="font-size:12px;opacity:.85;">数据仍在，点「继续盘点」即可接着盘；<b>未点【结束本次盘点】不算完成</b>，不会写入盘点记录、也不会同步云端。</span></span>
-        <span class="st-ub-actions">
+        <div class="st-ub-head">
+          <span class="st-ub-icon">⏸️</span>
+          <span class="st-ub-title">有一场${typeCn}盘点还未结束</span>
+        </div>
+        <div class="st-ub-meta">盘点号 <b>${esc(no)}</b>${prog}</div>
+        <div class="st-ub-hint">进度已自动保存在本机，随时可接着盘；记得点【结束本次盘点】才算完成入账。</div>
+        <div class="st-ub-actions">
           <button class="btn--primary" onclick="StocktakeModule.resumeOpenSession()">▶ 继续盘点</button>
           <button class="danger-3d" onclick="StocktakeModule.dismissOpenSession()">放弃本次</button>
-        </span>
+        </div>
       </div>`;
     } catch (e) { return ''; }
   },
@@ -734,6 +748,7 @@ const StocktakeModule = {
    */
   async _ensureActiveQuarter(opts) {
     opts = opts || {};
+    this._maybeGcBaselineShards();   // 🟢 v229.17（L1）：偶发清理过期基线分片（内部节流，失败静默）
     const cur = this._getActiveQuarter();
     if (cur && cur.sheetId && !opts.force) {
       // ① 已有锚点：只补齐可能缺失的显示区间，不动身份
@@ -772,6 +787,7 @@ const StocktakeModule = {
     const r = this._displayRange();
     const entry = { sheetId: sheetId, openedAt: openedAt, sd: r.sd, ed: r.ed, updatedAt: openedAt };
     this._saveActiveQuarter(entry);
+    this._upsertBatchIndex(sheetId, { openedAt: openedAt, round: 1 });   // 🟢 v229.17（L3）：开盘即登记索引
     this._syncQuarterRangeFromActive();
 
     // 推云端前的**让位保护**：再确认一次云端没被别端抢先开盘。
@@ -1682,12 +1698,9 @@ const StocktakeModule = {
   /**
    * 🟢 v227.3：点击【修改】—— 进入往期日常盘点号，载入历史记录并切到可编辑填表。
    *   复用 _viewClosedDaily 的取数路径，但 sheet 设为可写状态（保留已盘数据可改）。
-   * 🟢 v227.93 P3-3：进入前打 _isEditingHistorical 标记，让根 render() 跳过"未结束盘点"提示（修改行为本身
-   *   会写新的 OPEN_SESSION 标记，若再弹未结束提示即自我打脸）。
+   *   🟢 v228.99：原 v227.93 P3-3 的 _isEditingHistorical 标记随「未结束盘点」弹窗一并移除。
    */
   async _editHistoricalDaily() {
-    // 🟢 v227.93 P3-3：标记本次 render 是"修改往期"路径（render 是异步的，标记提前到调用前）
-    this._isEditingHistorical = true;
     const list = this._dailyList || [];
     const info = list[this._dailyListIdx || 0];
     if (!info || (info.count || 0) === 0) { this.toast('当前盘点号暂无历史记录'); return; }
@@ -3298,8 +3311,18 @@ const StocktakeModule = {
       if (have && Array.isArray(have.codes) && have.codes.length) return 0;
     }
     let rmap = null;
-    // ① 优先：独立基线文件（已知云端没有时直接跳过，省掉一次 404 往返）
-    if (this._baselineFileState() !== 'legacy') {
+    // ① 优先：只下「当前批次」一片（v229.10 分片），替代整包 2.28MB（203 批次）。
+    //   命中即跳过单体，下载量从 2.28MB 降到 ≈18KB。
+    if (curKey && typeof SyncManager.getBaselineShard === 'function') {
+      try {
+        const s = await SyncManager.getBaselineShard(curKey);
+        if (s && typeof s === 'object' && Array.isArray(s.codes) && s.codes.length) {
+          rmap = { [curKey]: s };
+        }
+      } catch (e) { rmap = null; }
+    }
+    // ② 兜底：分片缺失时回退读单体（过渡期/旧客户端写入的基线）。已知云端无单体则标 legacy。
+    if (!rmap && this._baselineFileState() !== 'legacy') {
       try {
         if (typeof SyncManager.getBaseline === 'function') {
           const b = await SyncManager.getBaseline();
@@ -3336,36 +3359,93 @@ const StocktakeModule = {
   // 🟢 v228.44（P1）：改写独立文件 baseline.json（不再把 182KB 基线塞进 settings.json，
   //   否则每次 3s 轮询仍要为它买单）。离线/无该方法时回退原 settings 通道，保证不丢数据。
   async _setBaselineCloud(map) {
-    let merged = Object.assign({}, map || this._getBaselineMap());
-    try {
-      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
-        if (typeof SyncManager.getBaseline === 'function') {
-          const rb = await SyncManager.getBaseline();
-          if (rb && typeof rb === 'object') merged = Object.assign({}, rb, merged);
-        } else if (typeof SyncManager.getSetting === 'function') {
-          // 🟢 v228.61（P0-A）：只读 BASELINE_KEY 一个键
-          const rmap = await SyncManager.getSetting(this.BASELINE_KEY);
-          if (rmap && typeof rmap === 'object') merged = Object.assign({}, rmap, merged);
-        }
-      }
-    } catch (e) { /* 忽略，回退本机并集 */ }
+    const merged = map || this._getBaselineMap();
     this._saveBaselineMap(merged);
-    // 优先写独立文件
-    if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.setBaseline === 'function') {
+    // 🟢 v229.10（A 方案）：每个批次写各自分片，互不覆盖其他批次快照。
+    //   不再整包读写单体 baseline.json（避免 2.28MB 全局乐观锁争用）。
+    if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.setBaselineShard === 'function') {
       try {
-        const ok = await SyncManager.setBaseline(merged);
-        if (ok) {
+        let n = 0;
+        for (const k of Object.keys(merged)) {
+          if (k === '_updatedAt') continue;
+          const ok = await SyncManager.setBaselineShard(k, merged[k]);
+          if (ok) n++;
+        }
+        if (n) {
           this._markBaselineFileState('file');
-          // 🟢 v228.44：首次迁移成功后，把 settings.json 里那份 181.9KB 的旧基线清空。
-          //   不做这一步的话拆分等于白拆——轮询仍会下载 189KB 的 settings.json，降载收益归零。
-          //   安全性：内容已在上方并入 merged 并写进 baseline.json，且 setBaseline 内部
-          //   有「回读校验」确认写入生效；这里再确认一次云端独立文件里确实有这批键，才清。
-          this._purgeLegacyBaselineInSettings(Object.keys(merged));
           return true;
         }
       } catch (e) { /* 落到下方 settings 兜底 */ }
     }
+    // 兜底：旧 settings 通道（离线/无分片方法时）
     await this._setCloud(this.BASELINE_KEY, merged);
+  },
+  // 🟢 v229.17（L0）：只写「当前轮」这一片基线到云端，不再遍历全 map 逐 key 重传历史分片。
+  //   本地 _getBaselineMap() 仍保留全部历史键（功能零回归）；云端只增量写当前片，杜绝写入侧堆积。
+  async _setBaselineShardCloud(key, shard) {
+    if (!key || !shard) return false;
+    if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.setBaselineShard === 'function') {
+      try {
+        const ok = await SyncManager.setBaselineShard(key, shard);
+        if (ok) { this._markBaselineFileState('file'); return true; }
+      } catch (e) { /* 落到下方 settings 兜底 */ }
+    }
+    // 兜底：旧 settings 通道 —— 只合并写入单键，不再整包覆盖其他设备/其他轮次
+    try {
+      let cloud = {};
+      if (typeof SyncManager !== 'undefined' && typeof SyncManager.getSetting === 'function') {
+        try { const o = await SyncManager.getSetting(this.BASELINE_KEY); if (o && typeof o === 'object') cloud = o; } catch (e) {}
+      }
+      cloud[key] = shard;
+      await this._setCloud(this.BASELINE_KEY, cloud);
+      return true;
+    } catch (e) { return false; }
+  },
+  // 🟢 v229.17（L1）：基线分片生命周期治理 —— 收口超过宽限期的分片自动删除。
+  //   基线只在进行中那一轮有用，收口后任何组织都不再读取（_pullQuarterBaseline 只读 curKey），
+  //   故收口 + 宽限期后即可安全删除，从构造上杜绝堆积。不分空批/真实批。
+  BASELINE_SHARD_GRACE_MS: 30 * 24 * 60 * 60 * 1000,   // 收口后 30 天宽限期（留给离线设备补传）
+  _gcBaselineThrottleKey: 'wb_stocktake_gc_baseline_at',
+  _gcBaselineMinIntervalMs: 6 * 60 * 60 * 1000,         // 6h 节流，避免每次进入都扫桶
+  async _gcExpiredBaselineShards() {
+    try {
+      if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return 0;
+      const local = this._getBaselineMap();
+      const closed = this._getRoundClosed();
+      const activeSid = this._currentQuarterSheetId();
+      const now = Date.now();
+      let n = 0;
+      for (const k of Object.keys(local)) {
+        if (k === '_updatedAt') continue;
+        const m = /^(.+)#r(\d+)$/.exec(k);
+        if (!m) continue;                       // 无 #rN 后缀的非基线键跳过
+        // 🟢 v229.17-fix：兼容旧格式批次（v228.48 前的日期区间命名 quarter_01-01_01-05）——
+        //   否则这批历史分片永远不过期。活跃批保护不受影响（activeSid 判定与格式无关）。
+        const sid = m[1];
+        if (sid === activeSid) continue;        // 当前进行中批次永不删
+        const ci = closed[sid];
+        const closedAt = (ci && ci.closedAt) ? Date.parse(ci.closedAt) : null;
+        const sh = local[k] || {};
+        const fb = (sh.updatedAt || sh.createdAt) ? Date.parse(sh.updatedAt || sh.createdAt) : null;
+        const base = (closedAt != null) ? closedAt : fb;
+        if (base == null) continue;             // 无法判定时间 → 保守保留
+        if (now - base <= this.BASELINE_SHARD_GRACE_MS) continue;
+        try {
+          if (typeof SyncManager.removeBaselineShard === 'function') await SyncManager.removeBaselineShard(k);
+        } catch (e) { /* 忽略单键失败 */ }
+        delete local[k]; n++;
+      }
+      if (n) this._saveBaselineMap(local);
+      return n;
+    } catch (e) { console.warn('[stocktake] 基线过期清理异常(已忽略):', e && e.message); return 0; }
+  },
+  async _maybeGcBaselineShards() {
+    try {
+      const last = Number(localStorage.getItem(this._gcBaselineThrottleKey) || 0);
+      if (Date.now() - last < this._gcBaselineMinIntervalMs) return;
+      localStorage.setItem(this._gcBaselineThrottleKey, String(Date.now()));
+      await this._gcExpiredBaselineShards();
+    } catch (e) { /* 偶发清理，失败静默 */ }
   },
   // 🟢 v228.44：把 settings.json 里的旧基线清空（内容已迁至 baseline.json）。
   //   ——不清则降载收益为零（轮询仍要下 189KB），清了才是真正的 -96%。
@@ -3414,8 +3494,8 @@ const StocktakeModule = {
     const b = { key, sheetId: sid, round: this._getRoundNo(sid), codes, zeroCodes, createdAt: ts, updatedAt: ts };
     const map = this._getBaselineMap();
     map[key] = b;
-    this._saveBaselineMap(map);
-    try { await this._setBaselineCloud(map); } catch (e) { /* 离线入队，联网补推 */ }
+    this._saveBaselineMap(map);                 // 本地仍保留全量历史键
+    try { await this._setBaselineShardCloud(key, b); } catch (e) { /* 离线入队，联网补推 */ }
     return b;
   },
   // 本轮季度盘点的序号锚点（编码数组，下标 0 = 序号 1）
@@ -4033,27 +4113,8 @@ const StocktakeModule = {
     } catch (e) { console.warn('[stocktake] 新任务提示失败(已忽略):', e && e.message); }
   },
 
-  /**
-   * 🟢 v227：进入盘点模块时，若存在未结束的盘点会话 → 弹窗提醒。
-   *   会话标记（OPEN_KEY）在开局时写入，只有点【盘点结束】/【放弃本次盘点】才清除。
-   */
-  _notifyUnfinished() {
-    try {
-      if (typeof WBModal === 'undefined' || typeof WBModal.alert !== 'function') return;
-      const raw = localStorage.getItem(this.OPEN_KEY);
-      if (!raw) return;
-      const s = JSON.parse(raw);
-      if (!s || !s.sheetId) return;
-      const typeCn = s.sheetType === 'quarter' ? '季度' : '日常';
-      // 🟢 v228.0（P1-8 修复）：WBModal 用 textContent 渲染正文（modal.js 第 83 行），不解析 HTML，
-      //   这里原写的是 '你有<b>未结束</b>的…'，用户会直接看到裸的 <b> 标签。改为纯文本强调。
-      WBModal.alert(
-        '你有「未结束」的' + typeCn + '盘点（盘点号 ' + esc(s.batchNo || s.sheetId) + '）。\n\n' +
-        '· 点【暂存并退出】= 暂停，数据只存本地草稿（不计入盘点记录），下次可继续；\n' +
-        '· 全部盘完请点【结束本次盘点】才算完成，并写入盘点记录、同步云端。',
-        { title: '⏸ 未结束的盘点' });
-    } catch (e) { console.warn('[stocktake] 未结束提醒失败(已忽略):', e && e.message); }
-  },
+  // 🟢 v228.99：原 _notifyUnfinished（进模块「未结束盘点」WBModal 弹窗）已移除 ——
+  //   与空态区状态卡、空态提示条三处重复播报；未结束会话统一由 _unfinishedBannerHtml 一处提示。
 
   // 🟢 v227.68：顶部任务栏已删除，刷新语义改为「重新渲染季度作业视图（选择器）」。
   // 仅当当前正处于季度作业视图、且 picker 已渲染时生效；日常盘点 / 初始工作台下为空操作。
@@ -4120,6 +4181,113 @@ const StocktakeModule = {
 
   _saveOverviews(map) {
     return this._lsWrite(this.OVERVIEW_KEY, JSON.stringify(map || {}));
+  },
+
+  // ===== 🟢 v229.17（L3）：批次索引 =====
+  _getBatchIndex() {
+    try { return JSON.parse(localStorage.getItem(this.BATCH_INDEX_KEY) || '{}') || {}; } catch (e) { return {}; }
+  },
+  _saveBatchIndex(idx) {
+    try { localStorage.setItem(this.BATCH_INDEX_KEY, JSON.stringify(idx || {})); } catch (e) {}
+  },
+  _upsertBatchIndex(sheetId, patch) {
+    const idx = this._getBatchIndex();
+    idx[sheetId] = Object.assign({}, idx[sheetId] || {}, patch, { sheetId });
+    this._saveBatchIndex(idx);
+    return idx[sheetId];
+  },
+  // 🟢 v229.17（L2）：空批次（收口且 0 条盘点记录）的本地残留清理。
+  //   只清死掉的协调残留；绝不碰 stocktake_records（真实历史）。真实批次不调此方法（保留历史展示）。
+  async _gcBatchResidue(sheetId) {
+    if (!sheetId) return 0;
+    const rd = k => { try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch (e) { return {}; } };
+    let n = 0;
+    try {
+      // ① 基线分片（云端 + 本地）；空批无宽限期，立即清
+      const rk = this._baselineRoundKey(sheetId);
+      const local = this._getBaselineMap();
+      if (local[rk]) { delete local[rk]; this._saveBaselineMap(local); n++; }
+      try {
+        if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.removeBaselineShard === 'function')
+          await SyncManager.removeBaselineShard(rk);
+      } catch (e) { /* 忽略单键失败 */ }
+
+      // ② 轮次号 / 轮次别名 / 号映射（直接读写 localStorage 键）
+      const rn = rd(this.ROUND_NO_KEY);
+      if (rn[sheetId]) { delete rn[sheetId]; this._lsWrite(this.ROUND_NO_KEY, JSON.stringify(rn)); n++; }
+      const rl = rd(this.ROUND_LABEL_KEY);
+      if (rl[sheetId]) { delete rl[sheetId]; this._lsWrite(this.ROUND_LABEL_KEY, JSON.stringify(rl)); n++; }
+      const nm = rd(this.NO_MAP_KEY);
+      if (nm[sheetId]) { delete nm[sheetId]; this._lsWrite(this.NO_MAP_KEY, JSON.stringify(nm)); n++; }
+
+      // ③ 概览占位（counter::sheetId）
+      const ov = this._getAllOverviews();
+      const suffix = '::' + sheetId;
+      let ovDel = 0;
+      Object.keys(ov).forEach(k => { if (k.slice(-suffix.length) === suffix) { delete ov[k]; ovDel++; } });
+      if (ovDel) { this._saveOverviews(ov); n += ovDel; }
+
+      // ④ 收口闸门
+      const rc = this._getRoundClosed();
+      if (rc[sheetId]) { delete rc[sheetId]; this._saveRoundClosed(rc); n++; }
+
+      // ⑤ 孤儿任务（本批次分派但无人录数）→ 墓碑化，最后统一推一次云端
+      const raw = (typeof DataStore !== 'undefined' && DataStore._tasksRaw) ? DataStore._tasksRaw() : {};
+      const toKill = Object.keys(raw).filter(k => {
+        const t = raw[k];
+        return t && !t.deleted && t.sheetType === 'quarter' && (t.sheetId === sheetId || t.batchKey === sheetId);
+      });
+      for (const k of toKill) {
+        try { await DataStore.deleteStocktakeTask(k, { skipPush: true }); n++; } catch (e) {}
+      }
+      if (toKill.length && typeof DataStore._pushStocktakeTasksToCloud === 'function') {
+        try { await DataStore._pushStocktakeTasksToCloud(); } catch (e) {}
+      }
+
+      // ⑥ 活跃锚点若指向本批 → 清空，让下次开盘生成新批次（云端由 _ensureActiveQuarter 让位/重开）
+      const aq = this._getActiveQuarter();
+      if (aq && aq.sheetId === sheetId) this._saveActiveQuarter({});
+
+      // ⑥b 云端残留同步清空（避免他端重新拉回污染，否则本批仍出现在其他端视图）
+      try { await this._deleteCloudSheetEntries(sheetId); } catch (e) {}
+
+      // ⑦ 批次索引进 closed+empty
+      this._upsertBatchIndex(sheetId, { closedAt: new Date().toISOString(), empty: true });
+    } catch (e) { console.warn('[stocktake] 空批残留清理异常(已忽略):', e && e.message); }
+    return n;
+  },
+  // 🟢 v229.17（L2）：清空本批次在云端的残留键（避免被他端重新拉回污染）。
+  //   复用既有「读-合并-删-写」模式（与 _clearRoundClosedCloud 一致），各键独立 try/catch 互不拖累。
+  async _deleteCloudSheetEntries(sheetId) {
+    if (!sheetId) return;
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;
+    const suffix = '::' + sheetId;
+    const delKeys = async (cloudKey, isOverview) => {
+      try {
+        if (typeof SyncManager.getSetting !== 'function') return;
+        const cloud = await SyncManager.getSetting(cloudKey);
+        if (!cloud || typeof cloud !== 'object') return;
+        const u = Object.assign({}, cloud);
+        let changed = false;
+        Object.keys(u).forEach(k => {
+          const hit = isOverview ? (String(k).slice(-suffix.length) === suffix) : (k === sheetId);
+          if (hit) { delete u[k]; changed = true; }
+        });
+        if (changed) await this._setCloud(cloudKey, u);
+      } catch (e) {}
+    };
+    try { await this._clearRoundClosedCloud(sheetId); } catch (e) {}   // 自带云端删 + 本机删
+    await delKeys(this.OVERVIEW_KEY, true);
+    await delKeys(this.NO_MAP_KEY, false);
+    await delKeys(this.ROUND_NO_KEY, false);
+    await delKeys(this.ROUND_LABEL_KEY, false);
+    // 活跃锚点（云端）若指向本批 → 清空，避免他端重新跟随幽灵批次
+    try {
+      if (typeof SyncManager.getSetting === 'function' && typeof SyncManager.setSetting === 'function') {
+        const aq = await SyncManager.getSetting(this.ACTIVE_QUARTER_KEY);
+        if (aq && aq.sheetId === sheetId) await this._setCloud(this.ACTIVE_QUARTER_KEY, {});
+      }
+    } catch (e) {}
   },
 
   // ===== v227.16：仓库离线容错 —— 跨设备 key-value 推送（批次状态/概览/轮次）本地待推队列 =====
@@ -5371,6 +5539,26 @@ const StocktakeModule = {
       }
     } catch (e) { console.warn('[stocktake] 概览推云端失败(已忽略):', e && e.message); }
 
+    // 🟢 v229.17（L2/L3）：收口后判定空批并 GC + 维护批次索引
+    try {
+      let isEmpty = false;
+      // 先拉云端记录（含他端已提交），堵住「管理员设备还没拉到他人记录」的跨端竞态；离线则保守不删
+      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof SyncManager.pullStocktake === 'function') {
+        await SyncManager.pullStocktake();
+        const recs = await DataStore.getStocktakeRecords();
+        isEmpty = !((recs || []).some(r => r && r.sheetId === sheetId && !r.voided));
+      }
+      this._upsertBatchIndex(sheetId, {
+        batchNo: batchNo, round: this._getRoundNo(sheetId),
+        closedAt: new Date().toISOString(), empty: isEmpty
+      });
+      if (isEmpty) {
+        const removed = await this._gcBatchResidue(sheetId);
+        console.log('[stocktake] 空批次已自动清理：' + sheetId + '（清除残留 ' + removed + ' 项）');
+        this.toast('ⓘ 本批次无任何盘点记录，已自动清理为空批次');
+      }
+    } catch (e) { console.warn('[stocktake] 空批判定/清理异常(已忽略):', e && e.message); }
+
     // 4) 清掉所有盘点人的未结束会话（防止 picker 走续盘路径绕过 round closed 守卫）
     try {
       const sess = this._getOpenSession();
@@ -6419,6 +6607,7 @@ const StocktakeModule = {
   renderTable() {
     const area = document.getElementById('stArea');
     if (!area) return;
+    this._ensureConvStyle();   // 🟢 v229.02：盘点换算提示样式（幂等，仅注入一次）
     // 🟢 v228.36：进入填表视图 → 清掉 picker 标记，否则轻量重渲会误判「仍停在 picker」而重渲覆盖表格
     this._setStocktakeView('sheet');
     const rows = this.visibleRows();
@@ -6481,15 +6670,19 @@ const StocktakeModule = {
       // 🟢 v226：右列「盘点人」条件渲染 —— 输入了盘点数量才自动带盘点人；未填则留空（代表未盘点）。
       const hasQty = r.盘点数量 !== '' && r.盘点数量 != null;
       const counterCell = hasQty ? esc(this.task.counter || '') : '';
-      return `<tr data-code="${escAttr(r.存货编码)}">
+      // 🟢 v229.02：按存货编码命中「根/箱」常量 → 现存量换算串，如 "≈ 55.0 根"（无常量则为 ''）
+      const convHint = this.convertHint(r.存货编码, r.存货名称, r.现存量);
+      return `<tr data-code="${escAttr(r.存货编码)}" data-hint="${escAttr(convHint)}">
         <td>${r.no}</td>
         <!-- 🟢 v228.13：存货编码打通存货档案（点击跳转） -->
         <td>${TableUtils.link('stock', r.存货编码 || '', r.存货编码 || '')}</td>
         <td>${esc(r.存货名称)}</td>
         <td>${esc(r.规格型号)}</td>
-        <td>${this._num(r.现存量)}</td>
+        <td><div class="st-stock-num">${this._num(r.现存量)}</div>${convHint ? `<div class="st-stock-hint">${convHint}</div>` : ''}</td>
         ${io}
-        <td><input type="number" class="st-qty" value="${escAttr(r.盘点数量)}" style="width:90px;"
+        <td class="st-qty-cell"><input type="number" class="st-qty" value="${escAttr(r.盘点数量)}" style="width:90px;"
+              inputmode="decimal" enterkeyhint="next"
+              onfocus="StocktakeModule.onQtyFocus(this)" onblur="StocktakeModule.onQtyBlur(this)"
               oninput="StocktakeModule.onQty(this)" onchange="StocktakeModule.onQty(this)"></td>
         <td class="st-diff" style="${dcolor}font-weight:600;">${r.差异量 === '' ? '' : this._num(r.差异量)}</td>
         <td class="st-counter">${counterCell}</td>
@@ -6519,9 +6712,13 @@ const StocktakeModule = {
       </div>`;
     // 🟢 v227.91：删除「清空已填」/「放弃本次盘点」（未统一标准按钮形状）
     // 进度条（原「清空已填」位置）：空字符串，留作移动端列折叠按钮的目标挂载点
+    // 🟢 v228.96（清单三#3）：进度条内加「只看差异」开关，提交前快速复盘账实不符项。
     const progressBar = `
       <div id="stProgressBar" style="margin-bottom:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span style="font-size:13px;opacity:.8;">已盘 <b id="stDone">0</b> / ${rows.length}</span>
+        <button id="stOnlyDiffBtn" type="button" class="btn--ghost" style="margin-left:2px;"
+          onclick="StocktakeModule.toggleOnlyDiff()">👁 只看差异</button>
+        <span id="stOnlyDiffHint" style="font-size:12.5px;color:#b45309;display:none;"></span>
       </div>
     `;
     // 🟢 v228.35（P1）：「保存」语义拆分 + 明确未计入记录。
@@ -6633,6 +6830,14 @@ const StocktakeModule = {
     const inputs = Array.from(table.querySelectorAll('input.st-qty'));
     inputs.forEach((inp, i) => {
       inp.addEventListener('keydown', (e) => {
+        // 🟢 v228.96（清单三#1）：连续扫码模式下，回车/下箭头 = 确认本条并自动重开扫码扫下一条。
+        //   此时不跳到下一行输入框（下一目标由下一次扫码命中决定），避免与扫描流冲突。
+        if ((e.key === 'Enter' || e.key === 'ArrowDown') && this._scanLoop) {
+          e.preventDefault();
+          this.onQty(inp);                 // 先落盘当前数量
+          try { QRScan.open('stocktake'); } catch (e2) { /* 重开失败则回到手动点扫码 */ }
+          return;
+        }
         let target = null;
         if (e.key === 'Enter' || e.key === 'ArrowDown') target = inputs[i + 1] || null;
         else if (e.key === 'ArrowUp') target = inputs[i - 1] || null;
@@ -6644,6 +6849,43 @@ const StocktakeModule = {
       });
     });
     if (inputs.length) { try { inputs[0].focus(); } catch (e) {} }
+  },
+
+  // 🟢 v228.96（清单三#3）：「只看差异」开关 —— 提交前快速复盘账实不符项。
+  //   开启后仅保留「已盘且盘点数量≠现存量」的行（其余隐藏），差异行红色高亮，
+  //   相当于把 1400 行直接缩到 ~23 条差异行，提交前逐条核对不再靠滚。
+  toggleOnlyDiff() {
+    const table = document.querySelector('#stArea table.data-table');
+    if (!table) { this.toast('请先开始盘点再使用差异筛选'); return; }
+    this._onlyDiff = !this._onlyDiff;
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    let diff = 0;
+    rows.forEach(tr => {
+      const code = tr.getAttribute('data-code');
+      const r = (this.allRows || []).find(x => x.存货编码 === code);
+      if (!r) return;
+      const sys = parseFloat(r.现存量) || 0;
+      const raw = (r.盘点数量 === '' || r.盘点数量 == null) ? null : String(r.盘点数量);
+      const cnt = raw === null ? null : parseFloat(raw);
+      // 仅「已盘且数量对不上」算差异（未盘的行不计入，避免把整张未盘表都算差异）
+      const isDiff = (cnt !== null) && (cnt !== sys);
+      if (this._onlyDiff) {
+        if (isDiff) { tr.style.display = ''; tr.classList.add('st-diff-row'); diff++; }
+        else { tr.style.display = 'none'; tr.classList.remove('st-diff-row'); }
+      } else {
+        tr.style.display = ''; tr.classList.remove('st-diff-row');
+      }
+    });
+    const btn = document.getElementById('stOnlyDiffBtn');
+    const hint = document.getElementById('stOnlyDiffHint');
+    if (btn) {
+      btn.classList.toggle('active', this._onlyDiff);
+      btn.textContent = this._onlyDiff ? '👁 显示全部' : '👁 只看差异';
+    }
+    if (hint) {
+      if (this._onlyDiff) { hint.style.display = ''; hint.textContent = `共 ${diff} 项账实不符`; }
+      else { hint.style.display = 'none'; }
+    }
   },
 
   // v216 Step 5.4：登录态变化时刷新盘点人输入框（仅在未认领时，已认领则保持锁定）
@@ -6671,6 +6913,96 @@ const StocktakeModule = {
     if (n === 0) return '';
     const color = (n > 0) ? 'color:#16a34a;' : 'color:#dc2626;';
     return `<span style="${color}font-weight:600;">${this._num(n)}</span>`;
+  },
+
+  // ===== 🟢 v229.02：盘点录入「根/箱」换算提示 =====
+  // 规则源（唯一）：StockAlertConfig —— BOX_PACK 按存货编码 → 每箱数量；PIPE_LENGTH 按名称关键字 → 每根米数。
+  // 只做展示换算，绝不改变记账口径（现存量、盘点数量、差异量全部维持原单位）。
+  convertByPack(code, name, qty) {
+    const CFG = (typeof window !== 'undefined') ? window.StockAlertConfig : null;
+    if (!CFG) return null;
+    const q = parseFloat(qty);
+    if (!q) return null;
+    code = String(code || ''); name = String(name || '');
+    // 整箱优先（螺栓编码均配了 BOX_PACK）
+    if (CFG.BOX_PACK && CFG.BOX_PACK[code]) return { v: q / CFG.BOX_PACK[code], unit: '箱' };
+    const PL = CFG.PIPE_LENGTH || {};
+    for (const k of Object.keys(PL)) {
+      if (name.indexOf(k) >= 0) return { v: q / PL[k], unit: '根' };
+    }
+    return null;  // 镀锌管等无常量项：不折算
+  },
+  // 展示串：四舍五入保留 1 位小数，如 "≈ 55.0 根" / "≈ 9.4 箱"；无规则返回 ''
+  convertHint(code, name, qty) {
+    const c = this.convertByPack(code, name, qty);
+    if (!c) return '';
+    return '≈ ' + (Math.round(c.v * 10) / 10).toFixed(1) + ' ' + c.unit;
+  },
+  // 样式一次性注入（幂等）
+  _ensureConvStyle() {
+    if (document.getElementById('stConvStyle229')) return;
+    const s = document.createElement('style');
+    s.id = 'stConvStyle229';
+    s.textContent = `
+      .st-stock-hint{display:none;margin-top:1px;font-size:11.5px;font-weight:600;color:var(--status-info,#2563eb);letter-spacing:.2px;}
+      tr.st-focus .st-stock-hint{display:block;}
+      tr.st-focus{background:var(--status-info-bg,#eff6ff);}
+      .st-conv-pop{display:none;position:fixed;z-index:99999;pointer-events:none;transform:translateX(-50%);
+        padding:7px 14px;border-radius:11px;font-size:13.5px;font-weight:600;letter-spacing:.3px;white-space:nowrap;
+        color:#0f172a;background:linear-gradient(135deg,#ffffff 0%,#f8fafc 100%);border:1px solid #e2e8f0;
+        box-shadow:0 12px 28px rgba(15,23,42,.14),0 3px 8px rgba(15,23,42,.06);
+        animation:stConvPopIn .15s ease-out;}
+      .st-conv-pop::before{content:'';position:absolute;top:-5px;left:50%;margin-left:-5px;width:9px;height:9px;
+        background:#fff;border-left:1px solid #e2e8f0;border-top:1px solid #e2e8f0;transform:rotate(45deg);border-radius:2px;}
+      @keyframes stConvPopIn{from{opacity:0;}to{opacity:1;}}
+    `;
+    document.head.appendChild(s);
+  },
+  _convPop() {
+    let pop = document.getElementById('stConvPop');
+    if (!pop) {
+      pop = document.createElement('div');
+      pop.id = 'stConvPop';
+      pop.className = 'st-conv-pop';
+      document.body.appendChild(pop);
+    }
+    return pop;
+  },
+  /**
+   * 聚焦【盘点数量】输入框：该行高亮 + 现存量下方副行提示 + 输入框下方浮层弹窗（PC/移动一致）。
+   * 用 fixed 浮层而非 td 内绝对定位 —— 盘点表格是 max-height:68vh 的滚动容器，
+   * td 内气泡到最后几行会被容器裁掉；fixed 浮层永远完整可见。
+   */
+  onQtyFocus(el) {
+    const tr = el && el.closest ? el.closest('tr') : null;
+    if (!tr) return;
+    tr.classList.add('st-focus');
+    const hint = tr.getAttribute('data-hint') || '';
+    const pop = this._convPop();
+    if (!hint) { pop.style.display = 'none'; return; }
+    pop.textContent = hint;
+    pop.style.display = 'block';
+    const r = el.getBoundingClientRect();
+    pop.style.left = (r.left + r.width / 2) + 'px';
+    pop.style.top = (r.bottom + 10) + 'px';
+    if (!this._convBound) {
+      this._convBound = true;
+      const _h = () => { this._hideConvPop(); };
+      window.addEventListener('scroll', _h, true);
+      window.addEventListener('resize', _h);
+    }
+  },
+  onQtyBlur(el) {
+    const tr = el && el.closest ? el.closest('tr') : null;
+    // 延迟：移动端「下一个」按钮点击时不要瞬灭；同时保证 blur 后浮层必然收起
+    setTimeout(() => {
+      if (tr) tr.classList.remove('st-focus');
+      this._hideConvPop();
+    }, 120);
+  },
+  _hideConvPop() {
+    const pop = document.getElementById('stConvPop');
+    if (pop) pop.style.display = 'none';
   },
 
   // 填盘点数量 → 算差异 → 存草稿
@@ -7818,6 +8150,11 @@ const StocktakeModule = {
     if (typeof QRScan === 'undefined' || typeof QRScan.open !== 'function') {
       this.toast('扫码组件未加载'); return;
     }
+    // 🟢 v228.96（清单三#1 扫码盘点增强）：开启「连续扫码」循环。
+    //   扫码命中定位 → 输数 → 确认(回车)自动重开扫码扫下一条，省去反复点「📷 扫码」。
+    //   点取消关闭扫码器即退出循环（qr-scan.js 的 close 会回调 __qrScanOnClose 清标志）。
+    this._scanLoop = true;
+    window.__qrScanOnClose = () => { this._scanLoop = false; };
     try { QRScan.open('stocktake'); } catch (e) { this.toast('打开扫码失败：' + (e.message || e)); }
   },
 
@@ -7848,23 +8185,19 @@ const StocktakeModule = {
 
   // ---------------- 空态 ----------------
   renderEmptyState() {
-    // 🟢 v226：未结束的盘点会话（保存=暂停）→ 首屏直接提醒，避免用户忘了还有一次盘点没结束
-    const s = this._getOpenSession();
-    const openTip = s ? `
-      <div style="margin-top:10px;padding:10px 14px;border-radius:8px;background:var(--status-warning-bg,#fff7ed);border:1px solid #fed7aa;font-size:13px;">
-        ⚠️ 有未结束的盘点：盘点号 <b>${esc(s.batchNo || s.sheetId)}</b>（${s.sheetType === 'quarter' ? '季度' : '日常'} · 盘点人 ${esc(s.counter || '未填写')} · 始于 ${esc(String(s.startedAt || '').slice(0, 16).replace('T', ' '))}）<br>
-        点击【${s.sheetType === 'quarter' ? '季度盘点' : '日常盘点'}】继续；盘完必须点【结束本次盘点】才算完成本次盘点。
-        <button class="btn--ghost" style="margin-left:8px;" onclick="StocktakeModule._clearOpenSession();App.go('stocktake')">放弃本次</button>
-      </div>` : '';
-
-    const d = this.loadDraft();
-    const draftTip = d ? `
-      <div style="margin-top:10px;padding:10px 14px;border-radius:8px;background:var(--status-info-bg,#eef6ff);font-size:13px;">
+    // 🟢 v228.99：未结束盘点提示收敛为一处 —— 底部橙色警示条（openTip）删除，
+    //   统一由下方中部状态卡（_unfinishedBannerHtml）承担提醒 + 继续盘点/放弃操作。
+    const draftTip = (() => {
+      const d = this.loadDraft();
+      if (!d) return '';
+      return `
+      <div style="margin:12px auto 0;padding:10px 14px;border-radius:8px;background:var(--status-info-bg,#eef6ff);font-size:13px;max-width:560px;">
         💾 检测到未完成的盘点草稿（盘点人：${esc((d.task && d.task.counter) || '未填写')}
         · 已填 ${Object.keys(d.qty || {}).length} 条
         · 更新于 ${esc(String(d.updatedAt || '').slice(0, 16).replace('T', ' '))}）
         <button class="btn--ghost" style="margin-left:8px;" onclick="StocktakeModule.clearDraft();App.go('stocktake')">清空草稿</button>
-      </div>` : '';
+      </div>`;
+    })();
     return `
       <div class="empty-state">
         <div class="empty-icon">📋</div>
@@ -7873,7 +8206,7 @@ const StocktakeModule = {
           日常盘点：核对区间内出过库的物料 · 季度盘点：全库清点
         </div>
       </div>
-      ${openTip}
+      ${this._unfinishedBannerHtml()}
       ${draftTip}
     `;
   },

@@ -45,7 +45,9 @@ const REQUIRED_DOCS = ['docs/全局代码审查标准.md', '修复与发布纪�
 // md 白名单：只有这两个文档类可进源码下载包
 const MD_WHITELIST = new Set(REQUIRED_DOCS);
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'tools', 'scripts']);
+// 🟢 v228.88：移除僵尸目录 'scripts'（已于 2026-09-21 归档至 /workspace/_deprecated_scripts_20260921/，
+//   其 audit-scan.js 停在 v175 架构、能力落后 tools/audit-inventory.mjs 六个维度）。
+const SKIP_DIRS = new Set(['node_modules', '.git', 'tools']);
 
 function walk(dir) {
   const abs = join(ROOT, dir);

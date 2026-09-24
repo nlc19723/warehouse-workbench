@@ -294,6 +294,11 @@
   function close() {
     active = false;
     scanMode = null;   // 模式一次性：关闭即复位，下次 open() 不带 mode → 普通模式（行为保持）
+    // 🟢 v228.96（清单三#1）：扫码器关闭（用户点取消 / 扫到码后自动关）时通知调用方。
+    //   盘点模块据此退出「连续扫码」循环，避免回车又无端重开摄像头。
+    if (typeof window !== 'undefined' && typeof window.__qrScanOnClose === 'function') {
+      try { window.__qrScanOnClose(); } catch (e) { /* 回调异常不影响关闭主流程 */ }
+    }
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     if (stream) {
       stream.getTracks().forEach(t => { try { t.stop(); } catch (_) {

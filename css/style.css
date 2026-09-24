@@ -1105,6 +1105,13 @@ body::after{
   max-height: 640px; overflow-y: auto; overflow-x: auto;
   border-radius: var(--radius-sm); border: 1px solid var(--card-border);
   -webkit-overflow-scrolling: touch;
+  /* 🟢 v228.79 P2-8：Firefox 下也显示可见滚动条（Chrome 已由下方 ::-webkit-scrollbar 处理） */
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+/* 🟢 v228.79 P2-8：PC 宽表横向溢出时，右侧渐隐阴影提示"右侧还有内容可滑动" */
+.table-wrapper[data-hscroll="1"]{
+  box-shadow: inset -14px 0 10px -10px rgba(0,0,0,0.20);
 }
 .table-wrapper::-webkit-scrollbar{ width: var(--scrollbar-width); height: var(--scrollbar-width); }
 .table-wrapper::-webkit-scrollbar-track{ background: var(--scrollbar-track); }
@@ -1224,17 +1231,27 @@ body::after{
 
 /* ===== search-select 模糊搜索下拉组件 ===== */
 .ss-wrap{ min-width: 150px; }
+/* 🟢 v229.13/v229.14：显式指定宽度（ss-fixed）与紧凑自适应（ss-compact）的组件
+   不受 150px 最小宽约束，否则 min-width 会覆盖 JS 设定的 width，把分页栏下拉撑到 150px+ */
+.ss-wrap.ss-fixed, .ss-wrap.ss-compact{ min-width: 0; }
+/* 🟢 v229.15：紧凑外观再收缩 —— 字号 11→11.5px（统一+0.5）、对称内边距 13/13 视觉居中、caret 贴边 */
+.ss-wrap.ss-compact .ss-trigger{ padding: 5px 13px 5px 13px; border-radius: 8px; font-size: 11.5px !important; }
+.ss-wrap.ss-compact .ss-trigger::after{ right: 4px; }
+.ss-wrap.ss-compact .ss-panel{ border-radius: 10px; padding: 4px; max-height: 200px; }
+.ss-wrap.ss-compact .ss-item{ padding: 6px 8px; font-size: 12.5px; }
 /* 容器由组件按 widthMode 自设 width；保留基础 flex 不参与列布局干扰 */
 .ss-wrap{ flex: 0 0 auto; }
 .ss-native{ /* 原生 select 仅作占位/值容器，视觉隐藏 */ pointer-events: none; }
 .ss-trigger{
   width: 100%;
   box-sizing: border-box;
-  text-align: left;
-  padding: 7px 28px 7px 10px;
-  /* 🟢 v227.82：与 .filter-bar select/input 一致 12px（全工作台下拉/输入/日期框字号统一）
-     加 !important —— .ss-trigger 是 <button>，会被 .filter-bar button{12.5px} 同优先级覆盖 */
-  font-size: 12px !important;
+  /* 🟢 v229.15：下拉框文字统一居中显示 —— 左右对称 padding（22/22）实现真居中；
+     caret 绝对定位 right:10 只占 [10,18]，22px 内边距足够让位 */
+  text-align: center;
+  padding: 7px 22px 7px 22px;
+  /* 🟢 v229.15：字号 12 → 12.5px（全工作台下拉字号统一 +0.5px）
+     加 !important —— .ss-trigger 是 <input>，会被 .filter-bar 同类规则同优先级覆盖 */
+  font-size: 12.5px !important;
   line-height: 1.3;
   color: var(--text-primary);
   background: #ffffff;
@@ -1260,69 +1277,91 @@ body::after{
   border-top: 5px solid var(--text-secondary);
 }
 .ss-trigger.ss-placeholder{ color: var(--text-secondary); }
-/* 🟢 v227.83：打开态保留凹陷阴影，叠加主题蓝 focus 光环（与 .filter-bar select:focus 一致） */
-.ss-trigger.ss-open{
+/* 🟢 v229.15：筛选栏域内 `.filter-bar input[type=text]`（特异性 0,2,1 + !important，声明更靠后）
+   会把触发器压回 12px/左对齐/padding 0 12px —— 此处以同域更高特异性 (0,3,0) 统一：
+   字号 12.5px（全工作台下拉 +0.5）、文字居中、对称 padding（与基础规则一致） */
+.filter-bar .ss-wrap .ss-trigger,
+.filter-bar-m .ss-wrap .ss-trigger{
+  font-size: 12.5px !important;
+  text-align: center !important;
+  padding: 7px 22px 7px 22px !important;
+}
+/* 🟢 v227.83：打开态保留凹陷阴影，叠加主题蓝 focus 光环（与 .filter-bar select:focus 一致）
+   🟢 v229.15：打开态原地变为搜索输入框 → 恢复左对齐 + 左内边距（居中仅用于关闭态展示所选值）；
+   加 .filter-bar 变体 + !important，压过上方 (0,3,0) 的居中规则 */
+.ss-trigger.ss-open,
+.filter-bar .ss-wrap .ss-trigger.ss-open,
+.filter-bar-m .ss-wrap .ss-trigger.ss-open{
   border-color: var(--accent, #1677ff);
+  text-align: left !important;
+  padding: 7px 22px 7px 12px !important;
   box-shadow:
     inset 0 2px 5px rgba(91,155,213,0.10),
     inset 0 0 0 1px rgba(255,255,255,0.95),
     0 0 0 3px rgba(91,155,213,0.15);
 }
-.ss-search-input{
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 10px;
-  /* 🟢 v227.82：与 .filter-bar / .ss-trigger 统一 12px */
-  font-size: 12px;
-  color: var(--text-primary);
-  /* 🟢 v227.83：与 .ss-trigger / .filter-bar 统一凹陷感+阴影模板（弹窗内搜索框同款） */
-  background: #ffffff;
-  border: 1px solid rgba(180,195,210,0.55);
-  border-radius: 10px;
-  outline: none;
-  box-shadow:
-    inset 0 2px 5px rgba(15,23,42,0.10),
-    inset 0 1px 2px rgba(15,23,42,0.08),
-    inset 0 0 0 1px rgba(255,255,255,0.95);
-}
+/* 🟢 v228.98：下拉面板借鉴日历弹窗（DatePicker）美学 —— 毛玻璃拟物 + 「值颜色打底」 */
 .ss-panel{
   position: absolute;
-  top: calc(100% + 4px);
+  top: calc(100% + 6px);
   left: 0;
   right: 0;
   min-width: 100%;
   max-height: 280px;
   overflow-y: auto;
   z-index: 1200;
-  background: var(--bg-card, #fff);
-  border: 1px solid var(--border-color, #d9d9d9);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0,0,0,.16);
-  padding: 4px;
+  /* 毛玻璃拟物 popover（同 .dp-pop 视觉语言） */
+  background: rgba(255,255,255,.82);
+  backdrop-filter: blur(18px) saturate(170%);
+  -webkit-backdrop-filter: blur(18px) saturate(170%);
+  border: 1px solid rgba(255,255,255,.6);
+  border-radius: 16px;
+  box-shadow: 14px 18px 40px rgba(120,140,180,.40), -8px -8px 24px rgba(255,255,255,.70), inset 0 1px 2px rgba(255,255,255,.8);
+  padding: 6px;
+  animation: ssIn .18s ease-out;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
+@keyframes ssIn { from { opacity: 0; transform: translateY(-6px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.ss-panel::-webkit-scrollbar{ width: 6px; }
+.ss-panel::-webkit-scrollbar-thumb{ background: rgba(150,165,190,.35); border-radius: 3px; }
 .ss-item{
-  padding: 7px 10px;
-  /* 🟢 v227.82：与 .ss-trigger 同字号 12px，避免下拉框与弹窗项视觉错位 */
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--text-primary);
-  border-radius: 5px;
+  padding: 9px 10px;
+  /* 🟢 v229.15：与 .ss-trigger 同字号 13.5px（统一 +0.5），避免下拉框与弹窗项视觉错位 */
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--text-primary, #2b3445);
+  border-radius: 10px;
   cursor: pointer;
-  /* 面板项允许 2 行：过长名称自然换行，3 行及以上截断 */
-  white-space: normal;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  word-break: break-word;
+  margin: 2px 0;
+  transition: all .12s;
+  /* 长名称两行截断（同旧实现） */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; white-space: normal; word-break: break-word;
 }
-.ss-item:hover{ background: var(--row-hover, #f2f6ff); }
-.ss-item.ss-active{ background: var(--accent-soft, #e6f0ff); color: var(--accent, #1677ff); }
-.ss-item.ss-default{ color: var(--text-secondary); font-style: italic; border-bottom: 1px dashed var(--border-color, #eee); margin-bottom: 3px; }
-.ss-empty{ padding: 10px; text-align: center; color: var(--text-secondary); font-size: 13px; }
+/* 🟢 v229.03：下拉行高亮统一「无色」——去掉蓝底/白字，避免长文字被色块吞掉看不清。
+   视觉语言：hover 极淡中性灰；键盘高亮(active)无底色 + 加粗主色字。全部下拉（ss-panel /
+   autocomplete-dropdown / qh-pop）同规则。 */
+.ss-item:hover{ background: rgba(15,23,42,.05); color: inherit; }
+.ss-item.ss-active{ background: transparent; color: var(--text-primary, #2b3445); font-weight: 700;
+  box-shadow: none; }
+.ss-item.ss-default{ color: var(--text-secondary, #7b8794); border-bottom: 1px dashed rgba(150,165,190,.4);
+  margin-bottom: 6px; border-radius: 10px 10px 0 0; font-style: normal; }
+.ss-item.ss-default:hover{ background: var(--accent-soft, #e6f0ff); color: var(--accent, #1677ff); }
+.ss-empty{ padding: 12px; text-align: center; color: var(--text-secondary, #7b8794); font-size: 13px; }
 
-[data-theme="dark"] .ss-trigger, [data-theme="dark"] .ss-search-input{ background: var(--bg-input, #1f2733); border-color: var(--border-color, #3a4452); }
-[data-theme="dark"] .ss-panel{ background: var(--bg-card, #1b222c); border-color: var(--border-color, #3a4452); }
+[data-theme="dark"] .ss-trigger{ background: var(--bg-input, #1f2733); border-color: var(--border-color, #3a4452); }
+[data-theme="dark"] .ss-panel{
+  background: rgba(27,34,44,.82);
+  backdrop-filter: blur(18px) saturate(170%); -webkit-backdrop-filter: blur(18px) saturate(170%);
+  border-color: var(--border-color, #3a4452);
+  box-shadow: 14px 18px 40px rgba(0,0,0,.5), inset 0 1px 2px rgba(255,255,255,.06);
+}
+[data-theme="dark"] .ss-item{ color: #e5e7eb; }
+[data-theme="dark"] .ss-item:hover{ background: rgba(255,255,255,.08); color: #e5e7eb; }
+[data-theme="dark"] .ss-item.ss-active{ background: transparent; color: #fff; font-weight: 700; }
+[data-theme="dark"] .ss-item.ss-default{ color: #9aa6b5; border-bottom-color: rgba(120,140,170,.3); }
+/* 移动端：键盘弹起时压缩面板高度，避免被系统键盘完全遮挡 */
+@media (max-width: 768px){ .ss-panel{ max-height: 46vh; } }
 
 @media (max-width: 768px) {
   /* 🟢 v227.34：让搜索框独占一行，日期行占整下一行（确保两日期框不被搜索框挤压） */
@@ -1423,7 +1462,8 @@ body::after{
   display: flex; align-items: center; justify-content: space-between;
   gap: 8px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
 }
-.qh-item:hover{ background: var(--row-hover, #f2f6ff); }
+/* 🟢 v229.03：与全局下拉统一 —— hover 改中性灰（原 #f2f6ff 偏蓝） */
+.qh-item:hover{ background: rgba(15,23,42,.05); }
 .qh-text{ flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .qh-del{
   flex: 0 0 auto; width: 18px; height: 18px; line-height: 16px; text-align: center;
@@ -1635,33 +1675,37 @@ body::after{
   border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.09);
 }
 /* 🟢 v227.4：盘点工作台「常驻未结束盘点」状态条（非弹窗，比 modal 更不打扰） */
+/* 🟢 v228.99：未结束盘点状态卡 —— 从顶部横幅改为空态区中部居中卡片。
+   蓝调玻璃拟物（与全站 --accent / 毛玻璃弹层语言统一），替换旧琥珀色警示横幅。 */
 .st-unfinished-banner{
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  margin: 0 0 14px; padding: 12px 16px; border-radius: 12px;
-  background: linear-gradient(135deg, rgba(212, 168, 112, 0.16) 0%, rgba(251, 191, 36, 0.10) 50%, rgba(255, 255, 255, 0.06) 100%);
-  border: 1px solid rgba(212, 168, 112, 0.5);
-  box-shadow: 0 2px 8px rgba(212, 168, 112, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.45);
-  color: #7c5a2e; font-size: 13.5px; line-height: 1.5;
+  display: flex; flex-direction: column; gap: 7px;
+  margin: 14px auto 0; padding: 16px 18px; border-radius: 14px;
+  max-width: 520px;
+  background: linear-gradient(150deg, rgba(22,119,255,0.12) 0%, rgba(22,119,255,0.05) 55%, rgba(255,255,255,0.55) 100%);
+  border: 1px solid rgba(22,119,255,0.30);
+  box-shadow: 0 6px 18px rgba(22,119,255,0.12), inset 0 1px 0 rgba(255,255,255,0.65);
+  backdrop-filter: blur(10px);
+  color: #1f3a5f; font-size: 13.5px; line-height: 1.55;
 }
-/* 🟢 v228.35（P2）：移动端横幅改纵向堆叠，按钮撑满一行，避免文字被挤成窄条看不清 */
-@media (max-width: 769px){
-  .st-unfinished-banner{ flex-direction: column; align-items: stretch; gap: 8px; padding: 11px 13px; }
-  .st-unfinished-banner .st-ub-text{ min-width: 0; }
-  .st-unfinished-banner .st-ub-actions{ width: 100%; }
-  .st-unfinished-banner .st-ub-actions button{ flex: 1 1 0; min-width: 0; }
-}
-.st-unfinished-banner .st-ub-icon{ font-size: 20px; flex: 0 0 auto; }
-.st-unfinished-banner .st-ub-text{ flex: 1 1 auto; min-width: 220px; }
-.st-unfinished-banner .st-ub-text b{ color: #9a3412; }
-.st-unfinished-banner .st-ub-actions{ display: flex; gap: 8px; flex: 0 0 auto; }
-.st-unfinished-banner .st-ub-actions button{ font-size: 13px; padding: 7px 14px; }
+.st-unfinished-banner .st-ub-head{ display: flex; align-items: center; gap: 8px; }
+.st-unfinished-banner .st-ub-icon{ font-size: 19px; flex: 0 0 auto; }
+.st-unfinished-banner .st-ub-title{ font-size: 15px; font-weight: 700; color: #14406e; letter-spacing: .2px; }
+.st-unfinished-banner .st-ub-meta{ font-size: 13px; color: #33517a; }
+.st-unfinished-banner .st-ub-meta b{ color: #14406e; }
+.st-unfinished-banner .st-ub-hint{ font-size: 12px; color: #5a7396; }
+.st-unfinished-banner .st-ub-actions{ display: flex; gap: 10px; margin-top: 5px; }
+.st-unfinished-banner .st-ub-actions button{ flex: 1 1 0; min-width: 0; font-size: 13.5px; padding: 9px 14px; }
 .st-unfinished-banner button.danger-3d{ color: #b91c1c; }
 [data-theme="dark"] .st-unfinished-banner{
-  background: linear-gradient(135deg, rgba(251, 191, 36, 0.18) 0%, rgba(212, 168, 112, 0.10) 50%, rgba(15, 23, 42, 0.08) 100%);
-  border-color: rgba(251, 191, 36, 0.45);
-  color: #fcd9a0;
+  background: linear-gradient(150deg, rgba(56,140,255,0.18) 0%, rgba(56,140,255,0.08) 55%, rgba(15,23,42,0.25) 100%);
+  border-color: rgba(96,165,250,0.40);
+  box-shadow: 0 6px 18px rgba(2,6,23,0.45), inset 0 1px 0 rgba(255,255,255,0.08);
+  color: #cfe3ff;
 }
-[data-theme="dark"] .st-unfinished-banner .st-ub-text b{ color: #fbbf24; }
+[data-theme="dark"] .st-unfinished-banner .st-ub-title{ color: #93c5fd; }
+[data-theme="dark"] .st-unfinished-banner .st-ub-meta{ color: #a9c6ee; }
+[data-theme="dark"] .st-unfinished-banner .st-ub-meta b{ color: #bfdbfe; }
+[data-theme="dark"] .st-unfinished-banner .st-ub-hint{ color: #7f9cc4; }
 
 /* 🟢 v227.53：盘点 5 类提示横幅（取代 JS 内联硬编码） */
 .st-banner-error{ background:#fef2f2; border:1px solid #fecaca; color:#b91c1c; }
@@ -3169,9 +3213,9 @@ button{
   transition: background 0.15s;
 }
 .autocomplete-item:last-child{ border-bottom: none; }
-.autocomplete-item:hover, .autocomplete-item.active{
-  background: rgba(91,155,213,0.08);
-}
+/* 🟢 v229.03：与 .ss-item 统一「无色」高亮 —— hover 淡灰、active 无底加粗 */
+.autocomplete-item:hover{ background: rgba(15,23,42,.05); }
+.autocomplete-item.active{ background: transparent; font-weight: 700; }
 .autocomplete-code{
   font-family: 'SF Mono', Monaco, Consolas, monospace;
   color: var(--primary); font-weight: 600; min-width: 90px;
@@ -4350,6 +4394,21 @@ body.col-resizing{ cursor: col-resize; user-select: none; }
 .login-cloud { display: flex; align-items: center; gap: 4px; }
 .login-cloud .dot { width: 7px; height: 7px; border-radius: 50%; background: #94a3b8; }
 .login-cloud.online .dot { background: #22c55e; box-shadow: 0 0 8px rgba(34,197,94,.6); }
+/* 🟢 v228.89：登录页云端状态标「检测中」态。
+   背景（v228.88→v228.89 启动流程改造）：登录页改为**立即弹出**，不再等数据链路跑完 ——
+   于是渲染登录页时 SyncManager.init() 往往还没开始/在途，isOnline 恒为 false。
+   若照旧渲染「云端未连接」，用户会先看到一句错误的红字灰点，约 1 秒后才跳成绿点，
+   属于自造的状态闪变。改为三态：
+     .is-checking（初始）→ 呼吸灰点 + 「检测中…」，明确表达"还在测"而非"测出来是坏的"
+     不置位        → 已测出 result=false，灰点「云端未连接」
+     .online       → 已测出 result=true，绿点「云端已同步」
+   注：颜色一律走令牌，不写死 —— 暗色主题下 #94a3b8 与 #5A6B7F 对比度不足。 */
+.login-cloud.is-checking { color: var(--text-muted); }
+.login-cloud.is-checking .dot { background: var(--text-muted); animation: cloudDotPulse 1.15s ease-in-out infinite; }
+@keyframes cloudDotPulse { 0%, 100% { opacity: .32; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .login-cloud.is-checking .dot { animation: none; opacity: .6; }
+}
 
 /* 🟢 v227.48：禁止移动端页面缩放（pinch / double-tap / 输入框聚焦放大） */
 /* 1) 所有文本类输入字号统一 ≥16px —— 这是 iOS 在输入框聚焦时自动放大页面的根因，
@@ -4360,8 +4419,8 @@ body.col-resizing{ cursor: col-resize; user-select: none; }
 /* 🟢 v227.82：排除 .filter-bar 内的控件 —— 筛选框的视觉字号由 .filter-bar 统一控制
    （12px，与 ss-trigger/日期框完全一致）；全局 16px 仅作用于弹窗、表单等真正会触发
    iOS 自动放大的输入场景。v227.69 排除 .as-input 的设计沿用。 */
-input[type="text"]:not(.as-input):not(.filter-bar input):not(.ss-search-input),
-input[type="search"]:not(.as-input):not(.filter-bar input):not(.ss-search-input),
+input[type="text"]:not(.as-input):not(.filter-bar input):not(.ss-trigger),
+input[type="search"]:not(.as-input):not(.filter-bar input):not(.ss-trigger),
 input[type="password"]:not(.as-input),
 input[type="number"]:not(.as-input),
 input[type="email"]:not(.as-input),
@@ -4669,9 +4728,14 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
   .filter-bar .ss-wrap .ss-trigger{
     font-size: 14px !important;
   }
-  /* ss-trigger padding 调整：line-height 44 下需要垂直居中 */
+  /* 🟢 v229.15：移动端下拉触发器同步 +0.5（14 → 14.5px）；日期/文本框维持 v228.75 的 14px 不变 */
+  .filter-bar .ss-wrap .ss-trigger,
   .filter-bar-m .ss-wrap .ss-trigger{
-    padding: 0 28px 0 10px !important;
+    font-size: 14.5px !important;
+  }
+  /* ss-trigger padding 调整：line-height 44 下需要垂直居中（🟢 v229.15 改对称 22/22 配合文字居中） */
+  .filter-bar-m .ss-wrap .ss-trigger{
+    padding: 0 22px 0 22px !important;
     line-height: 44px !important;
     display: flex !important; align-items: center !important;
   }
@@ -4915,6 +4979,11 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
   .ob-entry-table-wrapper{
     max-height: var(--wb-fit-h, calc(100vh - 210px)) !important;
     overflow-y: auto !important;
+    /* 🟢 v228.77：内层滚到头后不再把手势「链」给外层容器。
+       区域模式下外层已被滚动天花板钉死（原生最大滚动 == 表格上方内容高），
+       链条传上去只会换来一次被硬钳的回弹 —— 用户感知就是「停顿一下 + 回滚」。
+       contain 同时干掉表内下拉触发的页面回弹/下拉刷新。 */
+    overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
   }
   @supports (height: 100dvh){
@@ -4980,9 +5049,76 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
     position: static !important;
     box-shadow: none;
   }
+  /* --- 6. 🟢 v228.76 区域模式「定高」：min+max 同值（--wb-fit-h 同时作上下限）——
+     数据不足一屏也把表格区域撑满 → 滚动天花板校准（fitMobileTables）才能把
+     「表头顶格 + 翻页键贴底」的三段式终态在任意数据量下钉死不变 --- */
+  .wb-table-region .table-wrapper,
+  .wb-table-region .ob-list-table-wrapper,
+  .wb-table-region .oc-entry-table-wrapper,
+  .wb-table-region .ob-entry-table-wrapper{
+    min-height: var(--wb-fit-h, 0px) !important;
+  }
 }
 /* 超窄屏（≤430px）：隐藏「共 N 条」给翻页键让位；字号微降 */
 @media (max-width: 430px){
   .pagination-bar > span{ font-size: 10px !important; }
   .pagination-bar > span:first-child{ display: none !important; }
 }
+
+/* 🟢 v229.14 移动端分页条二排修复：此前 nowrap + overflow-x:auto 在窄屏裁掉翻页键/每页条数，
+   只能横向盲滚。改为两行换行居中——高度交给 fitMobileTables 实测（pagerH=bar.offsetHeight，
+   非写死），表格区高度自动重算。下拉面板同时改为向上弹（分页条吸底时向下弹必被视口裁掉）。 */
+@media (max-width: 768px){
+  .pagination-bar{
+    flex-wrap: wrap !important;
+    height: auto !important;
+    min-height: 48px;
+    overflow: visible !important;
+    justify-content: center !important;
+    row-gap: 2px;
+    padding-top: 6px !important; padding-bottom: 6px !important;
+  }
+  .pagination-bar .page-btns{ flex: 0 0 auto; }
+  .pagination-bar .ss-panel{ top: auto !important; bottom: calc(100% + 6px); }
+}
+
+/* =========================================================================
+   🟢 v228.96 / v228.97 —— 移动端体验审查「清单二」批量优化（#3/#4/#5；#5 吸左列于 v228.97 移除，A1 斑马连续 + A3 隐藏🔍）
+   仅作用于 (max-width:768px)，不影响桌面端任何布局。
+   ========================================================================= */
+@media (max-width: 768px){
+
+  /* —— 清单二#3：弹窗 bottom-sheet 化 —— 从底部上滑、占满宽、顶部圆角，像微信/支付宝弹层 —— */
+  .modal-overlay{ align-items: flex-end !important; justify-content: center; }
+  .modal{
+    width: 100% !important; max-width: 100% !important; min-width: 0 !important;
+    margin: 0; border-radius: 16px 16px 0 0 !important;
+    max-height: 88vh; transform: translateY(100%); transition: transform 0.28s ease;
+  }
+  .modal-overlay.show .modal{ transform: translateY(0); }
+  /* 关闭键热区扩到 ≥44px（用 ::before 透明外扩，不改可见尺寸，单手可盲点） */
+  .modal-close, .panel-dialog-close{ position: relative; }
+  .modal-close::before, .panel-dialog-close::before{
+    content: ''; position: absolute; inset: -8px; border-radius: 50%;
+  }
+
+  /* —— 清单二#4：表格字号/行高提升 —— 数据行 12px→13.5px、行高~32px→40px，户外强光更可读 —— */
+  .data-table td{ font-size: 13.5px !important; padding: 10px 8px !important; }
+  .data-table thead th{ font-size: 13px !important; padding: 10px 8px !important; }
+  /* 数量/差异列加大加粗，录入与核对更醒目 */
+  .st-qty{ font-size: 15px !important; font-weight: 600; }
+  .st-diff{ font-size: 15px !important; font-weight: 700 !important; }
+
+  /* —— 移除「首列吸左」(v228.97)：用户反馈收起态吸左列视觉违和；斑马纹本就打在 tr 上，
+        去掉吸左白色背景后斑马纹自动连续（A1 达成） —— */
+  /* —— A3：移动端隐藏实体链接的 🔍 图标，省约 20px 列宽、点击热区仍是整段文字 —— */
+  .entity-link .de-icon{ display: none !important; }
+}
+
+/* —— 清单三#3：「只看差异」开启后差异行红色高亮（全局，桌面/移动均生效） —— */
+.st-diff-row > td{ background: rgba(220,38,38,0.07) !important; }
+.st-diff-row .st-diff{ color: #dc2626 !important; }
+#stOnlyDiffBtn.active{
+  background: var(--primary, #0d9488); color: #fff; border-color: var(--primary, #0d9488);
+}
+

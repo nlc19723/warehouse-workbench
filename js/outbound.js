@@ -251,6 +251,7 @@ const OutboundModule = {
             ></td>
           <td style="text-align:right;"><input type="number" class="ob-qty-input" placeholder="0"
             value="${escAttr(r.出库数量 || '')}" data-row="${idx}" min="0" step="any"
+            inputmode="decimal" enterkeyhint="next"
             ></td>
           <td style="text-align:center;"><button onclick="OutboundModule.removeRow(${idx})" style="border:none;background:none;color:var(--status-danger);cursor:pointer;font-size:15px;padding:2px 4px;" title="删除此行">🗑️</button></td>
         </tr>`;
@@ -1006,44 +1007,25 @@ const OutboundModule = {
 };
 
 
-// ─── 全局 Toast 通知系统（顶部居中浮窗）───
+// ─── 全局提示：统一收口到 modal.js 的 window.showToast（右下角玻璃吐司）───
+// 🟢 v228.79 P1-2 / P2-1：原先这里自带一套「顶部居中胶囊 Toast」，与 modal.js 的
+//   notify/showToast 两套并行，且胶囊挂在 body 上、3500ms 不随模块切换消失 → 跨模块残留误导。
+//   现统一委托给 window.showToast，全站仅剩一套提示范式；导航时由 App.go 调用
+//   dismissAllToasts() 主动清掉残留，彻底消除跨模块残留。
 const Toast = {
-  show(msg, type = 'success', duration = 3500) {
-    // 移除所有已有 toast，保证「只留最新一条」（O7）
-    document.querySelectorAll('.ob-toast-notification').forEach(t => t.remove());
-
-    const toast = document.createElement('div');
-    toast.className = `ob-toast-notification ob-toast-${type}`;
-    const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : '⚠️';
-    // 图标用 innerHTML（固定安全），消息文本用 textContent（防 XSS）
-    toast.innerHTML = `<span class="ob-toast-icon">${icon}</span><span class="ob-toast-text"></span>`;
-    toast.querySelector('.ob-toast-text').textContent = msg;
-    toast.style.cssText = `
-      position: fixed; top: 90px; left: 50%; transform: translateX(-50%) translateY(-30px);
-      z-index: 999999; padding: 14px 24px; border-radius: 14px;
-      color: #fff; font-size: 14px; font-weight: 600;
-      display: flex; align-items: center; gap: 10px; min-width: 280px; max-width: 720px;
-      backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
-      border: 1px solid rgba(255,255,255,0.2);
-      box-shadow: 0 12px 32px rgba(0,0,0,0.18), 0 4px 12px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,0.15);
-      opacity: 0;
-      ${type === 'success' ? 'background: linear-gradient(135deg, rgba(16, 185, 129, 0.96), rgba(5, 150, 105, 0.96));' : ''}
-      ${type === 'error'   ? 'background: linear-gradient(135deg, rgba(239, 68, 68, 0.96), rgba(220, 38, 38, 0.96));' : ''}
-      ${type === 'warn'    ? 'background: linear-gradient(135deg, rgba(245, 158, 11, 0.96), rgba(217, 119, 6, 0.96));' : ''}
-    `;
-    document.body.appendChild(toast);
-
-    // 强制 reflow，触发动画
-    void toast.offsetWidth;
-    toast.style.transition = 'all 0.35s cubic-bezier(0.16, 1, 0.3, 1)';
-    toast.style.opacity = '1';
-    toast.style.transform = 'translateX(-50%) translateY(0)';
-
-    setTimeout(() => {
-      toast.style.opacity = '0';
-      toast.style.transform = 'translateX(-50%) translateY(-30px)';
-      setTimeout(() => toast.remove(), 400);
-    }, duration);
+  show(msg, type = 'success', duration) {
+    const text = String(msg == null ? '' : msg);
+    if (typeof window.showToast === 'function') {
+      // 消息文本里已自带 emoji（✅/❌/⚠️/⏳…），去掉前缀 emoji 避免与 notify 自带图标重复显示
+      const clean = text.replace(
+        /^[\s]*([\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2300}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{2705}\u{274C}\u{26A0}\u{23F3}\u{2757}]\s*)+/u,
+        ''
+      ).trim();
+      window.showToast(clean || text, type, duration || 2800);
+      return;
+    }
+    // 兜底：showToast 不可用时退回 alert（宁弹窗不静默丢消息）
+    try { alert(text); } catch (e) { /* 最后一道防线 */ }
   },
   success(msg, duration) { this.show(msg, 'success', duration); },
   error(msg, duration)   { this.show(msg, 'error', duration); },
@@ -1260,8 +1242,10 @@ const OutboundListModule = {
   },
   async exportData() {
     const all = await db.outbound.toArray();
-    // 🟢 O1：统一导出（行为与旧逻辑一致）
-    TableUtils.exportToExcel(all, `出库明细_${new Date().toISOString().split('T')[0]}.xlsx`, '出库明细');
+    // 🟢 v229.03：导出列 = 工作台「明细列表」当前 8 列（列序与表头一致，序号为全量行号）
+    const rows = all.map((r, i) => Object.assign({ 序号: i + 1 }, r));
+    const cols = ['序号', '出库单号', '项目名称', '出库时间', '存货编码', '存货名称', '规格型号', '出库数量'];
+    TableUtils.exportToExcel(rows, `出库明细_${new Date().toISOString().split('T')[0]}.xlsx`, '出库明细', cols);
   },
 
   // ===== v227.78：导入 Excel（整体覆盖当前「中心出库列表」） =====

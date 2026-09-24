@@ -5,6 +5,13 @@
 const SyncManager = {
   client: null,
   isOnline: false,
+  // 🟢 v228.88：是否已出过连接结论。
+  //   背景：登录页改为「立即弹出、加载静默」后，showLoginView() 常在 SyncManager.init()
+  //   完成之前就被调用。此时 isOnline 仍是初始值 false，但它表达的是"还没测"，
+  //   不是"连不上"。若不区分，登录页会先渲染一句错误的「云端未连接」，约 1s 后才跳成绿点。
+  //   语义：init()/probeBucket()/_connect() 任一跑完 → true（无论结果真假）。
+  //   false 期间状态标显示「检测中…」（呼吸点），true 之后按 isOnline 显示真实结论。
+  _syncProbed: false,
   config: null,
   BUCKET: (typeof AppConfig !== 'undefined' && AppConfig.supabase) ? AppConfig.supabase.bucket : 'workbench-data',
   // 🟢 v228.56：云端存储桶缺失检测（真机事故：Supabase 项目里 workbench-data 桶被删 →
@@ -54,15 +61,17 @@ const SyncManager = {
   async probeBucket() {
     try {
       const now = Date.now();
-      if (this._probeOkAt && (now - this._probeOkAt) < 5000) return true;
+      if (this._probeOkAt && (now - this._probeOkAt) < 5000) { this._syncProbed = true; return true; }
       if (!this.client || typeof this.client.storage === 'undefined') return false;
       const { data, error } = await this.client.storage.from(this.BUCKET).list('', { limit: 1 });
-      if (error) { this._noteStorageError(error); return false; }
-      if (!Array.isArray(data)) return false;
+      if (error) { this._noteStorageError(error); this._syncProbed = true; return false; }
+      if (!Array.isArray(data)) { this._syncProbed = true; return false; }
       this._probeOkAt = now;   // 仅在**成功**时记录，失败每次真实探测（快速感知桶异常）
+      this._syncProbed = true;
       return true;
     } catch (e) {
       this._noteStorageError(e);
+      this._syncProbed = true;
       return false;
     }
   },
@@ -70,20 +79,49 @@ const SyncManager = {
   FILE: (typeof AppConfig !== 'undefined' && AppConfig.supabase) ? AppConfig.supabase.file : 'data.json',
   BASE_FILE: (typeof AppConfig !== 'undefined' && AppConfig.supabase) ? AppConfig.supabase.baseFile : 'base.json',
 
+  // 🟢 v229.06（Phase 1-3 分包同步）：云端「按表分包」布局常量。
+  //   单文件 data.json 巨包（31MB）改为：data-meta.json（包级清单）+ data/<表>.json（每表一文件）。
+  //   读顺序严格为「先 meta 后表文件」——meta 未写出 = 本次推送对读者不可见，天然原子（见 R1）。
+  //   过渡期 LEGACY_DUAL_WRITE=true：新客户端同时写 legacy data.json/base.json，旧客户端仍可正常读，
+  //   待全量升级 1 个版本后将该常量置 false 并删除 legacy 读取回退分支（见方案 §6 兼容策略 A）。
+  DATA_DIR: 'data',
+  BASE_DIR: 'base',
+  META_FILE: 'data-meta.json',
+  BASE_META_FILE: 'base-meta.json',
+  PREV_FILE: 'data-prev.json',
+  DATA_SCHEMA: 'pt-v1',
+  // 🟢 v229.11（措施1）：关闭 legacy 双写。新客户端只写分包布局（data/ + data-meta.json /
+  //   base/ + base-meta.json），不再写整包 legacy data.json(≈30.7MB) / base.json(≈15.3MB)。
+  //   收益：每次推送少传 ~30MB、桶里常驻少 ~46MB 冗余。
+  //   安全：新客户端只读 meta 先行，legacy 文件停写后变为 stale 但不影响读取（pullData/pullBase
+  //   有 meta 时不会回退 legacy）；待下方清理脚本确认 meta 已存在后删除 stale 文件。
+  //   风险（已权衡）：未升级旧客户端在全新设备冷启动读不到 legacy 包——当前已全量推送 v229.x，可接受。
+  LEGACY_DUAL_WRITE: false,
+  // 🟢 v229.06：指纹采样（Phase 3 脏表追踪用）。表内行数多时全量哈希过慢，取首尾+中段共 3 行作指纹，
+  //   覆盖绝大多数真实编辑（首行/末行/中段变更都会被捕获）；极少数「仅改中段相邻行且首尾不变」场景可能漏判，
+  //   但最坏后果只是「多传一张未变表」，不会丢数据，可接受。
+  _FP_SAMPLE: 3,
+
   // 初始化：①此前手动保存过配置（localStorage.supabase_config）→ 直接用它重连；
   //         ②🟢 v227.99：无保存配置且用户未主动断开过 → 用「管理员覆盖 > 内置默认」凭证自动连接，
   //            登录页即显示「云端已同步」，无需再手动到「云端同步」里点保存。
   //         ③用户点过「断开连接」→ 记 wb_sync_user_disconnected=1，刷新/重启不再自动重连（尊重用户意图）。
-  _cloudCfgTimer: null,
-  // 🟢 v228.72：运行中设备周期性检查云端下发切换（管理员改凭证后，无需重载即自动跟随）
-  //   每 60s 一次轻量 getSetting('cloudConfig')；已是最新时 pull 内部直接返回，无额外开销/无死循环。
-  _startCloudConfigWatch() {
-    if (this._cloudCfgTimer) return;
+  // 🟢 v228.81：账号/权限哨兵轮询 —— 每 5s 读云端 keepersMeta（仅时间戳，几十字节），
+  //   ts 变化才拉全量 keepers 并静默刷新。详见 AppConfig.keepersWatchTick / App._onKeepersChanged。
+  _keepersWatchTimer: null,
+  KEEPERS_WATCH_MS: 60000,   // 🟢 v228.84：专属权限轮询降为 60s 安全网（D1 搭车数据同步心跳 + B-精 注意力拉取已覆盖常态检测；此值仅当数据同步心跳未跑时兜底）
+  // 🟢 v228.94：新桶下发(cloudConfig)跟随不再独占定时器，改为挂靠本看门狗 + 数据同步心跳（详见 AppConfig.pullCloudConfigFromCloud / _checkKeepersViaSettingsMeta）。
+
+  // 🟢 v228.81：账号/权限哨兵守护 —— 每 60s 读 keepersMeta 时间戳（仅几十字节）：
+  //   每 5s 调 AppConfig.keepersWatchTick()（其内部只读 tiny 时间戳键 keepersMeta，
+  //   ts 变化才触发 pullKeepersFromCloud 全量拉取）。与盘点 1.5s 全量轮询相比，流量极小。
+  _startKeepersWatch() {
+    if (this._keepersWatchTimer) return;
     const tick = () => {
-      if (!this.isOnline || typeof AppConfig === 'undefined' || typeof AppConfig.pullCloudConfigFromCloud !== 'function') return;
-      try { AppConfig.pullCloudConfigFromCloud(); } catch (e) { /* 已忽略 */ }
+      if (typeof AppConfig === 'undefined' || typeof AppConfig.keepersWatchTick !== 'function') return;
+      try { AppConfig.keepersWatchTick(); } catch (e) { /* 已忽略 */ }
     };
-    this._cloudCfgTimer = setInterval(tick, 60000);
+    this._keepersWatchTimer = setInterval(tick, this.KEEPERS_WATCH_MS);
   },
 
   async init() {
@@ -110,11 +148,13 @@ const SyncManager = {
         //   （表现为：设备 A 保存能推上云，设备 B 刷新却看不到）。
         await this._connect();
         this._bindNetworkEvents();
-        this._startCloudConfigWatch();
+        this._startKeepersWatch();   // 🟢 v228.81：账号/权限哨兵守护（同时承载新桶下发跟随，见 v228.94）
       }
     } catch (e) {
       console.warn('Sync config load failed:', e);
     }
+    // 🟢 v228.88：连接结论已落定（有配置就走完 _connect，无配置也确定"不上线"）→ 置位探测标记
+    this._syncProbed = true;
     this.updateUI();
   },
 
@@ -147,15 +187,16 @@ const SyncManager = {
   //   单飞条件不成立，仍会走完整探测。
   _connectPromise: null,
   async _connect() {
-    if (!this.config || !this.config.url || !this.config.key) return false;
+    if (!this.config || !this.config.url || !this.config.key) { this._syncProbed = true; return false; }
     // 浏览器层面已断网：直接判离线，不做无谓请求
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       this.isOnline = false;
+      this._syncProbed = true;
       this.updateUI();
       return false;
     }
     // 🟢 v228.61：已在线且已有可用 client → 无需重复探测（幂等）
-    if (this.isOnline && this.client) return true;
+    if (this.isOnline && this.client) { this._syncProbed = true; return true; }
     // 🟢 v228.61：并发调用合并 —— 同一时刻多个 init 只跑一次探测
     if (this._connectPromise) {
       try { return await this._connectPromise; } catch (e) { return false; }
@@ -171,10 +212,12 @@ const SyncManager = {
           console.warn('[SyncManager] 自动重连探测失败:', v && v.reason);
           this.client = null;
           this.isOnline = false;
+          this._syncProbed = true;
           this.updateUI();
           return false;
         }
       this.isOnline = true;
+      this._syncProbed = true;
       this.updateUI();
       // 🟢 v228.62：连接成功后延迟预热云端键集（单次幂等，不阻塞连接返回）。
       //   与首屏渲染错峰 2.5s，避免和「拉 data.json / keepers」抢带宽。
@@ -192,6 +235,7 @@ const SyncManager = {
         console.error('Supabase connect failed:', e);
         this.client = null;
         this.isOnline = false;
+        this._syncProbed = true;
         this.updateUI();
         return false;
       }
@@ -428,7 +472,7 @@ const SyncManager = {
         </div>
         <div style="background:linear-gradient(135deg,rgba(2,132,199,0.07),rgba(14,165,233,0.03));border:1px solid rgba(2,132,199,0.15);border-radius:10px;padding:9px 14px;margin-bottom:12px;">
           <p style="font-size:11.5px;color:#0369a1;line-height:1.5;margin:0;">
-            <b>📌 数据分离存储</b>：当前数据分为「<b>工作数据</b>」(data.json，日常累积) 与「<b>基准数据</b>」(base.json，系统底账) 两份，云端独立存放、互不覆盖。
+            <b>📌 数据分离存储</b>：当前数据分为「<b>工作数据</b>」(data/ 目录按模块分包，日常累积) 与「<b>基准数据</b>」(base/ 目录，系统底账) 两份，云端独立存放、互不覆盖；每个模块单独成文件，仅变化的模块才上传/下载。
           </p>
         </div>
         <div class="sync-act-group">
@@ -495,6 +539,11 @@ const SyncManager = {
     }
     if (ok) {
       WBModal.alert('当前数据已上传到云端，部署/分享链接打开即自动更新。');
+    } else if (DataLoader._lastPushReason === 'conflict') {
+      // 🟢 v229.07：冲突弹窗已由 pushAllToCloud 内部展示，不再重复弹「上传失败」误导用户
+    } else if (DataLoader._lastPushReason === 'busy') {
+      // 🟢 v229.07：上一次推送仍在进行（在途防重入），温和提示即可
+      if (typeof Toast !== 'undefined') Toast.warn('上一次推送仍在进行中，请稍候再试');
     } else {
       WBModal.alert('上传失败，请检查网络连接或存储桶权限（需开启 anon 可写）。');
     }
@@ -548,16 +597,26 @@ const SyncManager = {
   //     · 传具体值：云端 savedAt 不一致 → 返回 'conflict'，由调用方提示用户先拉取
   //   opts._existing      —— 调用方已拉取的云端 bundle，复用以免二次往返
   //   返回值：true 成功 / false 失败 / 'conflict' 版本冲突（未写入）
+  // 🟢 v229.06（Phase 1-3 分包同步）：把工作包拆成「data-meta.json + data/<表>.json」逐表上传。
+  //   · 写序：先传各表文件 → 最后传 meta（读者先读 meta，未写出=本次推送不可见，天然原子，见方案 R1）。
+  //   · 脏表上传：bundle.tables 仅含「本次变化」的表（data-loader 已按指纹比对），未变的表不重传，
+  //     但其 meta 条目保留（从 existing.__cloudMtimes 继承），保证其它设备仍能按 mtime 跳过/拉取。
+  //   · 迁移：若云端还是 legacy（无 meta / existing.__cloudMtimes 为空），则本次把全表都传成文件，
+  //     一次性把单文件包迁成按表分包，之后才进入脏表增量。
+  //   · 过渡双写：LEGACY_DUAL_WRITE=true 时同时写 legacy data.json（合并全量+脏表），旧客户端可读。
+  //   外部契约不变：返回 true / false / 'conflict'；data-loader 的 12 处消费点无需改动。
   async pushData(dataObj, opts) {
     if (!this.isOnline || !this.client) return false;
     // 🟢 v227.71：同步状态条进入 syncing 脉冲；成功后回 online，失败转 error
     this.setSyncState('syncing', '同步中…');
     const options = opts || {};
+    // 🟢 v229.11（措施2）：推送前只取包级 meta（≈548B），替代全量 pullData()（≈14.9MB）。
+    //   乐观锁只要 savedAt；prev 快照由下方按脏表单独拉取。
+    const metaInfo = (options._metaOnly !== undefined) ? options._metaOnly
+      : await this.pullMetaOnly();
+    const isLegacy = !!(metaInfo && metaInfo.isLegacy);
     if (options.expectedSavedAt !== undefined) {
-      const existing = options._existing !== undefined
-        ? options._existing
-        : await this.pullDataPrivate();
-      const cloudSavedAt = (existing && existing.savedAt) || null;
+      const cloudSavedAt = (metaInfo && metaInfo.savedAt) || null;
       if (options.expectedSavedAt === null) {
         if (cloudSavedAt) {
           console.warn('[乐观锁] 本机无同步基准，而云端已有数据（savedAt=' + cloudSavedAt + '），已拒绝覆盖');
@@ -570,82 +629,208 @@ const SyncManager = {
         return 'conflict';
       }
     }
-    // 🟢 AUDIT-004：上传带重试（自愈瞬时失败）
-    const ok = await this._uploadWithRetry(this.FILE, dataObj);
-    this.setSyncState(ok ? null : 'error', ok ? '已同步' : '同步失败');
-    return ok;
+    try {
+      const tables = (dataObj && dataObj.tables) || {};
+      const savedAt = (dataObj && dataObj.savedAt) || new Date().toISOString();
+      const changedNames = Object.keys(tables);
+      // 🟢 v229.08：本次真改动的模块（脏表集合），写入 meta.revertibleTables，
+      //   供「按模块恢复上一份」界面只列出上次动过的模块。缺省空数组。
+      const revertibleTables = Array.isArray(options._changedTables) ? options._changedTables : changedNames.slice();
+      const meta = { schema: this.DATA_SCHEMA, savedAt, version: dataObj.version || null, tables: {}, prevWorkSavedAt: null, hasPrev: false, revertibleTables };
+      // 🟢 v229.11（措施2）：上一份快照只拉「本次将覆盖的脏表」的云端当前版本，
+      //   不再拉全量 existing.tables（≈14.9MB）。prev 仅含这些表的上一版本 → 恢复也只动这些表。
+      const prevTables = {};
+      if (!isLegacy) {
+        for (const name of changedNames) {
+          if (DataLoader && DataLoader.CLOUD_EXCLUDE_TABLES && DataLoader.CLOUD_EXCLUDE_TABLES.indexOf(name) >= 0) continue;
+          try {
+            const cur = await this._cloudGet(this.DATA_DIR + '/' + name + '.json');
+            if (cur && Array.isArray(cur) && cur.length) prevTables[name] = cur;
+          } catch (e) { /* 该表云端尚未存在（首推），无 prev */ }
+        }
+      } else if (metaInfo && metaInfo.tables && Object.keys(metaInfo.tables).length) {
+        // legacy 云（极少见）：整包回退，prev 含全部表
+        for (const name of Object.keys(metaInfo.tables)) prevTables[name] = metaInfo.tables[name];
+      }
+      let prevWork = null;
+      if (Object.keys(prevTables).length) {
+        prevWork = { savedAt: (metaInfo && metaInfo.savedAt) || null, tables: prevTables };
+        await this._uploadWithRetry(this.PREV_FILE, prevWork);
+        meta.prevWorkSavedAt = prevWork.savedAt;
+        meta.hasPrev = true;
+      }
+      // 上传脏表（逐表）+ 保留未重传表的 meta 条目
+      const uploadSet = {};
+      for (const n of changedNames) uploadSet[n] = true;
+      if (isLegacy && metaInfo.tables) for (const n of Object.keys(metaInfo.tables)) uploadSet[n] = true; // 迁移：把 legacy 全量也重传成文件
+      for (const name of Object.keys(uploadSet)) {
+        // 派生/不跨端表永不进云端（沿用 CLOUD_EXCLUDE_TABLES）
+        if (DataLoader && DataLoader.CLOUD_EXCLUDE_TABLES && DataLoader.CLOUD_EXCLUDE_TABLES.indexOf(name) >= 0) continue;
+        const rows = tables[name];
+        if (!Array.isArray(rows)) continue;
+        await this._uploadWithRetry(this.DATA_DIR + '/' + name + '.json', rows);
+        meta.tables[name] = { mtime: savedAt, rows: rows.length };
+      }
+      // 保留「本次未重传、但仍存于云端的表」的 meta 条目（dirty 上传不抹掉其它表记录）
+      if (metaInfo && metaInfo.tablesMeta) {
+        for (const name of Object.keys(metaInfo.tablesMeta)) {
+          if (!meta.tables[name]) meta.tables[name] = metaInfo.tablesMeta[name];
+        }
+      }
+      // meta 最后写（原子性：读者先读 meta，未写出则不可见）
+      await this._uploadWithRetry(this.META_FILE, meta);
+      // 🟢 v229.11（措施1）：LEGACY_DUAL_WRITE=false 后不再写 data.json（省 ~30MB/次上传）
+      if (this.LEGACY_DUAL_WRITE) {
+        const legacyTables = Object.assign({}, (metaInfo && metaInfo.tables) || {}, tables);
+        const legacy = { version: dataObj.version || null, savedAt, tables: legacyTables, prevWork };
+        await this._uploadWithRetry(this.FILE, legacy);
+      }
+      this.setSyncState(null, '已同步');
+      return true;
+    } catch (e) {
+      console.error('[pushData] 异常:', e);
+      this.setSyncState('error', '同步失败');
+      return false;
+    }
   },
 
-  // 把"基准数据"单独推送到云端（与 data.json 工作数据分离存放）
+  // 🟢 v229.06：基准包同样拆成「base-meta.json + base/<表>.json」逐表上传（与工作包同构）。
   async pushBase(dataObj) {
     if (!this.isOnline || !this.client) return false;
-    // 🟢 v227.71：同步状态条进入 syncing 脉冲
     this.setSyncState('syncing', '同步中…');
-    const ok = await this._uploadWithRetry(this.BASE_FILE, dataObj);
-    this.setSyncState(ok ? null : 'error', ok ? '已同步' : '同步失败');
-    return ok;
+    try {
+      const tables = (dataObj && dataObj.tables) || {};
+      const savedAt = new Date().toISOString();
+      const meta = { schema: this.DATA_SCHEMA, savedAt, version: dataObj.version || null, tables: {} };
+      for (const name of Object.keys(tables)) {
+        if (DataLoader && DataLoader.CLOUD_EXCLUDE_TABLES && DataLoader.CLOUD_EXCLUDE_TABLES.indexOf(name) >= 0) continue;
+        const rows = tables[name];
+        if (!Array.isArray(rows)) continue;
+        await this._uploadWithRetry(this.BASE_DIR + '/' + name + '.json', rows);
+        meta.tables[name] = { mtime: savedAt, rows: rows.length };
+      }
+      await this._uploadWithRetry(this.BASE_META_FILE, meta);
+      if (this.LEGACY_DUAL_WRITE) {
+        await this._uploadWithRetry(this.BASE_FILE, { version: dataObj.version || null, savedAt, tables });
+      }
+      this.setSyncState(null, '已同步');
+      return true;
+    } catch (e) {
+      console.error('[pushBase] 异常:', e);
+      this.setSyncState('error', '同步失败');
+      return false;
+    }
   },
 
-  // 从云端拉取"基准数据"（base.json）
+  // 🟢 v229.06：基准包按表分包读取；无 meta 时回退 legacy base.json。
   async pullBase() {
     if (!this.isOnline || !this.client || !this.config) return null;
     try {
-      const url = `${this.config.url}/storage/v1/object/public/${this.BUCKET}/${this.BASE_FILE}`;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10000);
-      const resp = await fetch(url, {
-        headers: { 'apikey': this.config.key },
-        signal: controller.signal
-      });
-      clearTimeout(timer);
-      if (!resp.ok) {
-        if (resp.status === 404 || resp.status === 400) return null; // 基准文件尚不存在
-        console.warn('基准数据拉取 HTTP', resp.status);
-        return null;
+      const meta = await this._cloudGet(this.BASE_META_FILE);
+      if (meta && meta.schema === this.DATA_SCHEMA && meta.tables) {
+        const tables = {};
+        for (const name of Object.keys(meta.tables)) {
+          const rows = await this._cloudGet(this.BASE_DIR + '/' + name + '.json');
+          if (rows && Array.isArray(rows)) tables[name] = rows;
+        }
+        return { version: meta.version || null, savedAt: meta.savedAt, tables };
       }
-      const text = await resp.text();
-      return JSON.parse(text);
-    } catch (e) {
-      if (e.name === 'AbortError') console.warn('基准数据拉取超时(10s)，跳过');
-      else console.warn('基准数据拉取异常:', e.message || e);
+      const legacy = await this._cloudGet(this.BASE_FILE);
+      if (legacy && legacy.tables) return legacy;
       return null;
-    }
+    } catch (e) { return null; }
   },
 
-  // 从云端拉取全量数据（使用原生 fetch，更稳定，10 秒超时）
-  async pullData() {
+  // 🟢 v229.06（Phase 1-3 分包同步）：按表分包读取。
+  //   · 读 data-meta.json → 拿全表 mtime 清单；逐表比对 mtimeMap，未变(且本地已 populated)的表跳过下载。
+  //   · opts.mtimeMap：{ 表名: 云端mtime }（本机上次同步记录），相等 ⇒ 跳过。
+  //   · opts.forceTables：必下表的名单（如本机某表为空/从未同步，见 R10 本地清空保护）。
+  //   · 返回 bundle 形状 { tables, savedAt, version, prevWork, __cloudMtimes }，
+  //     其中 tables 仅含本次实际下载的表；__cloudMtimes 为云端全表 mtime 清单（供 data-loader 记录）。
+  //   · 无 meta 时回退 legacy data.json（兼容过渡期）；legacy 包 __cloudMtimes=null。
+  async pullData(opts) {
     if (!this.isOnline || !this.client || !this.config) return null;
     try {
-      const url = `${this.config.url}/storage/v1/object/public/${this.BUCKET}/${this.FILE}`;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10000);
-      const resp = await fetch(url, {
-        headers: { 'apikey': this.config.key },
-        signal: controller.signal
-      });
-      clearTimeout(timer);
-      if (!resp.ok) {
-        if (resp.status === 404 || resp.status === 400) return null; // 文件还不存在
-        console.warn('云端拉取 HTTP', resp.status);
-        return null;
+      const meta = await this._cloudGet(this.META_FILE);
+      if (meta && meta.schema === this.DATA_SCHEMA && meta.tables) {
+        const mtimeMap = (opts && opts.mtimeMap) || null;
+        const forceTables = (opts && opts.forceTables) || null;
+        const tables = {};
+        const cloudMtimes = {};
+        for (const name of Object.keys(meta.tables)) {
+          cloudMtimes[name] = meta.tables[name].mtime;
+          const changed = !mtimeMap || mtimeMap[name] !== meta.tables[name].mtime;
+          const forced = forceTables && forceTables.indexOf(name) >= 0;
+          if (!changed && !forced) continue; // 本地已是最新，跳过下载
+          const rows = await this._cloudGet(this.DATA_DIR + '/' + name + '.json');
+          if (rows && Array.isArray(rows)) tables[name] = rows;
+        }
+        return {
+          version: meta.version || null,
+          savedAt: meta.savedAt,
+          tables,
+          // prevWork 仅带展示信息（savedAt + 标记），完整快照在 PREV_FILE（恢复时按需下载）
+          prevWork: meta.hasPrev ? { savedAt: meta.prevWorkSavedAt || null, _fromFile: true } : null,
+          __cloudMtimes: cloudMtimes,
+          // 🟢 v229.08：最近一次推送真改动的模块（供「按模块恢复上一份」界面列示）缺省空数组
+          revertibleTables: Array.isArray(meta.revertibleTables) ? meta.revertibleTables : []
+        };
       }
-      const text = await resp.text();
-      return JSON.parse(text);
-    } catch (e) {
-      if (e.name === 'AbortError') console.warn('云端拉取超时(10s)，回退本地');
-      else console.warn('云端拉取异常:', e.message || e);
+      // legacy 回退
+      const legacy = await this._cloudGet(this.FILE);
+      if (legacy && legacy.tables) { legacy.__cloudMtimes = null; return legacy; }
       return null;
-    }
+    } catch (e) { return null; }
   },
 
-  // 用 SDK 私有下载读取（绕过公开 URL 的 CDN 缓存，适合刚写入后立即读回校验）
+  // 用 SDK 私有下载读取（绕过公开 URL 的 CDN 缓存，适合刚写入后立即读回校验 / 推送前取 existing）
   async pullDataPrivate() {
-    if (!this.isOnline || !this.client) return null;
+    return this.pullData();
+  },
+
+  // 🟢 v229.11（措施2）：只取「包级 meta」（data-meta.json，≈548B），替代推送前全量 pullData()（≈14.9MB）。
+  //   用途：推送时只需 savedAt（乐观锁）与「未重传表的 meta 条目」（保留其它表记录），
+  //   无需任何表内容。prev 快照改由 pushData 按脏表单独拉取，不再依赖整包 existing.tables。
+  //   返回：{ savedAt, version, hasPrev, prevWorkSavedAt, revertibleTables, isLegacy, tablesMeta }
+  //   无 meta（legacy 云，极少见）回退读 FILE 整包，仅取 savedAt/tables 元数据（isLegacy:true）。
+  async pullMetaOnly() {
+    if (!this.isOnline || !this.client || !this.config) return null;
     try {
-      const { data, error } = await this.client.storage.from(this.BUCKET).download(this.FILE);
-      if (error || !data) return null;
-      return JSON.parse(await data.text());
-    } catch (e) { console.warn('私有拉取异常:', e); return null; }
+      const meta = await this._cloudGet(this.META_FILE);
+      if (meta && meta.schema === this.DATA_SCHEMA && meta.tables) {
+        return {
+          savedAt: meta.savedAt || null,
+          version: meta.version || null,
+          hasPrev: !!meta.hasPrev,
+          prevWorkSavedAt: meta.prevWorkSavedAt || null,
+          revertibleTables: Array.isArray(meta.revertibleTables) ? meta.revertibleTables : [],
+          isLegacy: false,
+          tablesMeta: meta.tables
+        };
+      }
+      // legacy 回退（常驻已迁移后极少触发）：整包仅取元数据
+      const legacy = await this._cloudGet(this.FILE);
+      if (legacy && legacy.tables) {
+        return {
+          savedAt: legacy.savedAt || null,
+          version: legacy.version || null,
+          hasPrev: !!(legacy.prevWork),
+          prevWorkSavedAt: legacy.prevWork ? legacy.prevWork.savedAt : null,
+          revertibleTables: [],
+          isLegacy: true,
+          tables: legacy.tables
+        };
+      }
+      return null;
+    } catch (e) { return null; }
+  },
+
+  // 🟢 v229.06：拉取「上一份」完整快照（data-prev.json），供恢复上一份使用。
+  async pullPrevWork() {
+    if (!this.isOnline || !this.client || !this.config) return null;
+    try {
+      return await this._cloudGet(this.PREV_FILE);
+    } catch (e) { return null; }
   },
 
   async pullSettingsPrivate() {
@@ -663,6 +848,9 @@ const SyncManager = {
   //   拆分后轮询只读 settings.json（≈7KB），基线仅在开局/换轮时读一次并缓存。
   //   基线走「读-改-写 + 回读校验」同款防护（与 setSetting 一致），保证多端不互抹。
   BASELINE_FILE: 'baseline.json',
+  // 🟢 v229.10（A 方案：基线按批次分片）：分片目录。每个批次独立成 baseline/<b64url(key)>.json，
+  //   替代单体 baseline.json（203 批次 / 2.28MB）整包下载。单体仅作旧客户端兜底。
+  BASELINE_DIR: 'baseline',
   // 🟢 与 getSettings 同款顺序：**先走私有 SDK 通道**（bucket 为私有时公开 URL 恒定 400，
   //    还会往控制台丢一堆加载失败噪音），公开 URL 仅在 SDK 网络层失败时兜底。
   //    另：文件不存在是「尚未迁移」的正常态，识别后直接判空，不再多打一次公开 URL。
@@ -703,6 +891,64 @@ const SyncManager = {
     return true;   // 与 setSetting 同款：重试后仍不一致不阻塞用户（基线可重算兜底）
   },
 
+  // 🟢 v229.10（A 方案）：批次键 → base64url 安全文件名（浏览器/Node 通用，无填充）。
+  //   保证只含 A-Za-z0-9_-，对任意存储后端安全；写/读必须用同一编码，故集中在此。
+  _baselineShardB64url(str) {
+    if (typeof Buffer !== 'undefined') return Buffer.from(String(str), 'utf8').toString('base64url');
+    const bytes = new TextEncoder().encode(String(str));
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  },
+  _baselineShardPath(key) {
+    return `${this.BASELINE_DIR}/${this._baselineShardB64url(key)}.json`;
+  },
+  // 🟢 v229.10（A 方案）：只下载「当前批次」一片（≈18KB），替代整包 2.28MB。
+  //   分片缺失（404）即返回 null，由调用方回退读单体（过渡期/旧客户端写入的基线）。
+  async getBaselineShard(key) {
+    if (!this.isOnline || !this.client || !key) return null;
+    try {
+      const { data, error } = await this.client.storage.from(this.BUCKET).download(this._baselineShardPath(key));
+      if (!error && data) return JSON.parse(await data.text());
+      if (error && (String(error.statusCode) === '404' || /not found/i.test(String(error.message || '')))) return null;
+    } catch (e) { /* SDK 网络层失败 → 返回 null，调用方回退单体 */ }
+    return null;
+  },
+  // 🟢 v229.10（A 方案）：只写「当前批次」一片，在该片内部做读-合并-写 + 回读校验。
+  //   每个批次独立成片，互不覆盖其他批次的快照（比单体全局乐观锁更不易冲突）。
+  async setBaselineShard(key, shard) {
+    if (!this.isOnline || !this.client || !key) return false;
+    const path = this._baselineShardPath(key);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const cur = (await this.getBaselineShard(key)) || {};
+        const merged = Object.assign({}, cur, shard || {});
+        const stamp = Date.now();
+        merged._updatedAt = stamp;
+        const { error } = await this.client.storage
+          .from(this.BUCKET)
+          .upload(path, JSON.stringify(merged),
+            { contentType: 'application/json', upsert: true, cacheControl: '0' });
+        if (error) { console.error('基线分片写入失败:', error.message); return false; }
+        const back = await this.getBaselineShard(key);
+        if (back && back._updatedAt === stamp) return true;
+        console.warn('[基线分片乐观锁] 被其它设备覆盖，重试第 ' + (attempt + 1) + ' 次');
+      } catch (e) { console.error('基线分片写入异常:', e); return false; }
+    }
+    return true;
+  },
+  // 🟢 v229.17（L1）：删除指定基线分片（收口超过宽限期后调用），从存储层消除堆积。
+  async removeBaselineShard(key) {
+    if (!this.isOnline || !this.client || !key) return false;
+    try {
+      const { error } = await this.client.storage
+        .from(this.BUCKET)
+        .remove([this._baselineShardPath(key)]);
+      if (error) { console.error('基线分片删除失败:', error.message); return false; }
+      return true;
+    } catch (e) { console.error('基线分片删除异常:', e); return false; }
+  },
+
   // 测试用：将云端读写重定向到 localStorage（隔离真实 Supabase 网络污染/缓存）
   // 不影响生产逻辑——仅替换底层 put/get，双版本/设置代码路径完全相同
   useLocalMock() {
@@ -717,11 +963,22 @@ const SyncManager = {
       const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
       return s[path] ? JSON.parse(s[path]) : null;
     };
-    this.pushData = async (obj) => { fakeFile(this.FILE, obj); return true; };
-    this.pushBase = async (obj) => { fakeFile(this.BASE_FILE, obj); return true; };
-    this.pullData = async () => readFile(this.FILE);
-    this.pullDataPrivate = async () => readFile(this.FILE);
-    this.pullBase = async () => readFile(this.BASE_FILE);
+    // 🟢 v229.06：数据路径改覆盖【低层抽象】，使分包生产逻辑在本地完整验证。
+    //   pushData/pullData 的逐表分包、prev 快照、legacy 双写等逻辑均真实执行，仅底层读写走 localStorage。
+    this._uploadWithRetry = async (path, obj) => { fakeFile(path, obj); return true; };
+    this._cloudGet = async (path) => readFile(path);
+    this._cloudList = async (dir) => {
+      const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+      const prefix = dir ? dir + '/' : '';
+      const out = {};
+      for (const k of Object.keys(s)) {
+        if (k.indexOf(prefix) !== 0) continue;
+        const name = dir ? k.slice(prefix.length) : k;
+        if (!name) continue;
+        out[name] = { updated_at: new Date().toISOString(), size: (s[k] ? s[k].length : 0) };
+      }
+      return out;
+    };
     this.getSettings = async () => readFile('settings.json') || {};
     this.pullSettingsPrivate = async () => readFile('settings.json');
     // 🟢 v228.44：基线独立文件的 mock（保持测试隔离，不污染真实云端）
@@ -729,6 +986,25 @@ const SyncManager = {
     this.setBaseline = async (map) => {
       const cur = (readFile(this.BASELINE_FILE) || {});
       fakeFile(this.BASELINE_FILE, Object.assign({}, cur, map || {}, { _updatedAt: Date.now() }));
+      return true;
+    };
+    // 🟢 v229.10（A 方案）：分片基线的 mock（与真实分片路径一致，保持测试隔离）
+    this.getBaselineShard = async (key) => {
+      if (!key) return null;
+      return readFile(`${this.BASELINE_DIR}/${this._baselineShardB64url(key)}.json`);
+    };
+    this.setBaselineShard = async (key, shard) => {
+      if (!key) return false;
+      const p = `${this.BASELINE_DIR}/${this._baselineShardB64url(key)}.json`;
+      const cur = (readFile(p) || {});
+      fakeFile(p, Object.assign({}, cur, shard || {}, { _updatedAt: Date.now() }));
+      return true;
+    };
+    // 🟢 v229.17（L1）：removeBaselineShard 的 mock（保持测试隔离）
+    this.removeBaselineShard = async (key) => {
+      if (!key) return false;
+      const p = `${this.BASELINE_DIR}/${this._baselineShardB64url(key)}.json`;
+      if (readFile(p)) { delete store[p]; localStorage.setItem(LS_KEY, JSON.stringify(store)); }
       return true;
     };
     this.setSetting = async (key, value) => {
@@ -916,6 +1192,10 @@ const SyncManager = {
   // ==================================================================
   _keyTsCache: null,       // { [key]: 上次成功读取时间戳 } —— 单键短缓存用
   _keyEpochCache: null,    // { [key]: 写入该时间戳时所属的「轮询轮次」 } —— 见 _keyTsCache 注释
+  // 🟢 v228.84：CDN 绕过窗口的截止时间戳（ms）。显式初始化为 0（而非留 undefined），
+  //   避免调用方用 `typeof x !== 'undefined'` 做守卫时恒假（该写法曾导致 bust 永不生效，
+  //   使 5s 看门狗永远读到陈旧 keepersMeta → 跨设备权限变更彻底失效）。
+  _bustUntil: 0,
   // 🟢 v228.64（P2 修正 TTL 语义错配）：TTL 从「纯时间」改为「时间 + 轮次」双判据。
   //   旧注释写着「短于轮询周期(3s)，保证新鲜」，但实测（docs/季度盘点同步链路实机走查报告.md
   //   §四 缺陷 6-4）同一键在**一轮**内被读 14 次、其中仅 ~10 次真正下网，
@@ -979,6 +1259,12 @@ const SyncManager = {
   //   _legacyKeySet 仅作为「已知不在 list 里」的显式名单保留（手工兜底/跨版本兼容）。
   _legacyKeySet: null,     // { [key]: true }
   _cloudKeySet: null,      // { [key]: true } —— 由 list 结果填充（云端 settings/ 真实存在的键）
+  // 🟢 v228.82：动态设置键白名单 —— 这些键是「建账号 / 首次改权限之后才创建」的，
+  //   设备启动 list 键集时它们往往还不存在，会被 ⓪'/⓪-1 的「不在云键集 ⇒ 老键」判定
+  //   永久误判为 legacy → 永远返回缓存、再也不下网读 → 跨设备账号/权限变更彻底失效
+  //   （PC 改权限、移动端已登录库管员不解锁，重登也不显示）。
+  //   它们必须绕过 legacy 短路，每次都走下方单键下载路径（404 自然返回 undefined，无副作用）。
+  _dynamicSettingKeys: { 'keepers': true, 'keepersMeta': true },
   _keyPrimePromise: null,  // 🟢 v228.62：_primeCloudKeySet 在途 Promise（并发单飞）
   _keyPrimeScheduled: false, // 🟢 v228.62：延迟预热是否已排期（避免重复排期）
 
@@ -1062,9 +1348,13 @@ const SyncManager = {
         .from(this.BUCKET)
         .list(this.SETTINGS_DIR, { limit: 200 });
       if (error || !Array.isArray(data)) return null;
-      return data
+      const meta = data
         .filter(o => o && o.name)
         .map(o => ({ name: o.name, updated_at: o.updated_at || null }));
+      // 🟢 v228.84（D1 搭车）：把本次 list 结果交给账号权限模块做「零额外请求」的变更探测。
+      //   只读、不改动 meta、不改动任何数据同步逻辑/节奏；失败也不外泄。
+      try { if (typeof AppConfig !== 'undefined' && AppConfig._checkKeepersViaSettingsMeta) AppConfig._checkKeepersViaSettingsMeta(meta); } catch (e) { /* 探测失败不影响数据同步 */ }
+      return meta;
     } catch (e) { return null; }
   },
 
@@ -1093,6 +1383,37 @@ const SyncManager = {
     } catch (e) { return null; }
   },
 
+  // 🟢 v229.06（Phase 1-3）：云端低层「读/列」抽象。
+  //   真实模式走 Supabase SDK；测试模式（useLocalMock）被覆写为 localStorage。
+  //   pushData/pullData 只依赖这三个方法，逻辑因此可在本地完整验证（见 verify_subpackage_v1.mjs）。
+  //   设计原则：这些方法【绝不直接】在 data-loader 之外被引用，保持同步内核自包含。
+  async _cloudGet(path) {
+    if (!this.client || !this.config) return null;
+    try {
+      const { data, error } = await this.client.storage.from(this.BUCKET).download(path);
+      if (error || !data) return null;
+      const txt = await data.text();
+      if (!txt) return null;
+      return JSON.parse(txt);
+    } catch (e) { return null; }
+  },
+  async _cloudList(dir) {
+    if (!this.client || !this.config) return null;
+    try {
+      const { data, error } = await this.client.storage.from(this.BUCKET).list(dir || '', { limit: 200 });
+      if (error || !Array.isArray(data)) return null;
+      const m = {};
+      for (const o of data) {
+        if (!o || !o.name) continue;
+        m[o.name] = {
+          updated_at: o.updated_at || null,
+          size: (o.metadata && o.metadata.size) ? Number(o.metadata.size) : (o.size || null)
+        };
+      }
+      return m;
+    } catch (e) { return null; }
+  },
+
   async _readSettingFile(key) {
     if (!key) return undefined;
     if (!this._keyTsCache) this._keyTsCache = {};
@@ -1106,12 +1427,16 @@ const SyncManager = {
 
     // ⓪-1 已知没有独立文件的键（老键）→ 不发起注定 404 的请求，直接返回缓存
     //   （调用方 getSetting 会据 _legacyKeySet 走整包兜底）
-    if (this._legacyKeySet[key]) return cached;
+    //   🟢 v228.82：动态键（keepers/keepersMeta）即便曾被误记也不短路，必须放行。
+    if (this._legacyKeySet && this._legacyKeySet[key] && !this._dynamicSettingKeys[key]) return cached;
 
     // ⓪' 🟢 v228.61-fix4：用 list 得到的「云端真实键集」判断 —— 不在集合里说明该键
     //   没有独立文件（如 outbound_list / temp_outbound_list），直接记名单并返回缓存，
     //   省掉一次注定失败的下载。集合为空（还没 list 过）时不做判断，正常走下载。
-    if (this._cloudKeySet && !this._cloudKeySet[key]) {
+    //   🔴 v228.82 回归：该「预判」对「建账号后才出现」的动态键是错的 —— 设备启动 list 时
+    //   keepers/keepersMeta 尚不存在 → 被永久误判为老键 → 跨设备权限变更彻底失效。
+    //   故动态键跳过此短路，一律走下方下载（404 自然返回 undefined，无副作用）。
+    if (this._cloudKeySet && !this._cloudKeySet[key] && !this._dynamicSettingKeys[key]) {
       this._legacyKeySet[key] = true;
       return cached;
     }
@@ -1129,7 +1454,10 @@ const SyncManager = {
     //      · 轮次相同 → 仍受 TTL 保护（同轮内极端密集读不至于刷爆）；
     //      · _readRound 为 undefined（非轮询场景，如用户点「刷新」）→ 退回纯时间判定，行为不变。
     const now = Date.now();
-    if (this._keyTsCache[key] && (now - this._keyTsCache[key]) < this._KEY_TTL_MS) {
+    // 🟢 v228.84：CDN 绕过窗口（keepersWatchTick 强制新鲜读）必须跳过短缓存短路，否则会返回陈旧值、
+    //   导致「刚发生的权限变更」在 2s 短缓存有效期内被误判为「无变更」而漏拉（v228.83 的 5s 看门狗因间隔>2s 未暴露，B-精 注意力即时 poke 触发后暴露）。
+    const bustActive = !!(this._bustUntil && Date.now() < this._bustUntil);
+    if (!bustActive && this._keyTsCache[key] && (now - this._keyTsCache[key]) < this._KEY_TTL_MS) {
       const sameRound = (this._readRound === undefined)
         || (this._keyEpochCache && this._keyEpochCache[key] === this._readRound);
       if (sameRound) return cached;

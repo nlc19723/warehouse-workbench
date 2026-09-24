@@ -461,7 +461,28 @@ const SupplierModule = {
   async exportData() {
     const suppliers = await DataStore.getSuppliers();
     if (suppliers.length === 0) { WBModal.alert('没有数据可导出'); return; }
-    this.exportToExcel(suppliers, '供应商管理');
+    // 🟢 v229.03：导出列 = 工作台表格当前 9 列（剩余天数/已入库占比与页面文案一致，操作列不导）
+    const now = new Date();
+    const rows = suppliers.map(s => {
+      let days = '';
+      if (s.年度合同到期时间) {
+        const d = Math.ceil((new Date(s.年度合同到期时间) - now) / (1000 * 60 * 60 * 24));
+        days = d < 0 ? ('已过期' + (-d) + '天') : (d + '天');
+      }
+      const pct = Math.round((s.年度已供入库金额占比 || 0) * 100);
+      return {
+        '类型': s.类型 ?? '',
+        '供应商': s.供应商 ?? '',
+        '合同年限': s.合同年限 ?? '',
+        '合同到期日': s.年度合同到期时间 ?? '',
+        '剩余天数': days,
+        '合同金额(元)': s.年度合同金额 ?? '',
+        '已入库金额(元)': s.年度已供入库金额 ?? '',
+        '已入库占比': pct + '%',
+        '招采部门': s.招采部门 ?? ''
+      };
+    });
+    this.exportToExcel(rows, '供应商管理');
   },
 
   exportToExcel(data, sheetName) {

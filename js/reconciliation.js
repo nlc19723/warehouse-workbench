@@ -271,8 +271,29 @@ const ReconciliationModule = {
   },
 
   exportData() {
-    // 🟢 O1：统一导出（行为与原逻辑一致）
-    TableUtils.exportToExcel(this.currentData, `对账单_${new Date().toISOString().split('T')[0]}.xlsx`, '对账单');
+    // 🟢 v229.03：导出 = 工作台「按供应商汇总」表的 5 列（与页面同源聚合，占比口径一致：
+    //   分子=当前筛选范围入库金额，分母=供应商年度合同金额；无合同金额显示 —）
+    const inbound = this.currentData || [];
+    const summary = {};
+    inbound.forEach(i => {
+      const key = i.供应商 || '未知';
+      if (!summary[key]) summary[key] = { qty: 0, amount: 0, nos: new Set() };
+      summary[key].qty += parseFloat(i.数量) || 0;
+      summary[key].amount += (parseFloat(i.原币价税合计) || 0);
+      if (i.入库单号) summary[key].nos.add(i.入库单号);
+    });
+    db.suppliers.toArray().then(suppliersAll => {
+      const contracts = {};
+      (suppliersAll || []).forEach(s => { contracts[s.供应商] = parseFloat(s.年度合同金额) || 0; });
+      const rows = Object.entries(summary).map(([name, info]) => ({
+        '供应商': name,
+        '入库单数': info.nos.size,
+        '入库量': Math.round(info.qty * 100) / 100,
+        '金额(元)': Math.round(info.amount * 100) / 100,
+        '占合同比': contracts[name] > 0 ? ((info.amount / contracts[name]) * 100).toFixed(1) + '%' : '—'
+      }));
+      TableUtils.exportToExcel(rows, `对账单_${new Date().toISOString().split('T')[0]}.xlsx`, '对账单');
+    });
   },
 
   // ===== 供应商近6月供货金额趋势图 =====

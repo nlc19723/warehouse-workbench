@@ -55,6 +55,8 @@
   "js/query.js",
   "js/reconciliation.js",
   "js/search-select.js",
+  "js/stock-alert-config.js",
+  "js/stock-alert-rules.js",
   "js/stock-detail.js",
   "js/stock.js",
   "js/stocktake-records.js",

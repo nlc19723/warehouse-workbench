@@ -20,9 +20,11 @@ class SearchSelect {
     this.placeholder = opts.placeholder || selectEl.title || '搜索…';
     this.placeholderEmpty = opts.placeholderEmpty || this._firstEmptyText() || '全部';
     this.onChange = opts.onChange || null;
-    // 宽度策略：full = 完整显示最长项 / half = 一半 / auto = 自适应
+    // 宽度策略：full = 完整显示最长项 / half = 一半 / auto = 自适应 / fit = 紧凑自适应（按最长选项文本实宽）
     this.widthMode = opts.widthMode || 'auto';
     this.width = opts.width || null;
+    // 🟢 v229.14：紧凑外观（分页栏「每页条数」）—— 触发器/面板缩内边距
+    this.compact = !!opts.compact;
     this.open = false;
     this.activeIdx = 0;
     this._build();
@@ -39,6 +41,16 @@ class SearchSelect {
 
   _computeWidth() {
     if (this.width) return this.width;
+    // 🟢 v229.15 fit：按最长选项文本实宽紧凑自适应（CJK 12px / ASCII 7px + 对称 chrome 28px，配 11.5px 字号）
+    if (this.widthMode === 'fit') {
+      const opts = Array.from(this.select.options).filter(o => o.value !== '');
+      const texts = opts.map(o => o.textContent.trim());
+      if (this.placeholder) texts.push(this.placeholder);
+      if (!texts.length) return '50px';
+      const px = t => Array.from(t).reduce((s, ch) => s + (ch.charCodeAt(0) > 255 ? 12 : 7), 0);
+      const widest = Math.max(...texts.map(px));
+      return Math.ceil(widest + 28) + 'px';
+    }
     const opts = Array.from(this.select.options).filter(o => o.value !== '');
     if (!opts.length) return '160px';
     const longest = opts.reduce((a, b) => b.textContent.length > a.textContent.length ? b : a);
@@ -51,9 +63,14 @@ class SearchSelect {
   }
 
   _build() {
+    console.log('[ESS] _build for', this.select.id);
     // 包裹容器
     const wrap = document.createElement('div');
-    wrap.className = 'ss-wrap ss-mode-' + this.widthMode;
+    // 🟢 v229.14：显式 width 时加 ss-fixed（CSS 端 min-width:0），避免 .ss-wrap 150px 最小宽覆盖此 width；
+    // compact 时加 ss-compact（CSS 端缩触发器/面板内边距）
+    wrap.className = 'ss-wrap ss-mode-' + this.widthMode
+      + (this.width ? ' ss-fixed' : '')
+      + (this.compact ? ' ss-compact' : '');
     wrap.style.position = 'relative';
     wrap.style.display = 'inline-block';
     wrap.style.flex = '0 0 auto';
@@ -72,10 +89,18 @@ class SearchSelect {
     this.select.style.zIndex = '1';
     this.select.classList.add('ss-native');
 
-    const input = document.createElement('button');
-    input.type = 'button';
+    // 🟢 S1（v228.98）：触发框由 <button> 改为 <input type="text"> —— 打开后原地变为可输入搜索框，
+    //   搜索框即下拉框本身，不再插入第二个浮层元素（旧 .ss-search-input），布局零位移。
+    const input = document.createElement('input');
+    input.type = 'text';
     input.className = 'ss-trigger';
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('autocorrect', 'off');
+    input.setAttribute('autocapitalize', 'off');
+    input.setAttribute('spellcheck', 'false');
     input.setAttribute('aria-haspopup', 'listbox');
+    input.setAttribute('aria-expanded', 'false');
+    input.readOnly = true;                 // 关闭态只读，点击打开后变可输入
     input.tabIndex = 0;
 
     const panel = document.createElement('div');
@@ -95,8 +120,10 @@ class SearchSelect {
     this.panel = panel;
 
     // 事件
-    input.addEventListener('click', (e) => { e.stopPropagation(); this.toggle(); });
+    // 点击：关闭态才打开（打开态点击用于移动光标，不关）；键盘/输入统一接管
+    input.addEventListener('click', (e) => { e.stopPropagation(); if (!this.open) this.openPanel(); });
     input.addEventListener('keydown', (e) => this._onKey(e));
+    input.addEventListener('input', () => this._onQuery(this.input.value));
     panel.addEventListener('click', (e) => {
       const item = e.target.closest('.ss-item');
       if (item) this._choose(item.dataset.val);
@@ -121,7 +148,10 @@ class SearchSelect {
     const val = sel.value;
     const opt = Array.from(sel.options).find(o => o.value === val);
     const txt = opt ? opt.textContent.trim() : this.placeholderEmpty;
-    this.input.textContent = txt;
+    this.input.setAttribute('aria-expanded', this.open ? 'true' : 'false');
+    if (this.open) return;            // 打开态：保留用户正在输入的搜索词，不回写所选文本
+    this.input.value = txt;
+    this.input.readOnly = true;
     this.input.classList.toggle('ss-placeholder', val === '');
     this.input.title = txt;
   }
@@ -159,6 +189,27 @@ class SearchSelect {
       el.textContent = it.text;
       this.panel.appendChild(el);
     });
+  }
+
+  // 🟢 S1（v228.98）：输入即筛选 —— 复用 _lastQuery + 防抖（与旧搜索框逻辑一致），键盘 Enter 同步
+  _onQuery(q) {
+    this._lastQuery = q;
+    this.activeIdx = 0;
+    if (!this._renderDebounced) {
+      this._renderDebounced = (typeof TableUtils !== 'undefined' && TableUtils.debounce)
+        ? TableUtils.debounce(() => {
+            this._renderPanel(this._filter(this._lastQuery || ''));
+            const act = this.panel.querySelector('.ss-active');
+            if (act) act.scrollIntoView({ block: 'nearest' });
+          }, 200)
+        : null;
+    }
+    if (this._renderDebounced) this._renderDebounced();
+    else {
+      this._renderPanel(this._filter(q || ''));
+      const act = this.panel.querySelector('.ss-active');
+      if (act) act.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   _onKey(e) {
@@ -204,49 +255,28 @@ class SearchSelect {
   toggle() { this.open ? this.close() : this.openPanel(); }
 
   openPanel() {
+    // 🟢 v229.05 单开互斥：打开任一下拉前，先收起其他已展开的下拉实例
+    //   （SearchSelect 是全工作台下拉的统一实现，此处一处修改即全局生效：
+    //    筛选栏/弹窗/分页的所有下拉，同一时刻至多展开一个）
+    if (window._ssRegistry) {
+      for (const k in window._ssRegistry) {
+        const o = window._ssRegistry[k];
+        if (o && o !== this && o.open) { try { o.close(); } catch (e) { /* 单个异常不影响本次打开 */ } }
+      }
+    }
     this.open = true;
     this._lastQuery = '';
     this.activeIdx = 0;
     this.select.style.visibility = 'hidden';
-    this.input.style.display = 'none';
+    // 🟢 S1（v228.98）：触发框（input）原地变搜索框 —— 取消只读、清空，直接接收键盘输入
+    this.input.readOnly = false;
+    this.input.value = '';
+    this.input.classList.remove('ss-placeholder');
+    this.input.setAttribute('aria-expanded', 'true');
     this.panel.style.display = 'block';
     this._renderPanel(this._filter(''));
-    if (!this._searchInput) {
-      const si = document.createElement('input');
-      si.className = 'ss-search-input';
-      si.type = 'text';
-      si.placeholder = this.placeholder;
-      si.addEventListener('click', (e) => e.stopPropagation());
-      // 🟢 v228.08 性能优化 P1-5：下拉搜索防抖。
-      //   选项可达上千条（如存货编码/名称），每敲一个字符就全量过滤并重建面板 DOM 会卡顿。
-      //   _lastQuery / activeIdx 仍同步更新，键盘 Enter 选择走 _lastQuery 实时过滤，不受影响。
-      si.addEventListener('input', () => {
-        this._lastQuery = si.value;
-        this.activeIdx = 0;
-        if (!this._searchDebounced) {
-          this._searchDebounced = (typeof TableUtils !== 'undefined' && TableUtils.debounce)
-            ? TableUtils.debounce(() => this._renderPanel(this._filter(this._lastQuery || '')), 200)
-            : null;
-        }
-        if (this._searchDebounced) this._searchDebounced();
-        else this._renderPanel(this._filter(si.value));   // 兜底：工具不可用时保持原行为
-      });
-      si.addEventListener('keydown', (e) => {
-        if (e.key === 'ArrowDown') { e.preventDefault(); this._move(1); }
-        else if (e.key === 'ArrowUp') { e.preventDefault(); this._move(-1); }
-        else if (e.key === 'Enter') {
-          e.preventDefault();
-          const list = this._filter(this._lastQuery || '');
-          const it = list[this.activeIdx];
-          if (it) this._choose(it.value);
-        } else if (e.key === 'Escape') { e.stopPropagation(); this.close(); }
-      });
-      this.wrap.appendChild(si);
-      this._searchInput = si;
-    }
-    this._searchInput.value = '';
-    this._searchInput.style.display = 'block';
-    this._searchInput.focus();
+    this.input.focus();
+    try { this.input.select(); } catch (e) {}   // 桌面端选中全部便于覆盖；移动端无副作用
   }
 
   close() {
@@ -254,9 +284,7 @@ class SearchSelect {
     this.panel.style.display = 'none';
     this.input.classList.remove('ss-open');
     this.select.style.visibility = '';
-    if (this._searchInput) this._searchInput.style.display = 'none';
-    this.input.style.display = '';
-    this._renderTrigger();
+    this._renderTrigger();          // 回写所选文本并恢复只读
   }
 
   destroy() {
@@ -274,23 +302,84 @@ class SearchSelect {
 window.SearchSelect = SearchSelect;
 
 // 全局注册表，避免重复初始化；调用 enhanceSearchSelect(id, opts) 升级单个
+// 注意：无论传入字符串 id 还是元素，内部一律以「元素自身的稳定 id」为注册键，
+// 避免把不同 select 都序列化成 "[object HTMLSelectElement]" 撞键（曾导致只包住最后处理的 1 个）。
 window._ssRegistry = window._ssRegistry || {};
 window.enhanceSearchSelect = function (id, opts) {
   const el = typeof id === 'string' ? document.getElementById(id) : id;
   if (!el) return null;
-  const cached = window._ssRegistry[id];
+  if (!el.id) el.id = 'autoSs_' + (++window._autoSsSeq);
+  const key = el.id;
+  const cached = window._ssRegistry[key];
   // 重入检测：元素已不在组件 wrap 内（render 重建了 DOM）→ 销毁旧实例重建
   if (cached) {
     if (el.closest && el.closest('.ss-wrap')) return cached; // 仍有效
     try { cached.destroy(); } catch (e) {
-    console.warn('[search-select.js:276] 异常(已忽略):', e);
-  }
-    delete window._ssRegistry[id];
+      console.warn('[search-select.js] 异常(已忽略):', e);
+    }
+    delete window._ssRegistry[key];
   }
   const ss = new SearchSelect(el, opts);
-  window._ssRegistry[id] = ss;
+  window._ssRegistry[key] = ss;
   return ss;
 };
 // 🗑 AUDIT-228-06（v228.18）：删除死代码 enhanceSearchSelects —— 全仓零引用
 //   （js/ 与 index.html 均无调用），保留只有维护负担。批量升级如需恢复，
 //   可用一行替代：(list||[]).forEach(it => window.enhanceSearchSelect(it.id, it.opts));
+
+// ============================================
+// 🟢 v229.05：全工作台下拉统一器
+// 以订单跟踪的 search-select 毛玻璃下拉为唯一模板，自动升级三类原生 <select>：
+//   1) 筛选栏（.filter-bar）—— 库存预警分类/状态、盘点记录、供应商筛选等全部模块
+//   2) 弹窗（.modal-overlay）—— 权限预设(kePreset)、盘点分派/补派盘点人(asCounter/rsCounter)
+//   3) 分页栏（.pagination-bar）—— 各模块「每页条数」
+// MutationObserver 监听 DOM：模块渲染 / 弹窗打开后自动增强，无需各模块逐个接入。
+// 豁免：select.closest('.no-auto-ss') 显式退出；表格行内 select（出库录入等）暂不纳入。
+// ============================================
+window._autoSsSeq = 0;
+window.autoEnhanceSelects = function (root) {
+  const scope = root || document;
+  let n = 0;
+  scope.querySelectorAll('select').forEach(sel => {
+    if (sel.classList.contains('ss-native')) return;   // 已增强
+    if (sel.closest('.ss-wrap')) return;               // 已在组件内
+    if (sel.multiple || sel.disabled) return;
+    if (sel.closest('.no-auto-ss')) return;            // 显式豁免
+    const inFilter = !!sel.closest('.filter-bar');
+    const inModal  = !!sel.closest('.modal-overlay');
+    const inPager  = !!sel.closest('.pagination-bar');
+    if (!inFilter && !inModal && !inPager) return;
+    if (!sel.id) sel.id = 'autoSs_' + (++window._autoSsSeq);
+    const opts = { placeholder: sel.title || '搜索…' };
+    // 🟢 v229.14：紧凑自适应——宽度按最长选项文本实宽（fit），外观紧凑（ss-compact）
+    if (inPager) { opts.widthMode = 'fit'; opts.compact = true; opts.placeholder = '每页'; }
+    // 传字符串 id（而非元素），使 enhanceSearchSelect 以 el.id 为稳定注册键，杜绝撞键
+    try { window.enhanceSearchSelect(sel.id, opts); n++; } catch (e) { /* 单个失败不影响其余 */ }
+  });
+  return n;
+};
+
+(function () {
+  if (window.__autoSsObserver) return;
+  window.__autoSsObserver = true;
+  let timer = null;
+  const obs = new MutationObserver(() => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      try {
+        // 有新增强时重跑移动端筛选栏等分（增强会重建 DOM 结构）
+        if (window.autoEnhanceSelects(document) > 0 && window.FilterLayout) FilterLayout.balanceAll();
+      } catch (e) { /* 静默：增强失败不影响原功能 */ }
+    }, 120);
+  });
+  function start() {
+    if (!document.body) { setTimeout(start, 50); return; }
+    obs.observe(document.body, { childList: true, subtree: true });
+    // 首轮：接管脚本加载前已渲染的静态 select
+    setTimeout(() => {
+      try { window.autoEnhanceSelects(document); } catch (e) { /* 静默 */ }
+    }, 300);
+  }
+  start();
+})();
