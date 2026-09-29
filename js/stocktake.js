@@ -1193,21 +1193,6 @@ const StocktakeModule = {
     try { await this._setCloud(this.ACTIVE_QUARTER_KEY, aq); } catch (e) { /* 失败已入队 */ }
   },
 
-  /** 🟢 v228.47：查看当前本机同步元数据快照（排障用，只读） */
-  inspectQuarterSyncState() {
-    const out = { clearedScope: {}, keptScope: {} };
-    this.QUARTER_SYNC_KEYS_CLEARABLE.forEach(n => {
-      out.clearedScope[n] = this._readSyncKey(n);
-    });
-    this.QUARTER_SYNC_KEYS_KEEP.forEach(n => {
-      const raw = this._readSyncKey(n);
-      out.keptScope[n] = raw ? String(raw).slice(0, 80) : null;
-    });
-    // 任务与记录只报数量，不报内容（避免刷屏）
-    try { out.taskCount = Object.keys(DataStore.getStocktakeTasks() || {}).length; } catch (e) { out.taskCount = -1; }
-    out.query = { sd: this.query.startDate, ed: this.query.endDate };
-    return out;
-  },
 
   /**
    * 🟢 v228.40（一-1/一-2）：把本机协调后的批次归属（no_map）回推云端，供他端开局时拉齐。
@@ -1237,10 +1222,6 @@ const StocktakeModule = {
   },
 
 
-  _ymdLocal(d) {
-    const pad = n => String(n).padStart(2, '0');
-    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-  },
 
   /**
    * 🟢 v228.48：判断一个季度任务是否属于「当前批次」—— **收敛为两级判定**。
@@ -2919,10 +2900,6 @@ const StocktakeModule = {
     await this._claimQuarterTask(picked.taskId);
   },
 
-  /** 概览 → 【补盘】（finished 且全部完成）—— 重新开始界面，给一个空概览或提示 */
-  _reopenMyQuarterOverview(counter, batchNo) {
-    this.toast(counter + ' · 本批次已全部完成，无需补盘');
-  },
 
   /**
    * 🟢 v228.35（P5）：本轮是否「禁止进入盘点」的唯一判定入口。
@@ -6898,21 +6875,6 @@ const StocktakeModule = {
     if (v === '' || v == null || isNaN(v)) return '';
     // 去掉浮点误差尾巴：12.300000000000001 → 12.3
     return String(Math.round(parseFloat(v) * 1000) / 1000);
-  },
-  // 🟢 v226：盘点数量渲染——null/undefined → 「/」表示未盘点；其他走 _num。
-  _fmtQty(v) {
-    if (v == null || v === '') return '/';
-    if (isNaN(parseFloat(v))) return String(v);
-    return this._num(v);
-  },
-  // 🟢 v226：差异量渲染——null/undefined → 「/」表示未盘点（按用户需求不按 0 算盘亏）。
-  _fmtDiff(v) {
-    if (v == null || v === '') return '/';
-    if (isNaN(parseFloat(v))) return String(v);
-    const n = parseFloat(v);
-    if (n === 0) return '';
-    const color = (n > 0) ? 'color:#16a34a;' : 'color:#dc2626;';
-    return `<span style="${color}font-weight:600;">${this._num(n)}</span>`;
   },
 
   // ===== 🟢 v229.02：盘点录入「根/箱」换算提示 =====

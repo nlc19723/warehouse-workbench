@@ -264,7 +264,7 @@ window.AppConfig = {
     // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
     // 🟢 v228.48：真实走查修复 —— 启动兜底「空状态」不再覆盖用户已打开的界面
     // 🟢 v228.45：季度盘点跨端一致性 —— 同一账号 PC/移动端任务、进度、批次区间完全统一
-    version: 'v229.17',
+    version: 'v229.55',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）

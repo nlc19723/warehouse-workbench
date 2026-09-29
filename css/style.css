@@ -223,6 +223,9 @@ html, body{
   -webkit-font-smoothing: antialiased;
   -webkit-overflow-scrolling: touch;
   transition: color var(--theme-transition);
+  /* 🟢 v229.29：禁止浏览器在左/右缘的「横滑返回」系统手势抢占我们的左缘右滑开抽屉。
+     仅约束横向越界行为，不影响表格等内部横向滚动。 */
+  overscroll-behavior-x: contain;
 }
 
 body{
@@ -1812,6 +1815,11 @@ body::after{
 .tag-danger{ background: var(--status-danger-bg); color: var(--status-danger); }
 .tag-info{ background: var(--status-info-bg); color: var(--status-info); }
 .tag-neutral{ background: rgba(122,156,165,0.1); color: var(--text-body); }
+/* 🟢 v229.20 库存预警分类 2B 暖色 ABC 递减：A深红(实心) > B橙(实心) > C浅黄 > D描边灰(最弱) */
+.cat-b1{ background: var(--status-danger); color: #fff; }
+.cat-b2{ background: var(--status-warning); color: #fff; }
+.cat-b3{ background: #fdf3d9; color: #a67c00; border: 1px solid #ecd9a0; }
+.cat-b4{ background: #fff; color: var(--text-muted); border: 1px dashed #c3ced8; }
 
 /* ========== 进度条 ========== */
 .progress-bar{ width: 100%; height: 5px; background: rgba(122,156,165,0.1); border-radius: 3px; overflow: hidden; }
@@ -2051,7 +2059,7 @@ body::after{
   .top-bar{ gap: 6px; }
   .top-bar-left{ flex: 0 1 auto; overflow: visible; }
   .top-bar-left strong{
-    max-width: 56px; font-size: 12px; line-height: 1.25;
+    max-width: 56px; font-size: 13px; line-height: 1.25;   /* 🟢 v229.36：顶栏功能名放大一号（12 → 13） */
     white-space: normal; display: -webkit-box; -webkit-line-clamp: 2;
     -webkit-box-orient: vertical; overflow: hidden; word-break: break-all;
   }
@@ -2115,7 +2123,7 @@ body::after{
   .sidebar-panel .sidebar-section + .sidebar-section{ padding-top: 6px; margin-top: 0; }
   .sidebar-panel .sidebar-item{
     padding: 5px 11px;
-    font-size: 12.5px;
+    font-size: 13.5px;   /* 🟢 v229.36：移动端功能模块名称放大一号（12.5 → 13.5） */
     gap: 9px;
     margin: 0 4px;
   }
@@ -2125,7 +2133,7 @@ body::after{
   .sidebar-panel .sidebar-item .item-badge{
     font-size: 9px; padding: 1px 6px; border-radius: 6px;
   }
-  .sidebar-panel .sidebar-item.active{ font-size: 13.5px; }
+  .sidebar-panel .sidebar-item.active{ font-size: 14.5px; }
   .sidebar-panel .sidebar-item.active::before{ left: 2px; top: 6px; bottom: 6px; width: 3px; }
   .sidebar-panel .sidebar-footer{ padding: 8px 0 10px; }
   .sidebar-panel .sidebar-toggle-btn{ width: 22px; height: 22px; }
@@ -2191,9 +2199,9 @@ body::after{
   .sidebar-header .sidebar-logo-icon{ width: 34px; height: 34px; font-size: 15px; }
   .sidebar-section{ padding: 6px 0; }
   .sidebar-section + .sidebar-section{ padding-top: 8px; margin-top: 2px; }
-  .sidebar-item{ padding: 7px 12px; font-size: 13.5px; }
+  .sidebar-item{ padding: 7px 12px; font-size: 14.5px; }
   .sidebar-item .item-icon{ width: 26px; height: 26px; font-size: 14px; border-radius: 7px; }
-  .sidebar-item.active{ font-size: 14.5px; }
+  .sidebar-item.active{ font-size: 15.5px; }
   .sidebar-footer{ padding: 8px 0 12px; }
   .sidebar-toggle-btn{ width: 22px; height: 22px; }}
 
@@ -5011,7 +5019,11 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
   .pagination-bar::-webkit-scrollbar{ height: 3px; }
   /* 「共 N 条」「跳至」等文本块（inline style 生成，无类名 → 用直接子 span 定位） */
   .pagination-bar > span{ font-size: 11px !important; white-space: nowrap; flex: 0 0 auto; }
-  .pagination-bar > span input{ height: 26px !important; width: 40px !important; font-size: 11px !important; }
+  .pagination-bar > span input:not(.ss-trigger){ height: 26px !important; width: 40px !important; font-size: 11px !important; }
+  /* 🟢 v229.28：上条 width:40px 原为「跳至」数字框而设，会误伤 ss 下拉触发器（同为 input），
+     把 52px 触发器压成 40px → 文字只剩 14px，「20」显示成「2…」。用 :not(.ss-trigger) 排除；
+     触发器宽度交回 ss-wrap（fit 模式 52px，与 PC 一致），并占满 wrap 全宽。 */
+  .pagination-bar .ss-trigger{ width: 100% !important; }
   .pagination-bar .page-btns{ flex: 0 1 auto; justify-content: center; gap: 4px !important; }
   /* 触控命中区保持 v228.23 规格：移动端翻页键 ≥40px（不可为塞下按钮而缩小） */
   .pagination-bar .page-btns button,
@@ -5059,28 +5071,54 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
     min-height: var(--wb-fit-h, 0px) !important;
   }
 }
-/* 超窄屏（≤430px）：隐藏「共 N 条」给翻页键让位；字号微降 */
-@media (max-width: 430px){
-  .pagination-bar > span{ font-size: 10px !important; }
-  .pagination-bar > span:first-child{ display: none !important; }
-}
+/* 🟢 v229.29 分页「每页/条」填充词包装（配合极窄屏隐藏），全局保证非斜体 */
+.pagination-bar .pg-word{ font-style: normal; }
 
-/* 🟢 v229.14 移动端分页条二排修复：此前 nowrap + overflow-x:auto 在窄屏裁掉翻页键/每页条数，
-   只能横向盲滚。改为两行换行居中——高度交给 fitMobileTables 实测（pagerH=bar.offsetHeight，
-   非写死），表格区高度自动重算。下拉面板同时改为向上弹（分页条吸底时向下弹必被视口裁掉）。 */
+/* 🟢 v229.29 移动端分页条单行重排（应用户要求：共N条 + 翻页键 + 每页N条 放同一排并全部显示）：
+   v229.28 的两行方案功能达标但观感松散。现压回单行 space-between，靠三处收窄保住一行：
+     ① 翻页键宽 40→34px（命中区高仍 40px，只收宽度不收高度）
+     ② 「1/48」指示 52→40px、字号 13→12.5px；两侧文字 11→10.5px
+     ③ 容器 gap 6→4px
+   宽度预算（390px 屏）：共1416条(45) + 键组(184) + 每页30条(90) + gap(8) ≈ 327px ≤ 370px 可用 ✓
+   窄屏兜底：≤375px 键宽再收 30px；≤330px 收起「每页/条」两个填充词（下拉与条数仍全显）。
+   跳至输入框移动端仍隐藏（5033 行规则不变）。 */
 @media (max-width: 768px){
   .pagination-bar{
-    flex-wrap: wrap !important;
+    flex-wrap: nowrap !important;
     height: auto !important;
     min-height: 48px;
     overflow: visible !important;
-    justify-content: center !important;
-    row-gap: 2px;
-    padding-top: 6px !important; padding-bottom: 6px !important;
+    justify-content: space-between !important;
+    align-items: center;
+    gap: 4px !important;
+    padding-top: 5px !important; padding-bottom: 5px !important;
   }
-  .pagination-bar .page-btns{ flex: 0 0 auto; }
+  .pagination-bar > span{ flex: 0 0 auto; }
+  .pagination-bar > span:first-child{ display: inline-flex !important; align-items: center; font-size: 10.5px !important; }
+  .pagination-bar > span:nth-of-type(3){
+    display: inline-flex !important; align-items: center; gap: 3px;
+    font-size: 10.5px !important;
+  }
+  .pagination-bar .pg-word{ font-style: normal; }
+  .pagination-bar .page-btns{ flex: 0 0 auto; gap: 2px !important; }
+  .pagination-bar .page-btns button,
+  .pagination-bar .page-btns .wb-pager-btn{ width: 34px !important; min-width: 34px !important; min-height: 40px !important; }
+  .pagination-bar .wb-pager-ind{ min-width: 40px; font-size: 12.5px; }
   .pagination-bar .ss-panel{ top: auto !important; bottom: calc(100% + 6px); }
 }
+@media (max-width: 375px){
+  .pagination-bar > span{ font-size: 10px !important; }
+  .pagination-bar .page-btns button,
+  .pagination-bar .page-btns .wb-pager-btn{ width: 30px !important; min-width: 30px !important; }
+  .pagination-bar .wb-pager-ind{ min-width: 36px; font-size: 12px; }
+}
+@media (max-width: 330px){
+  .pagination-bar .pg-word{ display: none; }   /* 极窄屏：只收填充词，共N条/翻页键/每页下拉仍全显 */
+}
+
+/* 🟢 v229.29 移动端左缘手势跟手态：拖拽期间禁过渡（松手才按速度/位移吸附），遮罩透明度随手指 */
+.sidebar-panel.wb-dragging,
+.sidebar-overlay.wb-dragging{ transition: none !important; }
 
 /* =========================================================================
    🟢 v228.96 / v228.97 —— 移动端体验审查「清单二」批量优化（#3/#4/#5；#5 吸左列于 v228.97 移除，A1 斑马连续 + A3 隐藏🔍）
@@ -5121,4 +5159,328 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
 #stOnlyDiffBtn.active{
   background: var(--primary, #0d9488); color: #fff; border-color: var(--primary, #0d9488);
 }
+
+
+/* ============================================================================
+ * 🟢 v229.23 我的工作台 · 任务模块（work-tasks.js）样式
+ * 设计基线：方案预览 v5（单天日历 + 月历跳转 + 工作流编排）
+ * 颜色全部走主题变量，亮/暗自动适配。
+ * ========================================================================== */
+
+.wt-wrap{ max-width: 1080px; margin: 0 auto; font-size: 13px; color: var(--text-main); }
+
+/* ---- 顶部工具条 ---- */
+.wt-toolbar{
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap; margin-bottom: 10px;
+}
+.wt-nav{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.wt-navbtn, .wt-today, .wt-calbtn{
+  border: 1px solid var(--border-color, #e5e7eb); background: var(--bg-card, #fff);
+  color: var(--text-main); border-radius: 8px; padding: 6px 12px; font-size: 13px;
+  cursor: pointer; transition: all .15s; line-height: 1.4;
+}
+.wt-navbtn{ padding: 6px 10px; font-weight: 700; }
+.wt-navbtn:hover, .wt-today:hover, .wt-calbtn:hover{
+  border-color: var(--primary); color: var(--primary-deep); background: rgba(91,155,213,.08);
+}
+.wt-today{ font-weight: 600; color: var(--primary-deep); }
+.wt-navlabel{ font-weight: 700; font-size: 14.5px; margin: 0 6px; }
+.wt-calbtn{ font-size: 12.5px; }
+.wt-modes{
+  display: inline-flex; border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 9px; overflow: hidden; background: var(--bg-card, #fff);
+}
+.wt-mbtn{
+  border: none; background: transparent; color: var(--text-secondary, #5A6B7F);
+  padding: 6px 16px; font-size: 13px; cursor: pointer; transition: all .15s; font-weight: 500;
+}
+.wt-mbtn + .wt-mbtn{ border-left: 1px solid var(--border-color, #e5e7eb); }
+.wt-mbtn.on{ background: var(--primary); color: #fff; font-weight: 600; }
+.wt-mbtn:not(.on):hover{ background: rgba(91,155,213,.08); color: var(--primary-deep); }
+
+/* ---- 月历弹层 ---- */
+.wt-mp-wrap{ position: relative; margin-bottom: 10px; }
+.wt-mp{
+  border: 1px solid var(--border-color, #e5e7eb); border-radius: 12px;
+  background: var(--bg-card, #fff); box-shadow: 0 8px 28px rgba(31,38,135,.12);
+  padding: 14px; max-width: 340px;
+}
+.wt-mp-head{
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px; font-size: 14px; font-weight: 700;
+}
+.wt-mp-head button{
+  border: 1px solid var(--border-color, #e5e7eb); background: transparent;
+  border-radius: 7px; width: 28px; height: 28px; cursor: pointer; color: var(--text-main); font-size: 15px;
+}
+.wt-mp-head button:hover{ border-color: var(--primary); color: var(--primary-deep); }
+.wt-mp-grid{ display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+.wt-mp-cell{
+  text-align: center; padding: 7px 0; border-radius: 7px; cursor: pointer;
+  font-size: 12.5px; color: var(--text-main); position: relative; transition: background .12s;
+}
+.wt-mp-cell:hover{ background: rgba(91,155,213,.12); }
+.wt-mp-cell.wt-has{ font-weight: 600; }
+.wt-mp-cell.wt-has::after{
+  content: ""; position: absolute; left: 50%; bottom: 2px; transform: translateX(-50%);
+  width: 4px; height: 4px; border-radius: 50%; background: var(--primary);
+}
+.wt-mp-cell.wt-mov::after{ background: var(--status-danger, #C62828); }
+.wt-mp-cell.wt-today{
+  background: var(--primary); color: #fff; font-weight: 700;
+}
+.wt-mp-cell.wt-mov{ color: var(--status-danger, #C62828); }
+.wt-mp-cell.wt-today.wt-mov{ color: #fff; }
+
+/* ---- 统计条 ---- */
+.wt-stats{
+  font-size: 12.5px; color: var(--text-secondary, #5A6B7F); margin-bottom: 12px;
+  background: var(--bg-card, #fff); border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 9px; padding: 8px 14px; display: inline-block;
+}
+.wt-stats b{ color: var(--text-main); font-size: 13.5px; }
+.wt-stats b.wt-red{ color: var(--status-danger, #C62828); }
+
+/* ---- 逾期红条 ---- */
+.wt-overbar{
+  background: var(--status-danger-bg, rgba(198,40,40,.12));
+  border: 1px solid rgba(198,40,40,.30); color: var(--status-danger, #C62828);
+  border-radius: 9px; padding: 9px 13px; margin-bottom: 10px; font-size: 12.5px; font-weight: 600;
+  line-height: 1.6;
+}
+
+/* ---- 日视图头部 + 进度环 ---- */
+.wt-dayhead{
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 2px 8px; border-bottom: 1px solid var(--border-color, #e5e7eb); margin-bottom: 8px;
+}
+.wt-dh-date{ font-size: 15px; font-weight: 700; color: var(--primary-deep, #3B82C4); }
+/* 🟢 v229.38（M3）：注册 --p 为可动画数值，进度环随勾选平滑过渡 */
+@property --p { syntax: '<number>'; inherits: false; initial-value: 0; }
+.wt-ring{
+  --p: 0; width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0;
+  background: conic-gradient(var(--primary) calc(var(--p) * 1%), var(--border-color, #e5e7eb) 0);
+  display: flex; align-items: center; justify-content: center; position: relative;
+  transition: --p .45s cubic-bezier(.25,1,.5,1);
+}
+.wt-ring::before{
+  content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--bg-card, #fff);
+}
+.wt-ring span{ position: relative; font-size: 10.5px; font-weight: 700; color: var(--text-main); }
+
+/* ---- 时间轴 ---- */
+.wt-time{ display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.wt-time-h{
+  font-size: 12px; font-weight: 700; color: var(--primary-deep, #3B82C4);
+  width: 42px; text-align: right; flex-shrink: 0; font-variant-numeric: tabular-nums;
+}
+.wt-time .wt-ev{ flex: 1; margin: 0; }
+.wt-empty{
+  color: var(--text-secondary, #5A6B7F); text-align: center; padding: 26px 0;
+  font-size: 12.5px; border: 1px dashed var(--border-color, #e5e7eb); border-radius: 10px; margin: 8px 0;
+}
+.wt-allday-h{
+  font-size: 12px; font-weight: 700; color: var(--text-secondary, #5A6B7F);
+  margin: 14px 0 6px; display: flex; align-items: center; gap: 8px;
+}
+.wt-allday-h::after{ content: ""; flex: 1; height: 1px; background: var(--border-color, #e5e7eb); }
+
+/* ---- 事件行 ---- */
+.wt-ev{
+  display: flex; align-items: flex-start; gap: 10px;
+  border: 1px solid var(--border-color, #e5e7eb); border-left: 3px solid var(--primary);
+  border-radius: 9px; padding: 9px 12px; margin: 6px 0; background: var(--bg-card, #fff);
+  /* 🟢 v229.38（M1 墨水沉入）：完成 = 变淡 + 轻微下沉（cubic-bezier 不回弹，模拟墨水被纸吸进去） */
+  transition: box-shadow .15s, border-color .15s, opacity .42s cubic-bezier(.25,1,.5,1),
+    transform .42s cubic-bezier(.25,1,.5,1), background-color .42s cubic-bezier(.25,1,.5,1);
+}
+.wt-ev.is-sinking{ transform: translateY(3px) scale(.992); }
+.wt-ev.removing{ opacity: 0 !important; transform: translateY(8px) scale(.97); pointer-events: none; }
+.wt-ev:hover{ box-shadow: 0 2px 10px rgba(31,38,135,.08); }
+.wt-ev.wt-over{ border-left-color: var(--status-danger, #C62828); background: var(--status-danger-bg, rgba(198,40,40,.06)); }
+.wt-ev.wt-flow{ border-left-color: #7a4fd0; }
+.wt-ev.wt-muted{ opacity: .62; border-left-color: var(--border-color, #e5e7eb); }
+.wt-chk{ display: flex; align-items: center; padding-top: 2px; }
+.wt-chk input{ width: 16px; height: 16px; accent-color: var(--primary); cursor: pointer; }
+.wt-ev-main{ flex: 1; min-width: 0; }
+.wt-ev-title{ font-size: 13px; font-weight: 600; line-height: 1.55; word-break: break-word; }
+.wt-muted .wt-ev-title{ text-decoration: line-through; color: var(--text-secondary, #5A6B7F); font-weight: 500; }
+.wt-over .wt-ev-title{ color: var(--status-danger, #C62828); }
+.wt-ev-note{ font-size: 12px; color: var(--text-secondary, #5A6B7F); margin-top: 3px; line-height: 1.55; word-break: break-word; }
+.wt-ev-when{
+  font-size: 11.5px; color: var(--text-secondary, #5A6B7F); white-space: nowrap; flex-shrink: 0;
+  padding-top: 2px; font-variant-numeric: tabular-nums;
+}
+.wt-over .wt-ev-when{ color: var(--status-danger, #C62828); font-weight: 600; }
+.wt-del{
+  border: none; background: transparent; color: var(--text-secondary, #5A6B7F);
+  cursor: pointer; font-size: 13px; padding: 2px 5px; border-radius: 6px; opacity: .55; flex-shrink: 0;
+}
+.wt-del:hover{ opacity: 1; color: var(--status-danger, #C62828); background: var(--status-danger-bg, rgba(198,40,40,.10)); }
+.wt-badge{
+  display: inline-block; font-size: 10.5px; font-weight: 600; border-radius: 9px;
+  padding: 1px 8px; margin-left: 6px; vertical-align: 1px;
+  background: rgba(122,79,208,.12); color: #7a4fd0; border: 1px solid rgba(122,79,208,.25);
+}
+.wt-badge-flow{ background: rgba(91,155,213,.14); color: var(--primary-deep, #3B82C4); border-color: rgba(91,155,213,.35); }
+.wt-badge-biz{ background: rgba(232,163,61,.15); color: #A04708; border-color: rgba(232,163,61,.35); }
+
+/* 🟢 v229.38（M2 撤销浮条）：底部居中，6 秒进度条 */
+.wt-undo{
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px);
+  display: flex; align-items: center; gap: 12px;
+  background: #1f2647; color: #fff; padding: 10px 12px 10px 16px; border-radius: 12px;
+  font-size: 13px; box-shadow: 0 14px 34px rgba(15,23,42,.32); z-index: 1300;
+  opacity: 0; pointer-events: none; overflow: hidden;
+  transition: opacity .2s ease, transform .26s cubic-bezier(.25,1,.5,1);
+}
+.wt-undo.show{ opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+.wt-undo-txt{ font-weight: 500; }
+.wt-undo-btn{
+  border: none; background: rgba(255,255,255,.16); color: #fff; font-weight: 700;
+  padding: 7px 14px; border-radius: 9px; cursor: pointer; font-size: 13px; white-space: nowrap;
+  transition: background .15s;
+}
+.wt-undo-btn:hover{ background: rgba(255,255,255,.30); }
+.wt-undo .bar{ position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: var(--primary, #5B9BD5); transform-origin: left; }
+@keyframes wtUndoBar { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+
+/* ---- 快速捕获 ---- */
+.wt-quick{ display: flex; gap: 8px; margin-top: 16px; }
+.wt-qinput{
+  flex: 1; border: 1px solid var(--border-color, #e5e7eb); border-radius: 9px;
+  padding: 10px 13px; font-size: 13px; background: var(--bg-input, #f3f4f6); color: var(--text-main);
+  outline: none; transition: border-color .15s, box-shadow .15s;
+}
+.wt-qinput:focus{ border-color: var(--primary); box-shadow: 0 0 0 3px rgba(91,155,213,.15); background: var(--bg-card, #fff); }
+.wt-qbtn{
+  border: none; border-radius: 9px; padding: 10px 18px; font-size: 13px; font-weight: 600;
+  background: var(--primary); color: #fff; cursor: pointer; transition: background .15s; white-space: nowrap;
+}
+.wt-qbtn:hover{ background: var(--primary-deep, #3B82C4); }
+
+/* ---- 周视图 ---- */
+.wt-week{ display: grid; grid-template-columns: repeat(7, 1fr); gap: 7px; }
+.wt-wcol{
+  border: 1px solid var(--border-color, #e5e7eb); border-radius: 10px;
+  background: var(--bg-card, #fff); overflow: hidden; display: flex; flex-direction: column; min-height: 220px;
+}
+.wt-whead{
+  text-align: center; padding: 8px 4px; font-size: 12px; color: var(--text-secondary, #5A6B7F);
+  border-bottom: 1px solid var(--border-color, #e5e7eb); background: rgba(91,155,213,.05); line-height: 1.5;
+}
+.wt-whead b{ display: block; font-size: 16px; color: var(--text-main); }
+.wt-wcol.wt-today{ border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.wt-wcol.wt-today .wt-whead{ background: var(--primary); color: #fff; }
+.wt-wcol.wt-today .wt-whead b{ color: #fff; }
+.wt-wbody{ padding: 6px; flex: 1; }
+.wt-wbody .wt-ev{ padding: 6px 8px; margin: 4px 0; border-radius: 7px; }
+.wt-wbody .wt-ev-title{ font-size: 12px; }
+.wt-wbody .wt-ev-when{ display: none; }
+.wt-wempty{ text-align: center; color: var(--text-secondary, #5A6B7F); padding: 16px 0; font-size: 12px; }
+
+/* ---- 月视图 ---- */
+.wt-month{ border: 1px solid var(--border-color, #e5e7eb); border-radius: 12px; overflow: hidden; background: var(--bg-card, #fff); }
+.wt-mrow{ display: grid; grid-template-columns: repeat(7, 1fr); }
+.wt-mrow + .wt-mrow{ border-top: 1px solid var(--border-color, #e5e7eb); }
+.wt-mhead span{
+  text-align: center; padding: 8px 0; font-size: 12px; font-weight: 700;
+  color: var(--text-secondary, #5A6B7F); background: rgba(91,155,213,.06);
+}
+.wt-mcell{
+  min-height: 84px; padding: 6px; cursor: pointer; transition: background .12s;
+  border-left: 1px solid var(--border-color, #e5e7eb); position: relative;
+}
+.wt-mcell:first-child{ border-left: none; }
+.wt-mcell:hover{ background: rgba(91,155,213,.08); }
+.wt-mcell.wt-other{ opacity: .42; }
+.wt-mcell.wt-today .wt-mnum{ color: #fff; }
+.wt-mcell.wt-today .wt-mnum::before{
+  content: ""; position: absolute; z-index: 0; left: 6px; top: 6px;
+  width: 20px; height: 20px; border-radius: 50%; background: var(--primary);
+}
+.wt-mnum{ font-size: 12.5px; font-weight: 700; position: relative; display: inline-block; min-width: 20px; text-align: center; z-index: 1; }
+.wt-mcell.wt-mov .wt-mnum{ color: var(--status-danger, #C62828); }
+.wt-dot{
+  display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--status-danger, #C62828); margin-left: 3px; vertical-align: 2px;
+}
+.wt-mtask{
+  font-size: 11px; line-height: 1.4; margin-top: 3px; padding: 2px 6px; border-radius: 5px;
+  background: rgba(91,155,213,.10); color: var(--text-main);
+  border-left: 2px solid var(--primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wt-mtask.wt-done{ opacity: .5; text-decoration: line-through; border-left-color: var(--border-color, #e5e7eb); }
+.wt-mmore{ font-size: 10.5px; color: var(--text-secondary, #5A6B7F); margin-top: 3px; padding-left: 6px; }
+
+/* ---- 铃铛角标 ---- */
+.wt-bell-dot{
+  position: absolute; top: -6px; right: -8px; min-width: 16px; height: 16px;
+  border-radius: 9px; background: var(--status-danger, #C62828); color: #fff;
+  font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  padding: 0 4px; box-shadow: 0 1px 4px rgba(0,0,0,.25);
+}
+
+/* ---- 窄屏适配 ---- */
+@media (max-width: 760px){
+  .wt-week{ grid-template-columns: 1fr; }
+  .wt-wcol{ min-height: auto; }
+  .wt-mcell{ min-height: 56px; }
+  .wt-ev-when{ display: none; }
+  .wt-toolbar{ align-items: stretch; flex-direction: column; }
+}
+
+/* ============================================================================
+ * 🟢 v229.26 · 体验跃迁 v2（晨间简报 / ⌘K 命令面板 / 合同生命线）
+ * 配色全部走主题变量，亮/暗自动适配。
+ * ========================================================================== */
+
+/* ---- 晨间简报 ---- */
+/* 🟢 v229.36：质感仿登录卡（白色磨砂 + 20px 圆角 + 大柔和投影 + inset 顶高光 + 入场动画） */
+.brief-card{ position:relative; border:1px solid rgba(255,255,255,.9);
+  border-radius:20px; padding:16px 18px; margin-bottom:16px;
+  background:rgba(255,255,255,.86);
+  backdrop-filter:blur(8px) saturate(150%); -webkit-backdrop-filter:blur(8px) saturate(150%);
+  box-shadow:0 30px 70px rgba(15,23,42,.28), inset 0 1px 0 rgba(255,255,255,.9);
+  animation:briefCardIn .55s cubic-bezier(.21,.9,.32,1) both; }
+@keyframes briefCardIn{ from{ opacity:0; transform:translateY(26px) scale(.97); } to{ opacity:1; transform:none; } }
+/* 手动关闭 / 延时自动关闭的淡出态（v229.37：只动 opacity/transform，不改布局；
+   同时立即停止接收触摸，避免淡出中的卡片挡住下方滚动） */
+.brief-card.is-hiding{ opacity:0; transform:translateY(-8px); animation:none; pointer-events:none;
+  transition:opacity .32s ease, transform .32s ease; }
+.brief-loading{ color:var(--text-secondary,#5A6B7F); font-size:13px; }
+.brief-head{ display:flex; align-items:center; gap:12px; }
+/* 仿登录卡品牌区：圆角白底图标块 + 细边 + 柔投影 */
+.brief-glyph{ width:40px; height:40px; border-radius:13px; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center; font-size:20px;
+  background:#fff; border:1px solid #e2e8f0; box-shadow:0 4px 12px rgba(15,23,42,.08); }
+.brief-headtext{ flex:1; min-width:0; }
+.brief-date{ font-size:12px; color:var(--text-secondary,#5A6B7F); }
+.brief-summary{ font-size:14.5px; font-weight:700; color:var(--text-main,#1F2937); margin-top:2px; line-height:1.5; }
+.brief-badge{ font-size:11px; font-weight:600; color:var(--primary-deep,#3B82C4);
+  background:rgba(91,155,213,.14); border:1px solid rgba(91,155,213,.3);
+  border-radius:9px; padding:3px 11px; flex-shrink:0; }
+/* 🟢 v229.36：关闭按钮（简报不再一直挂着） */
+.brief-close{ width:26px; height:26px; border-radius:50%; flex-shrink:0; margin-left:2px; padding:0;
+  display:flex; align-items:center; justify-content:center; font-size:15px; line-height:1;
+  color:var(--text-secondary,#5A6B7F); background:var(--bg-card,#fff);
+  border:1px solid var(--border-color,#e5e7eb); cursor:pointer; transition:all .16s; }
+.brief-close:hover{ color:var(--primary-deep,#3B82C4); border-color:var(--primary,#5B9BD5);
+  background:rgba(91,155,213,.12); }
+.brief-actions{ display:flex; gap:9px; margin-top:13px; flex-wrap:wrap; }
+.brief-act{ display:flex; align-items:center; gap:10px; flex:1; min-width:200px;
+  border:1px solid var(--border-color,#e5e7eb); border-radius:10px; padding:10px 13px;
+  background:var(--bg-card,#fff); cursor:pointer; transition:all .16s; }
+.brief-act:hover{ border-color:var(--primary,#5B9BD5); box-shadow:0 3px 12px rgba(31,38,135,.09); transform:translateX(2px); }
+.brief-num{ width:20px; height:20px; border-radius:50%; background:rgba(91,155,213,.16);
+  color:var(--primary-deep,#3B82C4); font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.brief-actmain{ flex:1; min-width:0; }
+.brief-actt{ font-size:13px; font-weight:600; line-height:1.4; }
+.brief-actr{ font-size:11px; color:var(--text-secondary,#5A6B7F); margin-top:1px; }
+.brief-go{ color:var(--text-secondary,#5A6B7F); font-size:16px; flex-shrink:0; }
+/* 暗色主题：磨砂底转深色，保留投影与顶高光，确保可读性 */
+[data-theme="dark"] .brief-card{ background:rgba(30,41,59,.72); border-color:rgba(255,255,255,.12);
+  box-shadow:0 30px 70px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06); }
+[data-theme="dark"] .brief-glyph{ background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.14); }
 

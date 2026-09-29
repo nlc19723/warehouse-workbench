@@ -158,7 +158,9 @@ const QueryModule = {
       case 'orders': {
         // 🟢 v229.04：派生订单列表模块（DataStore.getOrders 同源装配，含 _存货编码 归一），日期过滤同款
         const result = await DataStore.getOrders({ startDate: this.startDate, endDate: this.endDate }, 1, 1000000);
-        return (result.items || []).map(o => ({
+        // 🟢 v229.49：对齐订单跟踪模块 —— 排除「行关闭人」非空的订单行（已关闭的供应商不需再送，查询系统同样不展示）
+        const ordersItems = (result.items || []).filter(o => !(o.行关闭人 && String(o.行关闭人).trim()));
+        return ordersItems.map(o => ({
           '订单编号': o.订单编号 || '',
           '日期': o.日期 || '',
           '项目名称': o.项目名称 || '',

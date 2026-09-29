@@ -154,18 +154,24 @@ const SupplierModule = {
             <tr>
               <th>类型</th>
               <th>供应商</th>
+              <th>签订次数</th>
               <th>合同年限</th>
-              <th>合同到期日</th>
+              <th>第一年度生效</th>
+              <th>第二年度生效</th>
+              <th>第三年度生效</th>
+              <th>本期生效</th>
+              <th>本期合同到期</th>
               <th>剩余天数</th>
-              <th>合同金额(元)</th>
+              <th>合同最终到期</th>
+              <th>年度合同金额(元)</th>
               <th>已入库金额(元)</th>
               <th>已入库占比</th>
-              <th>招采部门</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
             ${items.map(s => {
+              const _curStart = SupplierModule._currentPeriodStart(s);
               let daysTag = '';
               if (s.年度合同到期时间) {
                 const days = Math.ceil((new Date(s.年度合同到期时间) - now) / (1000 * 60 * 60 * 24));
@@ -181,9 +187,15 @@ const SupplierModule = {
                 <tr>
                   <td>${esc(s.类型 ?? '')}</td>
                   <td><strong>${esc(s.供应商)}</strong></td>
-                  <td>${esc(s.合同年限 ?? '')}</td>
+                  <td style="text-align:center">${esc(s.签订次数 ?? '')}</td>
+                  <td style="text-align:center">${esc(s.合同年限 ?? '')}</td>
+                  <td>${esc(s.第一年度生效时间 ?? '—')}</td>
+                  <td>${esc(s.第二年度生效时间 ?? '—')}</td>
+                  <td>${esc(s.第三年度生效时间 ?? '—')}</td>
+                  <td>${_curStart}</td>
                   <td>${esc(s.年度合同到期时间 ?? '')}</td>
                   <td>${daysTag || ''}</td>
+                  <td>${esc(s.最终到期时间 ?? '')}</td>
                   <td>${TableUtils.formatMoney(s.年度合同金额)}</td>
                   <td>${TableUtils.formatMoney(s.年度已供入库金额)}</td>
                   <td>
@@ -194,7 +206,6 @@ const SupplierModule = {
                       <span style="font-size:11px;color:var(--text-secondary);min-width:36px;">${pct}%</span>
                     </div>
                   </td>
-                  <td>${esc(s.招采部门 ?? '')}</td>
                   <td><button class="btn-detail" onclick="SupplierModule.viewDetail(${JSON.stringify(s.id)})" aria-label="查看供应商 ${escAttr(s.供应商 ?? '')} 详情" title="查看${escAttr(s.供应商 ?? '')}的合同与入库详情">🔍 详情</button></td>
                 </tr>
               `;
@@ -207,6 +218,74 @@ const SupplierModule = {
     this.renderPagination(total, totalPages);
     TableUtils.initSmartSelect('supplierTableArea');
     TableUtils.initSortableHeaders('supplierTableArea');
+  },
+
+  // 🟢 v229.18：本期生效 = 三期中 ≤ 今天的最新一期（用户口径"判断今天属于哪个最新的生效日期"）；
+  //   三期都为未来日期时回退展示最早一期，避免空白。
+  _currentPeriodStart(s) {
+    const t = new Date(); t.setHours(0, 0, 0, 0);
+    const ps = [s.第一年度生效时间, s.第二年度生效时间, s.第三年度生效时间]
+      .map(d => d ? new Date(String(d).includes('T') ? d : d + 'T00:00:00') : null)
+      .filter(d => d && !isNaN(d.getTime()));
+    if (!ps.length) return '—';
+    const v = ps.filter(d => d.getTime() <= t.getTime());
+    const pick = v.length ? Math.max(...v.map(x => x.getTime())) : Math.min(...ps.map(x => x.getTime()));
+    const d = ps.find(x => x.getTime() === pick);
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  },
+
+  // 🟢 v229.18：详情各期「期间入库金额」——第 N 期 = [该期生效, 次期生效) 入库总额；末期 = [末期生效, 末期生效 + 单次合同年限]。
+  _calcPhaseAmounts(s, inbound) {
+    const ps = [s.第一年度生效时间, s.第二年度生效时间, s.第三年度生效时间]
+      .map(d => d ? new Date(String(d).includes('T') ? d : d + 'T00:00:00') : null)
+      .filter(d => d && !isNaN(d.getTime()));
+    if (!ps.length) return [];
+    const single = (parseFloat(s.合同年限) || ps.length) / (parseInt(s.签订次数) || ps.length);
+    const ranges = [];
+    for (let i = 0; i < ps.length; i++) {
+      const start = ps[i];
+      const end = (i < ps.length - 1) ? ps[i + 1]
+        : new Date(start.getFullYear() + Math.round(single), start.getMonth(), start.getDate());
+      ranges.push([start, end]);
+    }
+    const sum = new Array(ranges.length).fill(0);
+    (inbound || []).forEach(r => {
+      const d = r.入库日期 ? new Date(String(r.入库日期).includes('T') ? r.入库日期 : r.入库日期 + 'T00:00:00') : null;
+      if (!d || isNaN(d.getTime())) return;
+      for (let i = 0; i < ranges.length; i++) {
+        if (d.getTime() >= ranges[i][0].getTime() && d.getTime() < ranges[i][1].getTime()) {
+          sum[i] += parseFloat(r.原币价税合计) || 0; break;
+        }
+      }
+    });
+    return ranges.map(([st, en], i) => ({ start: st, end: en, amount: sum[i], isLast: i === ranges.length - 1 }));
+  },
+
+  _buildPhaseSection(s, inbound) {
+    const amts = this._calcPhaseAmounts(s, inbound);
+    if (!amts.length) return '';
+    const p = n => String(n).padStart(2, '0');
+    const fmt = d => `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const cards = amts.map((ph, i) => `
+      <div style="text-align:center;padding:10px 6px;border:1px solid var(--line);border-radius:8px;${ph.isLast ? 'background:#eef4fd;border-color:#bfdbfe' : ''}">
+        <b>第 ${i + 1} 期</b>${ph.isLast ? '<span class="tag tag-success" style="margin-left:6px;vertical-align:middle;">本期</span>' : ''}<br>
+        <span style="font-size:12px;color:var(--text2)">${fmt(ph.start)} 至 ${fmt(ph.end)}</span><br>
+        <span style="font-size:12px;color:var(--text2)">期间入库金额</span><br>
+        <b style="font-size:15px${ph.isLast ? ';color:var(--primary-dark)' : ''}">¥${TableUtils.formatMoney(ph.amount)}</b>
+      </div>`).join('');
+    return `
+      <h3 style="margin:0 0 8px;font-size:14px;">📅 各期生效时间 + 分期入库金额</h3>
+      <div style="display:grid;grid-template-columns:repeat(${amts.length},1fr);gap:10px;margin-bottom:8px;">${cards}</div>
+      <details style="font-size:12.5px;color:var(--text2);margin-bottom:16px;">
+        <summary style="cursor:pointer;color:var(--primary)">📐 字段口径说明</summary>
+        <div style="margin-top:6px;line-height:1.7">
+          · 年度合同金额 = 签订一次合同的合同限价；<br>
+          · 已供入库金额 = 最新的年度合同生效时间 → 今日，当年度合同期内入库总额；占比 = 已供入库 ÷ 年度合同金额；<br>
+          · 签订次数 = 供应周期内需签订（含续签）次数；合同年限 = 供应周期；单次合同年限 = 供应周期 ÷ 签订次数；<br>
+          · 各期「期间入库」= 该期生效 → 次期生效（不含）的入库总额；最后一期 = 该期生效 → 生效时间 + 单次合同年限。
+        </div>
+      </details>`;
   },
 
   renderContractStats(suppliers) {
@@ -308,6 +387,7 @@ const SupplierModule = {
 
     // 计算最近3个月订单/入库趋势图数据
     const trendData = this._calcTrendData(allOrders, allInbound);
+    const phaseSection = this._buildPhaseSection(supplier, allInbound);
 
     document.getElementById('modalTitle').textContent = supplier.供应商;
     TableUtils.setHtml('modalBody', `
@@ -316,13 +396,18 @@ const SupplierModule = {
         <div><strong>招采部门:</strong> ${esc(supplier.招采部门 ?? '')}</div>
         <div><strong>签订次数:</strong> ${esc(supplier.签订次数 ?? '')}</div>
         <div><strong>合同年限:</strong> ${esc(supplier.合同年限 ?? '')}</div>
-        <div><strong>合同生效:</strong> ${esc(supplier.第一年度生效时间 ?? '')}</div>
-        <div><strong>合同到期:</strong> ${esc(supplier.年度合同到期时间 ?? '')}</div>
-        <div><strong>合同金额:</strong> ${TableUtils.formatMoney(supplier.年度合同金额)}</div>
-        <div><strong>已入库金额:</strong> ${TableUtils.formatMoney(supplier.年度已供入库金额)}</div>
+        <div><strong>第一年度生效:</strong> ${esc(supplier.第一年度生效时间 ?? '—')}</div>
+        <div><strong>第二年度生效:</strong> ${esc(supplier.第二年度生效时间 ?? '—')}</div>
+        <div><strong>第三年度生效:</strong> ${esc(supplier.第三年度生效时间 ?? '—')}</div>
+        <div><strong>本期合同到期:</strong> ${esc(supplier.年度合同到期时间 ?? '')}</div>
+        <div><strong>合同最终到期:</strong> ${esc(supplier.最终到期时间 ?? '')}</div>
+        <div><strong>单次合同年限:</strong> ${esc(Math.round(parseFloat(supplier.合同年限 || 0) / (parseInt(supplier.签订次数) || 1) * 10) / 10)} 年</div>
+        <div><strong>年度合同金额(元):</strong> ${TableUtils.formatMoney(supplier.年度合同金额)}</div>
+        <div><strong>已入库金额(元):</strong> ${TableUtils.formatMoney(supplier.年度已供入库金额)}</div>
         <div><strong>生产厂址:</strong> ${esc(supplier.生产厂址 ?? '')}</div>
         <div><strong>办公地址:</strong> ${esc(supplier.地址 ?? '')}</div>
       </div>
+      ${phaseSection}
 
       <!-- 趋势图区域 -->
       <div style="margin-bottom:16px;">

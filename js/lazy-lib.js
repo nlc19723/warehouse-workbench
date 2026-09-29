@@ -16,7 +16,7 @@ const LazyLib = (function () {
   // ⚠️ 路径必须与 index.html 中原有 <script src> 完全一致（含 ?v= 版本戳），
   //    否则会命中旧缓存或 404。发版改版本号时需同步此处。
   const LIBS = {
-    xlsx:   { src: 'lib/xlsx.full.min.js?v=55',  global: 'XLSX' },
+    xlsx:   { src: 'lib/xlsx.full.min.js?v=229.55',  global: 'XLSX' },
     chart:  { src: 'lib/chart.min.js?v=55',      global: 'Chart' },
     jszip:  { src: 'lib/jszip.min.js?v=1',       global: 'JSZip' },
     jsqr:   { src: 'lib/jsqr.min.js?v=1',        global: 'jsQR' },

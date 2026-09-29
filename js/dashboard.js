@@ -1,5 +1,7 @@
 // ============================================
 // 仪表盘首页 V3 - 3D CoverFlow · 双模主题 · 多维度趋势图
+// 🟢 v229.39：晨间简报关闭改为「淡出 → 等滚动静止 → 摘除节点 + 复位滚动合成层」，
+//    修复移动端「关闭今日简报后页面滑不动」（滚动中改布局打断 iOS 惯性滚动层）。
 // ============================================
 
 const DashboardModule = {
@@ -28,6 +30,13 @@ const DashboardModule = {
   async render(token) {
     const content = document.getElementById('contentArea');
     const stats = await DataStore.getDashboardStats();
+    // 🟢 v229.48：库存预警自 v229.18 起改为全派生（buildDerivedAlerts），inventoryAlerts 导入表
+    //     不再填充，getDashboardStats 读旧表恒得 0 —— 待办「库存不足」/健康度环/KPI/角标/简报
+    //     统一改走派生口径（与库存预警页、查询系统存量板块同源同值）。
+    try {
+      const derivedAlerts = await InventoryAlertModule.buildDerivedAlerts();
+      stats.needRestockCount = derivedAlerts.filter(a => a.派生状态 !== '正常').length;
+    } catch (e) { console.warn('[dashboard] 派生预警统计失败(沿用旧口径):', e && e.message); }
     const completeness = await DataStore.getCompletenessStats();
     this._completeness = completeness;
 
@@ -65,6 +74,9 @@ const DashboardModule = {
   // 组装仪表盘整体 HTML（CoverFlow / Widget / KPI / 图表容器 / 完整性看板）
   _buildDashboardHtml(stats, completeness, cfCards) {
     return `
+      <!-- 🟢 v229.26：晨间简报（体验跃迁 v2 · 主动层）——聚合真实异常，一句人话 + 3 件优先事项 -->
+      <div class="glass-card brief-card" id="morningBrief"><div class="brief-loading">正在为你汇总今天该做的事…</div></div>
+
       <!-- 3D CoverFlow 快捷入口 -->
       <div class="coverflow-wrapper" style="position:relative;padding:0 12px;margin-bottom:18px;">
         <button class="coverflow-nav wb-pager-btn wb-prev prev-btn" onclick="DashboardModule.coverflowPrev()" aria-label="上一张" title="上一张"></button>
@@ -80,6 +92,9 @@ const DashboardModule = {
 
       <!-- 数据概览Widget（一行4个：待办 + 3个饼图） -->
       <div class="data-widgets">
+        <!-- 🟢 v229.24：我的任务卡——只留锚点容器，卡头由 WorkTasksModule.renderSummaryInto 统一注入
+             （v229.23 静态卡头 + 注入卡头双层嵌套导致「我的任务」重复出现两次） -->
+        <div class="glass-card dash-todo-card" id="myTasksCard"></div>
         <div class="glass-card dash-todo-card">
           <div class="glass-card-header">
             <span class="glass-card-title"><span class="title-icon">📋</span>待办事项</span>
@@ -184,6 +199,7 @@ const DashboardModule = {
   async _renderDashboardWidgets(stats) {
     await this.renderDonut(stats);
     await this.renderTodos(stats);
+    await this.renderMyTasksCard();
     await this.renderSupplierContractChart();
     await this.renderOrderStatusChart(stats);
     await this.renderMonthlyChart();
@@ -191,6 +207,151 @@ const DashboardModule = {
     await this.renderCompareChart();
     this.updateBadges(stats);
     this.initCoverflow();
+    await this.renderMorningBrief(stats);
+  },
+
+  // 🟢 v229.26：晨间简报——从"你去找信息"到"信息来找你"
+  async renderMorningBrief(stats) {
+    const el = document.getElementById('morningBrief');
+    if (!el) return;
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // 🟢 v229.36：今日已手动关闭 → 当天不再出现（简报每天只出现一次，不再一直挂着）
+    const BRIEF_LS = 'wb_brief_dismissed';
+    const todayKey = `${today.getFullYear()}-${today.getMonth() + 1}-${today.getDate()}`;
+    try {
+      if (localStorage.getItem(BRIEF_LS) === todayKey) {
+        // 🟢 v229.39：同样走"淡出 + 滚动静止后再摘除"，不在滚动中硬改布局
+        el.classList.add('is-hiding');
+        this._dropBriefWhenIdle(el, 0);
+        return;
+      }
+    } catch (e) {}
+
+    let overdue = 0, tasks = [];
+    try { if (typeof WorkTasksModule !== 'undefined' && WorkTasksModule._debug) {
+      tasks = await WorkTasksModule._debug._load();
+      // 🟢 v229.39：复用模块同款「全天比日、定时比时刻」判定（避免全天任务恒判逾期）
+      overdue = tasks.filter(t => {
+        if (t.done) return false;
+        const d = new Date(t.dueAt);
+        if (isNaN(d)) return false;
+        const allDay = /T00:00:00$/.test(t.dueAt || '');
+        if (allDay) return d.getTime() < today.getTime();
+        return d.getTime() < now.getTime();
+      }).length;
+    } } catch (e) {}
+
+    let sups = [];
+    try { sups = await DataStore.getRows('suppliers'); } catch (e) {}
+    const addDaysLocal = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+    const near = [];
+    (sups || []).filter(s => s.供应商 && (s.年度合同到期时间 || s.最终到期时间)).forEach(s => {
+      const raw = String(s.年度合同到期时间 || s.最终到期时间).match(/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/);
+      if (!raw) return;
+      const due = new Date(raw[0].replace(/\//g, '-') + 'T00:00:00');
+      if (isNaN(due)) return;
+      const days = Math.ceil((due - today) / 86400000);
+      if (days >= 0 && days <= 400) {
+        const stepDays = [-180, -65, -15].map(l => Math.ceil((addDaysLocal(due, l) - today) / 86400000));
+        near.push({ name: s.供应商, due, days, nextIdx: stepDays.findIndex(d => d >= 0) });
+      }
+    });
+    near.sort((a, b) => a.days - b.days);
+
+    // 🟢 v229.26：待批订单 / 库存预警直接取 getDashboardStats 同源口径（stats 由 render 传入），
+    //     保证简报与 KPI 卡、待办卡数字永远一致；字段缺失时回退本地推导。
+    let pending = (stats && typeof stats.pendingApproval === 'number') ? stats.pendingApproval : 0;
+    if (!(stats && typeof stats.pendingApproval === 'number')) {
+      try { const os = await DataStore.getRows('orders'); pending = (os || []).filter(o => o.审批状态 && o.审批状态 !== '审批通过').length; } catch (e) {}
+    }
+    let alerts = (stats && typeof stats.needRestockCount === 'number') ? stats.needRestockCount : 0;
+    if (!(stats && typeof stats.needRestockCount === 'number')) {
+      try { const al = await DataStore.getRows('inventoryAlerts'); alerts = (al || []).filter(a => { const rv = parseFloat(a.补货值); return !isNaN(rv) && rv > 0; }).length; } catch (e) {}
+    }
+
+    const wk = ['日', '一', '二', '三', '四', '五', '六'][today.getDay()];
+    const dateStr = `${today.getFullYear()}年${today.getMonth() + 1}月${today.getDate()}日 周${wk}`;
+    const acts = [];
+    if (overdue > 0) acts.push({ t: `处理 ${overdue} 项逾期任务`, r: '别让它们沉下去', go: 'workTasks' });
+    if (pending > 0) acts.push({ t: `催批 ${pending} 张待审订单`, r: '卡住下游收货', go: 'orderTrack' });
+    if (near.length) { const n = near[0]; const stepName = ['部门意见', '企发部询价', '上会议题'][n.nextIdx >= 0 ? n.nextIdx : 2]; acts.push({ t: `${n.name} 启动「${stepName}」`, r: `合同 ${n.days} 天后到期`, go: 'pricing' }); }
+    if (alerts > 0) acts.push({ t: `确认 ${alerts} 项库存预警补货量`, r: '其中或有已断货', go: 'inventoryAlert' });
+    while (acts.length > 3) acts.pop();
+    if (!acts.length) acts.push({ t: '今天一切正常 ✓', r: '去看看供应商合同到期', go: 'supplier' });
+
+    let head = `今天有 ${overdue} 项逾期` + (pending ? `、${pending} 张订单待批` : '') + (near.length ? `、${near.length} 家供应商临近新招` : '') + (alerts ? `、${alerts} 项库存预警` : '');
+    head = head.replace(/^今天有 0 项逾期、?/, '').replace(/、$/, '') || '今天一切平稳';
+
+    el.innerHTML = `
+      <div class="brief-head">
+        <div class="brief-glyph">✨</div>
+        <div class="brief-headtext">
+          <div class="brief-date">早上好 · ${dateStr}</div>
+          <div class="brief-summary">${esc(head)}。最该先处理这几件：</div>
+        </div>
+        <div class="brief-badge">今日简报</div>
+        <button class="brief-close" id="briefCloseBtn" type="button" title="关闭今日简报" aria-label="关闭今日简报">×</button>
+      </div>
+      <div class="brief-actions">
+        ${acts.map((a, i) => `
+          <div class="brief-act" onclick="App.go('${a.go}')">
+            <div class="brief-num">${i + 1}</div>
+            <div class="brief-actmain"><div class="brief-actt">${esc(a.t)}</div><div class="brief-actr">${esc(a.r)}</div></div>
+            <div class="brief-go">›</div>
+          </div>`).join('')}
+      </div>`;
+
+    // 🟢 v229.36：① 点 × 手动关闭（当天不再出现） ② 12s 后自动淡出（回到仪表盘仍可再看一次）
+    // 🟢 v229.39：淡出后不再直接 display:none —— 惯性滚动进行中改动布局会让 iOS
+    //    -webkit-overflow-scrolling:touch 的合成滚动层失效（症状：关完简报页面就滑不动了）。
+    //    现改为：先只做不触发重排的淡出（opacity / transform），等滚动静止后再摘除节点，
+    //    并顺手复位滚动容器的合成层、补偿被抽走的高度（内容不跳动）。
+    const hideBrief = (persist) => {
+      if (el.dataset.briefHidden === '1') return;
+      el.dataset.briefHidden = '1';
+      el.classList.add('is-hiding');
+      if (persist) { try { localStorage.setItem(BRIEF_LS, todayKey); } catch (e) {} }
+      this._dropBriefWhenIdle(el, 360);
+    };
+    const closeBtn = document.getElementById('briefCloseBtn');
+    if (closeBtn) closeBtn.addEventListener('click', (ev) => { ev.stopPropagation(); hideBrief(true); });
+    if (el._briefTimer) clearTimeout(el._briefTimer);
+    el._briefTimer = setTimeout(() => hideBrief(false), 12000);
+  },
+
+  // 🟢 v229.39：晨间简报所在的滚动容器（.content-scroll / #contentArea）
+  _briefScroller() {
+    return document.getElementById('contentArea') || document.querySelector('.content-scroll');
+  },
+
+  /** 等滚动静止后再真正摘除简报节点 —— 滚动中改布局会打断 iOS 惯性滚动合成层 */
+  _dropBriefWhenIdle(el, delay) {
+    const sc = this._briefScroller();
+    if (sc && !sc.__wbScrollTracked) {
+      sc.__wbScrollTracked = true;
+      sc.__wbScrollAt = 0;
+      sc.addEventListener('scroll', () => { sc.__wbScrollAt = Date.now(); }, { passive: true });
+    }
+    const deadline = Date.now() + 2000;   // 最多等 2s，避免长惯性滚动下节点迟迟不摘
+    const drop = () => {
+      if (!el || !el.parentNode) return;
+      // 还在滚 → 推迟；但到 deadline 就不再等（长惯性滚动时不能无限拖）
+      if (sc && Date.now() - (sc.__wbScrollAt || 0) < 260 && Date.now() < deadline) { setTimeout(drop, 300); return; }
+      const st = sc ? sc.scrollTop : 0;
+      const above = sc ? (el.getBoundingClientRect().bottom <= 0) : false;                     // 已滚出视口上方
+      const h = el.offsetHeight + (parseFloat(getComputedStyle(el).marginBottom) || 0);
+      el.parentNode.removeChild(el);                                                           // 彻底移除，不留合成层
+      if (sc && above) sc.scrollTop = Math.max(0, st - h);                                     // 高度补偿：内容不跳
+      if (sc) {   // iOS：重建 -webkit-overflow-scrolling 合成层，防"关完就滑不动"
+        const keep = sc.scrollTop;
+        sc.style.webkitOverflowScrolling = 'auto';
+        void sc.offsetHeight;
+        sc.style.webkitOverflowScrolling = 'touch';
+        sc.scrollTop = keep;
+      }
+    };
+    setTimeout(drop, delay || 0);
   },
 
   // 最近浏览：复用 App.recentEntities 栈，点击直达实体档案（无记录时不显示）
@@ -490,6 +651,12 @@ const DashboardModule = {
     ).join('');
   },
 
+  // 🟢 v229.23：我的任务卡（个人备忘，独立于系统业务待办）
+  async renderMyTasksCard() {
+    if (typeof WorkTasksModule === 'undefined' || !WorkTasksModule.renderSummaryInto) return;
+    try { await WorkTasksModule.renderSummaryInto('myTasksCard'); } catch (e) { console.warn('[dashboard] 我的任务卡渲染(已忽略):', e && e.message); }
+  },
+
   // ===== 待办明细弹窗 =====
   async showTodoDetail(type) {
     const overlay = document.getElementById('modalOverlay');
@@ -507,7 +674,8 @@ const DashboardModule = {
 
     if (type === 'restock') {
       title = '需补货物料明细';
-      let list = await this._getCached('inventoryAlerts');
+      // 🟢 v229.18：库存预警改 buildDerivedAlerts 派生（与库存预警工作台同源），不再读被删的导入表
+      let list = await InventoryAlertModule.buildDerivedAlerts();
 
       // 补货值统一处理在现存量交叉补全之后进行（见下方）
 

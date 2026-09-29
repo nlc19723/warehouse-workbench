@@ -679,12 +679,6 @@ const SyncManager = {
       }
       // meta 最后写（原子性：读者先读 meta，未写出则不可见）
       await this._uploadWithRetry(this.META_FILE, meta);
-      // 🟢 v229.11（措施1）：LEGACY_DUAL_WRITE=false 后不再写 data.json（省 ~30MB/次上传）
-      if (this.LEGACY_DUAL_WRITE) {
-        const legacyTables = Object.assign({}, (metaInfo && metaInfo.tables) || {}, tables);
-        const legacy = { version: dataObj.version || null, savedAt, tables: legacyTables, prevWork };
-        await this._uploadWithRetry(this.FILE, legacy);
-      }
       this.setSyncState(null, '已同步');
       return true;
     } catch (e) {
@@ -710,9 +704,6 @@ const SyncManager = {
         meta.tables[name] = { mtime: savedAt, rows: rows.length };
       }
       await this._uploadWithRetry(this.BASE_META_FILE, meta);
-      if (this.LEGACY_DUAL_WRITE) {
-        await this._uploadWithRetry(this.BASE_FILE, { version: dataObj.version || null, savedAt, tables });
-      }
       this.setSyncState(null, '已同步');
       return true;
     } catch (e) {

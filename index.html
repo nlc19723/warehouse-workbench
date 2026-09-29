@@ -6,19 +6,20 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="库管工作台">
-  <link rel="apple-touch-icon" href="icons/icon-192.png?v=229.17" type="image/png">
-  <link rel="icon" href="icons/icon-192.png?v=229.17" type="image/png">
-  <link rel="manifest" href="manifest.json?v=229.17">
+  <link rel="apple-touch-icon" href="icons/icon-192.png?v=229.55" type="image/png">
+  <link rel="icon" href="icons/icon-192.png?v=229.55" type="image/png">
+  <link rel="manifest" href="manifest.json?v=229.55">
   <meta name="theme-color" content="#357ABD">
-  <!-- 🟢 AUDIT-228-08（v228.18）：CSP 说明 —— 此处**不写** meta CSP，原因有二：
-       ① Content-Security-Policy-Report-Only **不支持通过 <meta> 传递**（浏览器会报
-          "delivered via a <meta> element, which is disallowed"，策略被整条忽略）；
-       ② 本页大量使用内联 onclick 与内联 <style>，强制 CSP 需 'unsafe-inline'，
-          实际拦截价值有限，却容易误伤第三方 SDK。
-       正确做法是在**服务端响应头**配置（静态托管需由网关/CDN 注入）：
-         Content-Security-Policy-Report-Only: default-src 'self'; script-src 'self' 'unsafe-inline' https://beacon.cdn.qq.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: wss:; frame-ancestors 'self'; base-uri 'self'
-       待控制台观察无业务误报后，再切换为 Content-Security-Policy 强制执行。
+  <!-- 🟢 v229.46 AUDIT-F3：CSP 正式生效（此前仅为无效注释，等同「无 CSP」）。
+       说明：script-src 仍含 'unsafe-inline' —— 本应用大量通过 innerHTML 注入动态内联事件处理器
+       （分页器 / 弹窗 / 设置面板等数十处），全站移除需一次「事件委托 / addEventListener」重构，
+       属独立史诗任务；本次先让 CSP 真实生效并收紧除脚本外所有源。
+       已加：object-src 'none'（禁插件注入）、base-uri 'self'（禁 <base> 劫持）、
+       worker-src 'self'、connect-src 锁定 Supabase 域名、img/font 收窄；
+       frame-ancestors 受限（meta 不支持该指令，仅作声明，正式拦截需服务端响应头）。
+       第三方 beacon 脚本已加 SRI（见 AUDIT-F5），即便放行也不可被篡改。
        ⚠️ CSP 只是「第二道防线」，第一道仍是所有插值必须经 esc / escAttr。 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://zdcjqiidsxethfuoiowy.supabase.co wss://zdcjqiidsxethfuoiowy.supabase.co; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self' https://*.workbuddy.host https://*.workbuddy.cn">
   <title>库管系统工作台</title>
 <!-- CRITICAL_CSS_START -->
 <style>
@@ -247,6 +248,79 @@ body{
 [data-theme="dark"] .demo-data-banner{ background:rgba(245,158,11,0.16); color:#fcd34d; border-color:rgba(245,158,11,0.40); }
 [data-theme="dark"] .demo-data-banner b{ color:#fbbf24; }
 
+  /* 🟢 v229.45：启动加载屏 BootSplash —— 样式【全部内联】且【默认即显示】。
+     修复裸 HTML 闪现：此前 #bootSplash 默认 display:none，要等 defer 的 boot-splash.js
+     加 is-active 才显示；而 style.css 为异步非阻塞加载 —— 慢网下「JS 未执行 + CSS 未生效」
+     的窗口期整页以无样式渲染。现在解析到 <body> 第一帧就是完整启动屏（fixed 全屏不透明），
+     物理上盖住主内容，不依赖任何外部资源时序。 */
+  #bootSplash{position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;overflow:hidden;opacity:1;
+    background:
+      radial-gradient(120% 90% at 28% 12%, #FFFFFF 0%, rgba(255,255,255,0) 46%),
+      radial-gradient(130% 100% at 78% 88%, #E0F7FA 0%, rgba(224,247,250,0) 55%),
+      linear-gradient(158deg, #F8F9FA 0%, #E0F7FA 100%);
+    font-family:'Inter','SF Pro Display',-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  #bootSplash.is-active{display:flex;}
+  #bootSplash.is-leaving{opacity:0;transition:opacity .52s ease;}
+  /* 极光柔光 */
+  #bootSplash .boot-aurora{position:absolute;border-radius:50%;filter:blur(40px);opacity:.5;pointer-events:none;}
+  #bootSplash .ba1{width:340px;height:340px;left:-90px;top:-70px;background:radial-gradient(circle,#FFFFFF 0%,rgba(255,255,255,0) 70%);animation:bootDr1 17s ease-in-out infinite;}
+  #bootSplash .ba2{width:300px;height:300px;right:-80px;top:28%;background:radial-gradient(circle,#B2EBF2 0%,rgba(178,235,242,0) 70%);animation:bootDr2 21s ease-in-out infinite;}
+  #bootSplash .ba3{width:360px;height:360px;left:-60px;bottom:-110px;background:radial-gradient(circle,#E0F7FA 0%,rgba(224,247,250,0) 70%);animation:bootDr3 25s ease-in-out infinite;}
+  @keyframes bootDr1{0%,100%{transform:translate(0,0)}50%{transform:translate(30px,26px)}}
+  @keyframes bootDr2{0%,100%{transform:translate(0,0)}50%{transform:translate(-26px,22px)}}
+  @keyframes bootDr3{0%,100%{transform:translate(0,0)}50%{transform:translate(24px,-20px)}}
+  #bootSplashCanvas{position:absolute;inset:0;pointer-events:none;z-index:1;}
+  /* 🟢 v229.54：worker 模式把 canvas 提到圆盘之上，只用于绘制「实时进度弧 + 中心数字 + 加载中」，
+     让这两项在主线程被 DataLoader 冻结时仍流畅爬升；圆盘底/纸雕环质感仍由 DOM/SVG 原样呈现。
+     DOM 的「加载中」+数字隐藏（避免与 canvas 重影），粒子/词标本就在 canvas 上、随 worker 独立线程动画。 */
+  #bootSplash.worker-mode #bootSplashCanvas{z-index:4;}
+  #bootSplash.worker-mode .boot-center .cap,
+  #bootSplash.worker-mode .boot-center .num{display:none;}
+  /* 四角取景框角标 */
+  #bootSplash .boot-corner{position:absolute;width:26px;height:26px;border:1.5px solid rgba(0,168,150,0.20);pointer-events:none;z-index:3;}
+  #bootSplash .boot-corner.tl{left:26px;top:26px;border-right:none;border-bottom:none;border-top-left-radius:6px;}
+  #bootSplash .boot-corner.tr{right:26px;top:26px;border-left:none;border-bottom:none;border-top-right-radius:6px;}
+  #bootSplash .boot-corner.bl{left:26px;bottom:26px;border-right:none;border-top:none;border-bottom-left-radius:6px;}
+  #bootSplash .boot-corner.br{right:26px;bottom:26px;border-left:none;border-top:none;border-bottom-right-radius:6px;}
+  /* 顶部装饰行 */
+  #bootSplash .boot-topdeco{position:absolute;left:0;right:0;top:8.1%;display:flex;align-items:center;justify-content:center;gap:12px;z-index:3;}
+  #bootSplash .boot-topdeco::before{content:'';width:44px;height:1px;background:linear-gradient(90deg,rgba(0,168,150,0),rgba(0,168,150,0.30));}
+  #bootSplash .boot-topdeco::after{content:'';width:44px;height:1px;background:linear-gradient(270deg,rgba(0,168,150,0),rgba(0,168,150,0.30));}
+  #bootSplash .boot-topdeco .dm{width:5px;height:5px;transform:rotate(45deg);background:rgba(0,168,150,0.35);}
+  /* 圆环（168px，与设计原型一致） */
+  #bootSplash .boot-ring{position:absolute;left:50%;top:var(--cy-ring,50%);transform:translate(-50%,-50%);width:168px;height:168px;z-index:2;}
+  #bootSplash .boot-ring svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;}
+  #bootSplash .boot-slice{opacity:0;transition:opacity .3s ease;}
+  #bootSplash .boot-slice.on{opacity:1;}
+  /* 中心数字 */
+  #bootSplash .boot-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:63%;height:63%;border-radius:50%;z-index:3;
+    background:#EBF3F1;box-shadow:inset 7px 8px 13px rgba(126,154,150,0.55),inset -6px -7px 12px rgba(255,255,255,0.95);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;}
+  #bootSplash .boot-center .cap{font-size:12px;font-weight:400;letter-spacing:.18em;color:#5A6F6B;text-indent:.18em;}
+  #bootSplash .boot-center .num{font-size:28px;font-weight:700;line-height:1;color:#0E4D47;font-variant-numeric:tabular-nums;display:flex;align-items:baseline;}
+  #bootSplash .boot-center .num .pct{font-size:19px;margin-left:1px;}
+  /* 副文案 */
+  #bootSplash .boot-sub{position:absolute;left:0;right:0;top:var(--cy-sub,60%);text-align:center;display:flex;align-items:center;justify-content:center;gap:10px;
+    font-size:12px;font-weight:400;color:rgba(0,168,150,0.85);z-index:3;transition:opacity .5s ease;}
+  #bootSplash .boot-sub::before,#bootSplash .boot-sub::after{content:'';width:16px;height:1px;background:rgba(0,168,150,0.35);}
+  #bootSplash .boot-sub span{letter-spacing:.3em;margin-right:-.3em;}
+  /* 底部：--progress 进度线 + 版本行 */
+  #bootSplash .boot-bottom{position:absolute;left:0;right:0;top:var(--cy-bottom,86%);display:flex;flex-direction:column;align-items:center;gap:12px;z-index:3;}
+  #bootSplash .boot-loadline{position:relative;width:150px;height:2px;border-radius:2px;background:rgba(0,168,150,0.12);overflow:hidden;}
+  #bootSplash .boot-loadline::after{content:'';position:absolute;top:0;left:-40%;width:40%;height:100%;border-radius:2px;
+    background:linear-gradient(90deg,rgba(0,168,150,0),rgba(0,168,150,0.45),rgba(0,168,150,0));animation:bootSweep 2.2s ease-in-out infinite;}
+  @keyframes bootSweep{0%{left:-40%}62%,100%{left:100%}}
+  #bootSplash .boot-cap{font-size:9px;font-weight:500;letter-spacing:.32em;text-indent:.32em;color:rgba(0,120,110,0.42);}
+  /* 暗色主题 */
+  [data-theme="dark"] #bootSplash{background:
+    radial-gradient(120% 90% at 28% 12%, #1b2733 0%, rgba(27,39,51,0) 46%),
+    radial-gradient(130% 100% at 78% 88%, #11343b 0%, rgba(17,52,59,0) 55%),
+    linear-gradient(158deg, #0f1a22 0%, #11343b 100%);}
+  [data-theme="dark"] #bootSplash .boot-center{background:#16313a;box-shadow:inset 7px 8px 13px rgba(0,0,0,0.55),inset -6px -7px 12px rgba(255,255,255,0.06);}
+  [data-theme="dark"] #bootSplash .boot-center .num{color:#7fd8c4;}
+  [data-theme="dark"] #bootSplash .boot-center .cap{color:#8fb0aa;}
+
 /* 货车进度条形态 */
 .loading-truck-wrap{ margin-top: 22px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 [hidden]{ display: none !important; }
@@ -284,8 +358,16 @@ body{
     <!-- 🟢 v228.09 性能优化 P0-2：首屏关键 CSS 已内联（上方 CRITICAL_CSS 块，8.4KB），
          全量 style.css(211KB) 改为【非阻塞】加载：preload 拉取 → onload 转 stylesheet。
          首屏只依赖 8.4KB 内联样式，loading 遮罩即可正确显示；全量样式在遮罩期间并行加载完成。 -->
-    <link rel="preload" href="css/style.css?v=229.17" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="css/style.css?v=229.17"></noscript>
+    <link rel="preload" href="css/style.css?v=229.55" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="css/style.css?v=229.55"></noscript>
+    <!-- 🟢 v229.45：启动加载屏样式已【全部内联】进上方 CRITICAL_CSS（原 loading-splash.css 异步加载
+         在慢网下同样会裸 HTML 闪现，已废弃外部引用；css/loading-splash.css 保留仅作存档）。
+         Inter 字体用于词标 StockHub -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+    <!-- v229.45 兜底①：无 JS 环境（noscript 下 style.css 为阻塞加载，页面可正常渲染）不显示启动屏 -->
+    <noscript><style>#bootSplash{display:none !important;}</style></noscript>
     <script>
       // 兜底：极老旧内核可能不触发 preload 的 onload。延迟 3s 检测，仅在样式确实未生效时
       // 才补一个阻塞式 link —— 延迟是为了避免正常情况下误触发、反而抵消异步收益。
@@ -296,7 +378,7 @@ body{
         }
         if (!ok) {
           var l = document.createElement('link');
-          l.rel = 'stylesheet'; l.href = 'css/style.css?v=229.17';
+          l.rel = 'stylesheet'; l.href = 'css/style.css?v=229.55';
           document.head.appendChild(l);
         }
       }, 3000);
@@ -309,47 +391,59 @@ body{
          · jsqr.min.js(257KB)   → 打开「扫一扫」时
          · jszip.min.js(98KB)   → 点击「源码」打包下载时
          · qrcode.min.js(57KB)  → 现存量二维码 / 存货档案二维码（v228.17 恢复加载，见下方 <script>） -->
+  <script defer src="js/boot-splash.js?v=229.55"></script>
   <script defer src="lib/dexie.min.js?v=55"></script>
   <script defer src="lib/supabase.min.js?v=55"></script>
-  <script defer src="js/lazy-lib.js?v=229.17"></script>
+  <script defer src="js/lazy-lib.js?v=229.55"></script>
 <!-- 🟢 v228.53：beacon 统计脚本改为「动态异步注入」。
      旧版（M4）用 defer：defer 脚本会阻塞 DOMContentLoaded，而 App.init()（app.js）也绑在
      DOMContentLoaded 上 —— 一旦 beacon.cdn.qq.com 在用户网络下慢/不可达（DNS 挂起、办公网
      屏蔽、境外链路抖动），启动屏「正在初始化...」会卡住直到请求超时（实测可 30s+）。
      改为动态注入后：① 不再阻塞 DOMContentLoaded，应用秒启；② 加载完成后再上报（数据不丢）；
      ③ 加载失败静默跳过（统计缺失无碍业务）。 -->
-<script>
-(function(){
-  function initBeacon(){
-    try{
-      var beacon=new BeaconAction({
-        appkey:(window.AppConfig && AppConfig.beaconAppkey) || '0WEB06U85YBSLJNL',
-        versionCode:'1.0.0',
-        channelID:'share',
-        delay:1000,
-        sessionDuration:30*60*1000,
-        isOversea:false,
-        needReportRqdEvent:false
-      });
-      beacon.onDirectUserAction('preview_page_view',{
-        'url':location.href,
-        'referrer':document.referrer,
-        'title':document.title,
-        'sandbox_id':'c430b5fce1834633aeee2e5bbe763daa'
-      });
-    }catch(e){}
-  }
-  try{
-    var s=document.createElement('script');
-    s.src='https://beacon.cdn.qq.com/sdk/4.5.9/beacon_web.min.js';
-    s.async=true;
-    s.onload=initBeacon;
-    s.onerror=function(){ /* 统计 CDN 不可达：静默跳过，绝不影响业务启动 */ };
-    document.head.appendChild(s);
-  }catch(e){ /* 注入失败同样不影响业务 */ }
-})();
-</script></head>
+  <!-- 🟢 v229.46 AUDIT-F5：移除第三方腾讯 beacon 遥测（原 beacon.cdn.qq.com 动态注入）。
+       原因：① 该 SDK 会从 gtimg.cn / myqcloud.com / qq.com 等多个腾讯 CDN 动态加载不透明子脚本并做设备指纹(fp.js)，
+             属无法审计的供应链面；② 其 CDN 不返回 CORS 头，SRI 跨域校验在浏览器侧必然失败（已实测 CORS 拦截），
+             故「加 SRI」对此 SDK 不可行；③ 向腾讯上报页面元数据且做设备指纹，未经用户同意，违反个保法 §23。
+       应用对 beacon 缺失本就优雅降级（onerror 静默跳过），移除不影响任何业务功能。
+       如需页面统计：请改用「经用户同意 + 自托管 + 可审计」的分析方案，并按个保法完成告知与单独同意。 -->
+</head>
 <body>
+  <!-- 启动加载屏（设计预览：粒子汇聚 StockHub + 纸雕圆环），由 js/boot-splash.js 驱动 -->
+  <div id="bootSplash" aria-hidden="true">
+    <div class="boot-aurora ba1"></div>
+    <div class="boot-aurora ba2"></div>
+    <div class="boot-aurora ba3"></div>
+    <div class="boot-corner tl"></div><div class="boot-corner tr"></div>
+    <div class="boot-corner bl"></div><div class="boot-corner br"></div>
+    <div class="boot-topdeco"><i class="dm"></i></div>
+    <canvas id="bootSplashCanvas"></canvas>
+    <div class="boot-ring">
+      <svg id="bootRingSvg" viewBox="0 0 268 268" aria-hidden="true"><defs><radialGradient id="bootGLight" gradientUnits="userSpaceOnUse" cx="82" cy="-59" r="330"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.95"/><stop offset="0.42" stop-color="#FFFFFF" stop-opacity="0.55"/><stop offset="0.74" stop-color="#FFFFFF" stop-opacity="0.14"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient><filter id="bootRimSoft" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="1.0"/></filter><clipPath id="bootCellClip0"><path d="M105.656 11.229 A126 126 0 0 1 129.603 8.077 L130.789 42.056 A92 92 0 0 0 113.305 44.358 Z"/></clipPath><clipPath id="bootCellClip1"><path d="M74.847 22.749 A126 126 0 0 1 97.161 13.506 L107.102 46.020 A92 92 0 0 0 90.809 52.769 Z"/></clipPath><clipPath id="bootCellClip2"><path d="M48.068 41.849 A126 126 0 0 1 67.230 27.146 L85.247 55.980 A92 92 0 0 0 71.256 66.715 Z"/></clipPath><clipPath id="bootCellClip3"><path d="M27.146 67.230 A126 126 0 0 1 41.849 48.068 L66.715 71.256 A92 92 0 0 0 55.980 85.247 Z"/></clipPath><clipPath id="bootCellClip4"><path d="M13.506 97.161 A126 126 0 0 1 22.749 74.847 L52.769 90.809 A92 92 0 0 0 46.020 107.102 Z"/></clipPath><clipPath id="bootCellClip5"><path d="M8.077 129.603 A126 126 0 0 1 11.229 105.656 L44.358 113.305 A92 92 0 0 0 42.056 130.789 Z"/></clipPath><clipPath id="bootCellClip6"><path d="M11.229 162.344 A126 126 0 0 1 8.077 138.397 L42.056 137.211 A92 92 0 0 0 44.358 154.695 Z"/></clipPath><clipPath id="bootCellClip7"><path d="M22.749 193.153 A126 126 0 0 1 13.506 170.839 L46.020 160.898 A92 92 0 0 0 52.769 177.191 Z"/></clipPath><clipPath id="bootCellClip8"><path d="M41.849 219.932 A126 126 0 0 1 27.146 200.770 L55.980 182.753 A92 92 0 0 0 66.715 196.744 Z"/></clipPath><clipPath id="bootCellClip9"><path d="M67.230 240.854 A126 126 0 0 1 48.068 226.151 L71.256 201.285 A92 92 0 0 0 85.247 212.020 Z"/></clipPath><clipPath id="bootCellClip10"><path d="M97.161 254.494 A126 126 0 0 1 74.847 245.251 L90.809 215.231 A92 92 0 0 0 107.102 221.980 Z"/></clipPath><clipPath id="bootCellClip11"><path d="M129.603 259.923 A126 126 0 0 1 105.656 256.771 L113.305 223.642 A92 92 0 0 0 130.789 225.944 Z"/></clipPath><clipPath id="bootCellClip12"><path d="M162.344 256.771 A126 126 0 0 1 138.397 259.923 L137.211 225.944 A92 92 0 0 0 154.695 223.642 Z"/></clipPath><clipPath id="bootCellClip13"><path d="M193.153 245.251 A126 126 0 0 1 170.839 254.494 L160.898 221.980 A92 92 0 0 0 177.191 215.231 Z"/></clipPath><clipPath id="bootCellClip14"><path d="M219.932 226.151 A126 126 0 0 1 200.770 240.854 L182.753 212.020 A92 92 0 0 0 196.744 201.285 Z"/></clipPath><clipPath id="bootCellClip15"><path d="M240.854 200.770 A126 126 0 0 1 226.151 219.932 L201.285 196.744 A92 92 0 0 0 212.020 182.753 Z"/></clipPath><clipPath id="bootCellClip16"><path d="M254.494 170.839 A126 126 0 0 1 245.251 193.153 L215.231 177.191 A92 92 0 0 0 221.980 160.898 Z"/></clipPath><clipPath id="bootCellClip17"><path d="M259.923 138.397 A126 126 0 0 1 256.771 162.344 L223.642 154.695 A92 92 0 0 0 225.944 137.211 Z"/></clipPath><clipPath id="bootCellClip18"><path d="M256.771 105.656 A126 126 0 0 1 259.923 129.603 L225.944 130.789 A92 92 0 0 0 223.642 113.305 Z"/></clipPath><clipPath id="bootCellClip19"><path d="M245.251 74.847 A126 126 0 0 1 254.494 97.161 L221.980 107.102 A92 92 0 0 0 215.231 90.809 Z"/></clipPath><clipPath id="bootCellClip20"><path d="M226.151 48.068 A126 126 0 0 1 240.854 67.230 L212.020 85.247 A92 92 0 0 0 201.285 71.256 Z"/></clipPath><clipPath id="bootCellClip21"><path d="M200.770 27.146 A126 126 0 0 1 219.932 41.849 L196.744 66.715 A92 92 0 0 0 182.753 55.980 Z"/></clipPath><clipPath id="bootCellClip22"><path d="M170.839 13.506 A126 126 0 0 1 193.153 22.749 L177.191 52.769 A92 92 0 0 0 160.898 46.020 Z"/></clipPath><clipPath id="bootCellClip23"><path d="M138.397 8.077 A126 126 0 0 1 162.344 11.229 L154.695 44.358 A92 92 0 0 0 137.211 42.056 Z"/></clipPath></defs><g class="boot-ring-off"><g clip-path="url(#bootCellClip0)"><path d="M105.656 11.229 A126 126 0 0 1 129.603 8.077 L130.789 42.056 A92 92 0 0 0 113.305 44.358 Z" fill="#F4F7F6"/><path d="M105.656 11.229 A126 126 0 0 1 129.603 8.077 L130.789 42.056 A92 92 0 0 0 113.305 44.358 Z" fill="url(#bootGLight)"/><path d="M105.656 11.229 A126 126 0 0 1 129.603 8.077 L130.789 42.056 A92 92 0 0 0 113.305 44.358 Z" fill="none" stroke="rgba(51,65,85,0.061)" stroke-width="1.81" stroke-linejoin="round" transform="translate(0.98,2.20)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip1)"><path d="M74.847 22.749 A126 126 0 0 1 97.161 13.506 L107.102 46.020 A92 92 0 0 0 90.809 52.769 Z" fill="#F4F7F6"/><path d="M74.847 22.749 A126 126 0 0 1 97.161 13.506 L107.102 46.020 A92 92 0 0 0 90.809 52.769 Z" fill="url(#bootGLight)"/><path d="M74.847 22.749 A126 126 0 0 1 97.161 13.506 L107.102 46.020 A92 92 0 0 0 90.809 52.769 Z" fill="none" stroke="rgba(51,65,85,0.061)" stroke-width="1.81" stroke-linejoin="round" transform="translate(0.27,2.40)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip2)"><path d="M48.068 41.849 A126 126 0 0 1 67.230 27.146 L85.247 55.980 A92 92 0 0 0 71.256 66.715 Z" fill="#F4F7F6"/><path d="M48.068 41.849 A126 126 0 0 1 67.230 27.146 L85.247 55.980 A92 92 0 0 0 71.256 66.715 Z" fill="url(#bootGLight)"/><path d="M48.068 41.849 A126 126 0 0 1 67.230 27.146 L85.247 55.980 A92 92 0 0 0 71.256 66.715 Z" fill="none" stroke="rgba(51,65,85,0.068)" stroke-width="1.86" stroke-linejoin="round" transform="translate(-0.34,2.50)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip3)"><path d="M27.146 67.230 A126 126 0 0 1 41.849 48.068 L66.715 71.256 A92 92 0 0 0 55.980 85.247 Z" fill="#F4F7F6"/><path d="M27.146 67.230 A126 126 0 0 1 41.849 48.068 L66.715 71.256 A92 92 0 0 0 55.980 85.247 Z" fill="url(#bootGLight)"/><path d="M27.146 67.230 A126 126 0 0 1 41.849 48.068 L66.715 71.256 A92 92 0 0 0 55.980 85.247 Z" fill="none" stroke="rgba(51,65,85,0.080)" stroke-width="1.95" stroke-linejoin="round" transform="translate(-0.71,2.61)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip4)"><path d="M13.506 97.161 A126 126 0 0 1 22.749 74.847 L52.769 90.809 A92 92 0 0 0 46.020 107.102 Z" fill="#F4F7F6"/><path d="M13.506 97.161 A126 126 0 0 1 22.749 74.847 L52.769 90.809 A92 92 0 0 0 46.020 107.102 Z" fill="url(#bootGLight)"/><path d="M13.506 97.161 A126 126 0 0 1 22.749 74.847 L52.769 90.809 A92 92 0 0 0 46.020 107.102 Z" fill="none" stroke="rgba(51,65,85,0.094)" stroke-width="2.05" stroke-linejoin="round" transform="translate(-0.89,2.76)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip5)"><path d="M8.077 129.603 A126 126 0 0 1 11.229 105.656 L44.358 113.305 A92 92 0 0 0 42.056 130.789 Z" fill="#F4F7F6"/><path d="M8.077 129.603 A126 126 0 0 1 11.229 105.656 L44.358 113.305 A92 92 0 0 0 42.056 130.789 Z" fill="url(#bootGLight)"/><path d="M8.077 129.603 A126 126 0 0 1 11.229 105.656 L44.358 113.305 A92 92 0 0 0 42.056 130.789 Z" fill="none" stroke="rgba(51,65,85,0.109)" stroke-width="2.15" stroke-linejoin="round" transform="translate(-0.93,2.97)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip6)"><path d="M11.229 162.344 A126 126 0 0 1 8.077 138.397 L42.056 137.211 A92 92 0 0 0 44.358 154.695 Z" fill="#F4F7F6"/><path d="M11.229 162.344 A126 126 0 0 1 8.077 138.397 L42.056 137.211 A92 92 0 0 0 44.358 154.695 Z" fill="url(#bootGLight)"/><path d="M11.229 162.344 A126 126 0 0 1 8.077 138.397 L42.056 137.211 A92 92 0 0 0 44.358 154.695 Z" fill="none" stroke="rgba(51,65,85,0.122)" stroke-width="2.25" stroke-linejoin="round" transform="translate(-0.86,3.20)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip7)"><path d="M22.749 193.153 A126 126 0 0 1 13.506 170.839 L46.020 160.898 A92 92 0 0 0 52.769 177.191 Z" fill="#F4F7F6"/><path d="M22.749 193.153 A126 126 0 0 1 13.506 170.839 L46.020 160.898 A92 92 0 0 0 52.769 177.191 Z" fill="url(#bootGLight)"/><path d="M22.749 193.153 A126 126 0 0 1 13.506 170.839 L46.020 160.898 A92 92 0 0 0 52.769 177.191 Z" fill="none" stroke="rgba(51,65,85,0.135)" stroke-width="2.35" stroke-linejoin="round" transform="translate(-0.71,3.42)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip8)"><path d="M41.849 219.932 A126 126 0 0 1 27.146 200.770 L55.980 182.753 A92 92 0 0 0 66.715 196.744 Z" fill="#F4F7F6"/><path d="M41.849 219.932 A126 126 0 0 1 27.146 200.770 L55.980 182.753 A92 92 0 0 0 66.715 196.744 Z" fill="url(#bootGLight)"/><path d="M41.849 219.932 A126 126 0 0 1 27.146 200.770 L55.980 182.753 A92 92 0 0 0 66.715 196.744 Z" fill="none" stroke="rgba(51,65,85,0.146)" stroke-width="2.43" stroke-linejoin="round" transform="translate(-0.48,3.62)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip9)"><path d="M67.230 240.854 A126 126 0 0 1 48.068 226.151 L71.256 201.285 A92 92 0 0 0 85.247 212.020 Z" fill="#F4F7F6"/><path d="M67.230 240.854 A126 126 0 0 1 48.068 226.151 L71.256 201.285 A92 92 0 0 0 85.247 212.020 Z" fill="url(#bootGLight)"/><path d="M67.230 240.854 A126 126 0 0 1 48.068 226.151 L71.256 201.285 A92 92 0 0 0 85.247 212.020 Z" fill="none" stroke="rgba(51,65,85,0.155)" stroke-width="2.49" stroke-linejoin="round" transform="translate(-0.19,3.79)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip10)"><path d="M97.161 254.494 A126 126 0 0 1 74.847 245.251 L90.809 215.231 A92 92 0 0 0 107.102 221.980 Z" fill="#F4F7F6"/><path d="M97.161 254.494 A126 126 0 0 1 74.847 245.251 L90.809 215.231 A92 92 0 0 0 107.102 221.980 Z" fill="url(#bootGLight)"/><path d="M97.161 254.494 A126 126 0 0 1 74.847 245.251 L90.809 215.231 A92 92 0 0 0 107.102 221.980 Z" fill="none" stroke="rgba(51,65,85,0.162)" stroke-width="2.54" stroke-linejoin="round" transform="translate(0.14,3.89)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip11)"><path d="M129.603 259.923 A126 126 0 0 1 105.656 256.771 L113.305 223.642 A92 92 0 0 0 130.789 225.944 Z" fill="#F4F7F6"/><path d="M129.603 259.923 A126 126 0 0 1 105.656 256.771 L113.305 223.642 A92 92 0 0 0 130.789 225.944 Z" fill="url(#bootGLight)"/><path d="M129.603 259.923 A126 126 0 0 1 105.656 256.771 L113.305 223.642 A92 92 0 0 0 130.789 225.944 Z" fill="none" stroke="rgba(51,65,85,0.167)" stroke-width="2.58" stroke-linejoin="round" transform="translate(0.49,3.93)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip12)"><path d="M162.344 256.771 A126 126 0 0 1 138.397 259.923 L137.211 225.944 A92 92 0 0 0 154.695 223.642 Z" fill="#F4F7F6"/><path d="M162.344 256.771 A126 126 0 0 1 138.397 259.923 L137.211 225.944 A92 92 0 0 0 154.695 223.642 Z" fill="url(#bootGLight)"/><path d="M162.344 256.771 A126 126 0 0 1 138.397 259.923 L137.211 225.944 A92 92 0 0 0 154.695 223.642 Z" fill="none" stroke="rgba(51,65,85,0.170)" stroke-width="2.60" stroke-linejoin="round" transform="translate(0.86,3.90)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip13)"><path d="M193.153 245.251 A126 126 0 0 1 170.839 254.494 L160.898 221.980 A92 92 0 0 0 177.191 215.231 Z" fill="#F4F7F6"/><path d="M193.153 245.251 A126 126 0 0 1 170.839 254.494 L160.898 221.980 A92 92 0 0 0 177.191 215.231 Z" fill="url(#bootGLight)"/><path d="M193.153 245.251 A126 126 0 0 1 170.839 254.494 L160.898 221.980 A92 92 0 0 0 177.191 215.231 Z" fill="none" stroke="rgba(51,65,85,0.170)" stroke-width="2.60" stroke-linejoin="round" transform="translate(1.21,3.80)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip14)"><path d="M219.932 226.151 A126 126 0 0 1 200.770 240.854 L182.753 212.020 A92 92 0 0 0 196.744 201.285 Z" fill="#F4F7F6"/><path d="M219.932 226.151 A126 126 0 0 1 200.770 240.854 L182.753 212.020 A92 92 0 0 0 196.744 201.285 Z" fill="url(#bootGLight)"/><path d="M219.932 226.151 A126 126 0 0 1 200.770 240.854 L182.753 212.020 A92 92 0 0 0 196.744 201.285 Z" fill="none" stroke="rgba(51,65,85,0.167)" stroke-width="2.58" stroke-linejoin="round" transform="translate(1.54,3.65)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip15)"><path d="M240.854 200.770 A126 126 0 0 1 226.151 219.932 L201.285 196.744 A92 92 0 0 0 212.020 182.753 Z" fill="#F4F7F6"/><path d="M240.854 200.770 A126 126 0 0 1 226.151 219.932 L201.285 196.744 A92 92 0 0 0 212.020 182.753 Z" fill="url(#bootGLight)"/><path d="M240.854 200.770 A126 126 0 0 1 226.151 219.932 L201.285 196.744 A92 92 0 0 0 212.020 182.753 Z" fill="none" stroke="rgba(51,65,85,0.162)" stroke-width="2.54" stroke-linejoin="round" transform="translate(1.83,3.43)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip16)"><path d="M254.494 170.839 A126 126 0 0 1 245.251 193.153 L215.231 177.191 A92 92 0 0 0 221.980 160.898 Z" fill="#F4F7F6"/><path d="M254.494 170.839 A126 126 0 0 1 245.251 193.153 L215.231 177.191 A92 92 0 0 0 221.980 160.898 Z" fill="url(#bootGLight)"/><path d="M254.494 170.839 A126 126 0 0 1 245.251 193.153 L215.231 177.191 A92 92 0 0 0 221.980 160.898 Z" fill="none" stroke="rgba(51,65,85,0.155)" stroke-width="2.49" stroke-linejoin="round" transform="translate(2.07,3.18)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip17)"><path d="M259.923 138.397 A126 126 0 0 1 256.771 162.344 L223.642 154.695 A92 92 0 0 0 225.944 137.211 Z" fill="#F4F7F6"/><path d="M259.923 138.397 A126 126 0 0 1 256.771 162.344 L223.642 154.695 A92 92 0 0 0 225.944 137.211 Z" fill="url(#bootGLight)"/><path d="M259.923 138.397 A126 126 0 0 1 256.771 162.344 L223.642 154.695 A92 92 0 0 0 225.944 137.211 Z" fill="none" stroke="rgba(51,65,85,0.146)" stroke-width="2.43" stroke-linejoin="round" transform="translate(2.23,2.89)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip18)"><path d="M256.771 105.656 A126 126 0 0 1 259.923 129.603 L225.944 130.789 A92 92 0 0 0 223.642 113.305 Z" fill="#F4F7F6"/><path d="M256.771 105.656 A126 126 0 0 1 259.923 129.603 L225.944 130.789 A92 92 0 0 0 223.642 113.305 Z" fill="url(#bootGLight)"/><path d="M256.771 105.656 A126 126 0 0 1 259.923 129.603 L225.944 130.789 A92 92 0 0 0 223.642 113.305 Z" fill="none" stroke="rgba(51,65,85,0.135)" stroke-width="2.35" stroke-linejoin="round" transform="translate(2.33,2.60)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip19)"><path d="M245.251 74.847 A126 126 0 0 1 254.494 97.161 L221.980 107.102 A92 92 0 0 0 215.231 90.809 Z" fill="#F4F7F6"/><path d="M245.251 74.847 A126 126 0 0 1 254.494 97.161 L221.980 107.102 A92 92 0 0 0 215.231 90.809 Z" fill="url(#bootGLight)"/><path d="M245.251 74.847 A126 126 0 0 1 254.494 97.161 L221.980 107.102 A92 92 0 0 0 215.231 90.809 Z" fill="none" stroke="rgba(51,65,85,0.123)" stroke-width="2.25" stroke-linejoin="round" transform="translate(2.35,2.33)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip20)"><path d="M226.151 48.068 A126 126 0 0 1 240.854 67.230 L212.020 85.247 A92 92 0 0 0 201.285 71.256 Z" fill="#F4F7F6"/><path d="M226.151 48.068 A126 126 0 0 1 240.854 67.230 L212.020 85.247 A92 92 0 0 0 201.285 71.256 Z" fill="url(#bootGLight)"/><path d="M226.151 48.068 A126 126 0 0 1 240.854 67.230 L212.020 85.247 A92 92 0 0 0 201.285 71.256 Z" fill="none" stroke="rgba(51,65,85,0.109)" stroke-width="2.15" stroke-linejoin="round" transform="translate(2.29,2.10)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip21)"><path d="M200.770 27.146 A126 126 0 0 1 219.932 41.849 L196.744 66.715 A92 92 0 0 0 182.753 55.980 Z" fill="#F4F7F6"/><path d="M200.770 27.146 A126 126 0 0 1 219.932 41.849 L196.744 66.715 A92 92 0 0 0 182.753 55.980 Z" fill="url(#bootGLight)"/><path d="M200.770 27.146 A126 126 0 0 1 219.932 41.849 L196.744 66.715 A92 92 0 0 0 182.753 55.980 Z" fill="none" stroke="rgba(51,65,85,0.094)" stroke-width="2.05" stroke-linejoin="round" transform="translate(2.16,1.94)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip22)"><path d="M170.839 13.506 A126 126 0 0 1 193.153 22.749 L177.191 52.769 A92 92 0 0 0 160.898 46.020 Z" fill="#F4F7F6"/><path d="M170.839 13.506 A126 126 0 0 1 193.153 22.749 L177.191 52.769 A92 92 0 0 0 160.898 46.020 Z" fill="url(#bootGLight)"/><path d="M170.839 13.506 A126 126 0 0 1 193.153 22.749 L177.191 52.769 A92 92 0 0 0 160.898 46.020 Z" fill="none" stroke="rgba(51,65,85,0.080)" stroke-width="1.95" stroke-linejoin="round" transform="translate(1.92,1.89)" filter="url(#bootRimSoft)"/></g><g clip-path="url(#bootCellClip23)"><path d="M138.397 8.077 A126 126 0 0 1 162.344 11.229 L154.695 44.358 A92 92 0 0 0 137.211 42.056 Z" fill="#F4F7F6"/><path d="M138.397 8.077 A126 126 0 0 1 162.344 11.229 L154.695 44.358 A92 92 0 0 0 137.211 42.056 Z" fill="url(#bootGLight)"/><path d="M138.397 8.077 A126 126 0 0 1 162.344 11.229 L154.695 44.358 A92 92 0 0 0 137.211 42.056 Z" fill="none" stroke="rgba(51,65,85,0.068)" stroke-width="1.86" stroke-linejoin="round" transform="translate(1.55,1.99)" filter="url(#bootRimSoft)"/></g></g><g class="boot-ring-on"><g class="boot-slice"><path d="M105.656 11.229 A126 126 0 0 1 129.603 8.077 L130.789 42.056 A92 92 0 0 0 113.305 44.358 Z" fill="rgb(74,166,142)" stroke="rgb(74,166,142)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M74.847 22.749 A126 126 0 0 1 97.161 13.506 L107.102 46.020 A92 92 0 0 0 90.809 52.769 Z" fill="rgb(76,168,144)" stroke="rgb(76,168,144)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M48.068 41.849 A126 126 0 0 1 67.230 27.146 L85.247 55.980 A92 92 0 0 0 71.256 66.715 Z" fill="rgb(77,170,145)" stroke="rgb(77,170,145)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M27.146 67.230 A126 126 0 0 1 41.849 48.068 L66.715 71.256 A92 92 0 0 0 55.980 85.247 Z" fill="rgb(79,172,147)" stroke="rgb(79,172,147)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M13.506 97.161 A126 126 0 0 1 22.749 74.847 L52.769 90.809 A92 92 0 0 0 46.020 107.102 Z" fill="rgb(81,174,149)" stroke="rgb(81,174,149)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M8.077 129.603 A126 126 0 0 1 11.229 105.656 L44.358 113.305 A92 92 0 0 0 42.056 130.789 Z" fill="rgb(83,176,151)" stroke="rgb(83,176,151)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M11.229 162.344 A126 126 0 0 1 8.077 138.397 L42.056 137.211 A92 92 0 0 0 44.358 154.695 Z" fill="rgb(84,177,152)" stroke="rgb(84,177,152)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M22.749 193.153 A126 126 0 0 1 13.506 170.839 L46.020 160.898 A92 92 0 0 0 52.769 177.191 Z" fill="rgb(86,179,154)" stroke="rgb(86,179,154)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M41.849 219.932 A126 126 0 0 1 27.146 200.770 L55.980 182.753 A92 92 0 0 0 66.715 196.744 Z" fill="rgb(88,181,156)" stroke="rgb(88,181,156)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M67.230 240.854 A126 126 0 0 1 48.068 226.151 L71.256 201.285 A92 92 0 0 0 85.247 212.020 Z" fill="rgb(90,183,158)" stroke="rgb(90,183,158)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M97.161 254.494 A126 126 0 0 1 74.847 245.251 L90.809 215.231 A92 92 0 0 0 107.102 221.980 Z" fill="rgb(91,185,159)" stroke="rgb(91,185,159)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M129.603 259.923 A126 126 0 0 1 105.656 256.771 L113.305 223.642 A92 92 0 0 0 130.789 225.944 Z" fill="rgb(93,187,161)" stroke="rgb(93,187,161)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M162.344 256.771 A126 126 0 0 1 138.397 259.923 L137.211 225.944 A92 92 0 0 0 154.695 223.642 Z" fill="rgb(95,189,163)" stroke="rgb(95,189,163)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M193.153 245.251 A126 126 0 0 1 170.839 254.494 L160.898 221.980 A92 92 0 0 0 177.191 215.231 Z" fill="rgb(97,191,165)" stroke="rgb(97,191,165)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M219.932 226.151 A126 126 0 0 1 200.770 240.854 L182.753 212.020 A92 92 0 0 0 196.744 201.285 Z" fill="rgb(98,193,166)" stroke="rgb(98,193,166)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M240.854 200.770 A126 126 0 0 1 226.151 219.932 L201.285 196.744 A92 92 0 0 0 212.020 182.753 Z" fill="rgb(100,195,168)" stroke="rgb(100,195,168)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M254.494 170.839 A126 126 0 0 1 245.251 193.153 L215.231 177.191 A92 92 0 0 0 221.980 160.898 Z" fill="rgb(102,197,170)" stroke="rgb(102,197,170)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M259.923 138.397 A126 126 0 0 1 256.771 162.344 L223.642 154.695 A92 92 0 0 0 225.944 137.211 Z" fill="rgb(104,199,172)" stroke="rgb(104,199,172)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M256.771 105.656 A126 126 0 0 1 259.923 129.603 L225.944 130.789 A92 92 0 0 0 223.642 113.305 Z" fill="rgb(105,200,173)" stroke="rgb(105,200,173)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M245.251 74.847 A126 126 0 0 1 254.494 97.161 L221.980 107.102 A92 92 0 0 0 215.231 90.809 Z" fill="rgb(107,202,175)" stroke="rgb(107,202,175)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M226.151 48.068 A126 126 0 0 1 240.854 67.230 L212.020 85.247 A92 92 0 0 0 201.285 71.256 Z" fill="rgb(109,204,177)" stroke="rgb(109,204,177)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M200.770 27.146 A126 126 0 0 1 219.932 41.849 L196.744 66.715 A92 92 0 0 0 182.753 55.980 Z" fill="rgb(111,206,179)" stroke="rgb(111,206,179)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M170.839 13.506 A126 126 0 0 1 193.153 22.749 L177.191 52.769 A92 92 0 0 0 160.898 46.020 Z" fill="rgb(112,208,180)" stroke="rgb(112,208,180)" stroke-width="3" stroke-linejoin="round"/></g><g class="boot-slice"><path d="M138.397 8.077 A126 126 0 0 1 162.344 11.229 L154.695 44.358 A92 92 0 0 0 137.211 42.056 Z" fill="rgb(114,210,182)" stroke="rgb(114,210,182)" stroke-width="3" stroke-linejoin="round"/></g></g></svg>
+      <div class="boot-center">
+        <div class="cap">加载中</div>
+        <div class="num"><span id="bootNum">0</span><span class="pct" id="bootPct">%</span></div>
+      </div>
+    </div>
+    <div class="boot-sub"><span id="bootSubTxt">正在汇聚你的工作台</span></div>
+    <div class="boot-bottom">
+      <div class="boot-loadline"></div>
+      <div class="boot-cap">DATA WORKBENCH · V2.4.0</div>
+    </div>
+  </div>
+  <script>
+    // 🟢 v229.45 兜底②：若 boot-splash.js 文件本身加载/执行失败（__bootSplashStarted 未置位），
+    // 启动屏会因 CSS 默认 display:flex 永久遮挡 —— 12s 后强制退场。
+    // 若 JS 已接管（started=true），其内部自带 14s 强制收尾，此处不干预。
+    setTimeout(function () {
+      if (window.__bootSplashStarted) return;
+      var el = document.getElementById('bootSplash');
+      if (!el || el.style.display === 'none') return;
+      el.classList.add('is-leaving');
+      setTimeout(function () { el.style.display = 'none'; }, 700);
+    }, 12000);
+  </script>
+
   <div class="app-container" id="appContainer">
     <!-- 固定左侧功能栏 -->
     <aside class="sidebar-panel" id="sidebarPanel">
@@ -370,6 +464,14 @@ body{
 
       <!-- 导航滚动区：小屏/移动端高度不足时内部滚动，保证所有功能模块可达 -->
       <nav class="sidebar-nav">
+      <!-- 🟢 v229.27：个人工作台分区（置顶业务模块前，每日高频个人入口） -->
+      <div class="sidebar-section">
+        <a class="sidebar-item" data-module="workTasks" href="#workTasks">
+          <span class="item-icon" style="background:var(--accent-warm-light);">📌</span>
+          <span class="item-text">我的任务</span>
+          <span class="item-badge tag-danger" id="badgeWorkTasks" hidden></span>
+        </a>
+      </div>
       <div class="sidebar-section">
         <a class="sidebar-item active" data-module="dashboard" href="#dashboard">
           <span class="item-icon" style="background:var(--accent-lavender-light);">📊</span>
@@ -503,6 +605,10 @@ body{
               <line x1="3" y1="12" x2="21" y2="12"></line>
             </svg>
           </button>
+          <!-- 🟢 v229.27：我的任务铃铛（开屏即见逾期数） -->
+          <button class="topbar-qr-scan" id="wtBell" title="我的任务" aria-label="我的任务" onclick="App.go('workTasks')" style="position:relative;font-size:16px">
+            📌<span class="wt-bell-dot" id="wtBellDot" hidden></span>
+          </button>
           <button class="theme-toggle" id="themeToggle" title="切换主题">🌙</button>
           <span class="current-time" id="currentTime">--:--</span>
           <div class="sync-status" id="syncStatus" title="云端连接状态">
@@ -533,8 +639,8 @@ body{
     </nav>
   </div>
 
-  <!-- 加载遮罩 -->
-  <div class="loading-overlay" id="loadingOverlay">
+  <!-- 加载遮罩（启动期由 BootSplash 接管，默认隐藏防止旧 spinner 闪现；业务加载 LoadingHUD.show() 会用行内样式 display:flex 覆盖） -->
+  <div class="loading-overlay" id="loadingOverlay" style="display:none">
     <div class="loading-spinner" id="loadingSpinner"></div>
     <div class="loading-text" id="loadingText">正在初始化...</div>
     <div class="loading-sub" id="loadingSub" hidden></div>
@@ -630,46 +736,56 @@ body{
     </div>
   </div>
 
-  <script defer src="js/table-utils.js?v=229.17"></script>
+  <script defer src="js/table-utils.js?v=229.55"></script>
   <!-- 🟢 v228.17：恢复 qrcode.min.js 预载。二维码列（现存量列表 / 存货档案）依赖全局 qrcode 函数，
        此前 P0-1 性能优化误将其移除，导致 QR.thumb 全部返回“—”。文件仅 57KB，继续 defer 不阻塞首屏。 -->
   <script defer src="lib/qrcode.min.js?v=55"></script>
-  <script defer src="js/qr-util.js?v=229.17"></script>
-  <script defer src="js/qr-scan.js?v=229.17"></script>
-  <script defer src="js/search-select.js?v=229.17"></script>
-  <script defer src="js/entity-links.js?v=229.17"></script>
-  <script defer src="js/db.js?v=229.17"></script>
-  <script defer src="js/config.js?v=229.17"></script>
+  <script defer src="js/qr-util.js?v=229.55"></script>
+  <script defer src="js/qr-scan.js?v=229.55"></script>
+  <script defer src="js/search-select.js?v=229.55"></script>
+  <script defer src="js/entity-links.js?v=229.55"></script>
+  <script defer src="js/db.js?v=229.55"></script>
+  <script defer src="js/config.js?v=229.55"></script>
   <!-- 🟢 v200：工作台主题弹窗（替换浏览器原生 alert/confirm/prompt） -->
-  <script defer src="js/modal.js?v=229.17"></script>
-  <script defer src="js/sync.js?v=229.17"></script>
-  <script defer src="js/data-loader.js?v=229.17"></script>
-  <script defer src="js/dashboard.js?v=229.17"></script>
-  <script defer src="js/supplier.js?v=229.17"></script>
-  <script defer src="js/query.js?v=229.17"></script>
-  <script defer src="js/reconciliation.js?v=229.17"></script>
-  <script defer src="js/order-track.js?v=229.17"></script>
-  <script defer src="js/stock-alert-config.js?v=229.17"></script>
-  <script defer src="js/stock-alert-rules.js?v=229.17"></script>
-  <script defer src="js/inventory-alert.js?v=229.17"></script>
-  <script defer src="js/order-check.js?v=229.17"></script>
-  <script defer src="js/filter-layout.js?v=229.17"></script>
-  <script defer src="js/components/datepicker.js?v=229.17"></script>
-  <script defer src="js/orders.js?v=229.17"></script>
-  <script defer src="js/inbound.js?v=229.17"></script>
-  <script defer src="js/stock.js?v=229.17"></script>
-  <script defer src="js/pricing.js?v=229.17"></script>
-  <script defer src="js/low-turnover.js?v=229.17"></script>
-  <script defer src="js/breach.js?v=229.17"></script>
-  <script defer src="js/outbound.js?v=229.17"></script>
-  <script defer src="js/stock-detail.js?v=229.17"></script>
-  <script defer src="js/supplier-detail.js?v=229.17"></script>
-  <script defer src="js/order-detail.js?v=229.17"></script>
-  <script defer src="js/stocktake.js?v=229.17"></script>
-  <script defer src="js/stocktake-records.js?v=229.17"></script>
-  <script defer src="js/color-theme.js?v=229.17"></script>
-  <script defer src="js/app.js?v=229.17"></script>
-  <script defer src="js/globals.js?v=229.17"></script>
+  <script defer src="js/modal.js?v=229.55"></script>
+  <script defer src="js/sync.js?v=229.55"></script>
+  <script defer src="js/data-loader.js?v=229.55"></script>
+  <script defer src="js/dashboard.js?v=229.55"></script>
+  <script defer src="js/supplier.js?v=229.55"></script>
+  <script defer src="js/query.js?v=229.55"></script>
+  <script defer src="js/reconciliation.js?v=229.55"></script>
+  <script defer src="js/order-track.js?v=229.55"></script>
+  <script defer src="js/stock-alert-config.js?v=229.55"></script>
+  <script defer src="js/stock-alert-rules.js?v=229.55"></script>
+  <script defer src="js/inventory-alert.js?v=229.55"></script>
+  <script defer src="js/order-check.js?v=229.55"></script>
+  <script defer src="js/filter-layout.js?v=229.55"></script>
+  <script defer src="js/components/datepicker.js?v=229.55"></script>
+  <script defer src="js/orders.js?v=229.55"></script>
+  <script defer src="js/inbound.js?v=229.55"></script>
+  <script defer src="js/stock.js?v=229.55"></script>
+  <script defer src="js/pricing.js?v=229.55"></script>
+  <script defer src="js/low-turnover.js?v=229.55"></script>
+  <script defer src="js/breach.js?v=229.55"></script>
+  <script defer src="js/outbound.js?v=229.55"></script>
+  <script defer src="js/stock-detail.js?v=229.55"></script>
+  <script defer src="js/supplier-detail.js?v=229.55"></script>
+  <script defer src="js/order-detail.js?v=229.55"></script>
+  <script defer src="js/stocktake.js?v=229.55"></script>
+  <script defer src="js/stocktake-records.js?v=229.55"></script>
+  <script defer src="js/color-theme.js?v=229.55"></script>
+  <!-- 🟢 v229.39：工作任务 · 云端同步独立分包（load/save/轻轮询/per-item 合并）；须在 work-tasks.js 之前加载 -->
+  <script defer src="js/worktasks-sync.js?v=229.55"></script>
+  <!-- 🟢 v229.27：工作任务模块（个人备忘录 + 看进度 + 逾期提醒）；须在 app.js 之前加载以注册全局 WorkTasksModule -->
+  <script defer src="js/work-tasks.js?v=229.55"></script>
+  <!-- 🟢 v229.37：移动端手势（左缘右滑开抽屉 / 右缘左滑返回）；右缘返回改为 Q弹果冻玻璃态；
+       v229.35 起弹窗打开时右滑 = 关闭最上层弹窗（安卓返回键惯例），左缘拉抽屉仍跳过弹窗。
+       v229.37 起按 z-index 取最上层弹窗并分体系关闭（WBModal #wbModalRoot / 遗留 #modalOverlay）。
+       乳白微蓝玻璃(blur20)+外投影+内暗影厚度+2px 白边外晕，单峰高斯波形(σ42→82/H10→100)，
+       拖拽跟手+速度张力，松手 spring(200/20/0.8)+果冻余震，达阈值液体收缩回右缘。仅 ≤768px 生效，须在 app.js 前加载 -->
+    <script defer src="js/mobile-gestures.js?v=229.55"></script>
+    <script defer src="js/app.js?v=229.55"></script>
+  <script defer src="js/globals.js?v=229.55"></script>
   <script>
   /* 🟢 v228.57：脚本加载完整性守护 —— 解决「发布网关间歇性 502 → 核心 JS 没下来 →
         App is not defined → 永久白屏」，且用户刷新还可能再撞上同一份坏缓存。
@@ -737,17 +853,16 @@ body{
       window.addEventListener('load', function() {
         // 🟢 v227.21：注册 URL 带版本戳 + updateViaCache:'none'，确保每次发版浏览器都重新拉取 SW 脚本，
         //   避免「改了 CACHE_NAME 但旧 ?v= 被 CDN 缓存、SW 永不更新」的卡死。
-        navigator.serviceWorker.register('service-worker.js?v=229.17', { updateViaCache: 'none' }).then(function(reg) {
+        navigator.serviceWorker.register('service-worker.js?v=229.55', { updateViaCache: 'none' }).then(function(reg) {
           console.log('[PWA] Service Worker 注册成功:', reg.scope);
         }).catch(function(err) {
           console.warn('[PWA] Service Worker 注册失败:', err);
         });
-        // 🟢 v227.21：新 SW 接管控制时自动刷新一次，让新版资源立即生效（防「发了版却看不到」）。
-        let __swRefreshing = false;
+        // 🟢 v229.45：不再因 controllerchange 自动 reload——这正是「启动屏偶发 0→40% 后从 0 重来」的根因
+        //   （发新版 → SW skipWaiting → controllerchange → 页面重载 → 启动进度清零重跑）。
+        //   html 为 network-first、静态资源带 ?v= 版本戳，新 SW 接管后下一次导航自然使用新版资源，无需强刷。
         navigator.serviceWorker.addEventListener('controllerchange', function() {
-          if (__swRefreshing) return;
-          __swRefreshing = true;
-          location.reload();
+          console.log('[PWA] 新 Service Worker 已接管控制（本次会话不刷新）');
         });
       });
     }
@@ -859,7 +974,7 @@ body{
       // ===== 动态清单：优先用「目录列表扫描」实时获取当前部署的所有源码文件 =====
       // 这样以后新增任何文件，无需手动更新 SOURCE_FILES.json，下载的源码包都会自动包含。
       // 仅当服务器不支持目录列表（如 GitHub Pages）时，才回退到 SOURCE_FILES.json / 内置清单。
-      var SCAN_ROOTS = ['js', 'lib', 'css', 'icons', 'bridge', 'docs'];
+      var SCAN_ROOTS = ['js', 'lib', 'css', 'icons', 'bridge', 'docs', 'assets'];
       var SKIP_DIRS  = new Set(['node_modules', '.git', 'tools', 'releases']);
       var ROOT_FILES = ['index.html', 'manifest.json', 'service-worker.js',
                         '.gitignore', '.gitlab-ci.yml', '.nojekyll', 'SOURCE_FILES.json',

@@ -221,21 +221,29 @@ const COLLAPSE_KEEP = {
   inbound:           ['存货编码','存货名称','规格型号','入库量'],
   oblTableArea:      ['存货编码','存货名称','规格型号','出库数量'],   // 出库列表（表头叫“出库数量”）
   orders:            ['存货编码','存货名称','规格型号','订单量'],
-  trackTableArea:    ['存货编码','存货名称','规格型号','未入库订单量'], // 订单跟踪（表头叫“未入库订单量”）
+  orderTrack:        ['存货编码','存货名称','规格型号','未入库订单量'], // 订单跟踪：🟢 v229.40 表格带 data-table-key="orderTrack"，_deriveTableKey 优先取它（旧键 trackTableArea 永远匹配不到 → 一直在走前3列回退）
+  ltTableArea:       ['存货编码','存货名称','规格型号','现存数量'],   // 🟢 v229.40 低周转材料（表头“现存数量”，首列“仓库”收起态隐藏）
+  breachTableArea:   ['公司名称','存货名称','规格型号','扣款金额'],   // 🟢 v229.40 违约台账
   stockTableArea:    ['存货编码','存货名称','规格型号','现存数量'],   // 现存量（表头叫“现存数量”）
   inventoryAlert:    ['存货编码','存货名称','规格型号','补货值'],
   stArea:            ['存货编码','存货名称','规格型号','现存量','盘点数量'],
   stRecArea:         ['存货编码','存货名称','规格型号','现存量','盘点数量'],   // 盘点记录列表：v228.43 同步补「现存量」
   pricingTableArea:  ['存货编码','存货名称','规格型号','含税单价'],
   recTableArea:      ['存货编码','存货名称','规格型号','含税金额'],
-  supplierTableArea: ['供应商','合同到期日','已入库金额'], // 供应商管理（特殊3列：表头“供应商/合同到期日/已入库金额(元)”）
+  supplierTableArea: ['供应商','本期合同到期','已入库金额'], // 🟢 v229.40 供应商管理（特殊3列）：旧 token「合同到期日」匹配不到实际表头「本期合同到期」导致只剩2列，已修正
   'stk-alert':       ['分类','现存量','补货值'],           // 档案页-库存预警
 };
 const QUERY_KEEP = {
   stock:   ['存货编码','存货名称','规格型号','现存量'],
-  orders:  ['存货编码','存货名称','规格型号','订单量'],
+  // 🟢 v229.40 订单板块：最左侧增加「订单编号」列；旧 token「存货编码」匹配不到实际表头「存货编号」（该板块派生列名叫“存货编号”），已按实际表头修正
+  orders:  ['订单编号','存货名称','规格型号','订单量'],
   inbound: ['存货编码','存货名称','规格型号','入库量'],
   pricing: ['存货编码','存货名称','规格型号','含税单价'],
+};
+// 🟢 v229.40：收起态指定列「自动换行完整显示」（列头文字匹配）。收起态默认 nowrap+ellipsis 截断，
+//   但供应商名称等长文本列需要换行显示完整——命中列覆盖为 white-space:normal（等宽列内多行撑高行）。
+const COLLAPSE_WRAP = {
+  supplierTableArea: ['供应商'],
 };
 
 const TableStickyOverlay = {
@@ -298,6 +306,9 @@ const TableStickyOverlay = {
     } catch (e) { /* 隐私模式 / 配额超限：静默降级为不记忆，不影响功能 */ }
   },
 
+  // 🟢 v229.45：会话级手动展开记忆（内存，不落盘）——同一模块内翻页/重渲染后保持用户手动展开态；
+  //   模块切换（uninstallAll）时清空 → 「每次进入工作台默认收起」（v228.93）语义不变。
+  _sessionExpand: {},
   installColumnCollapse(wrap, table) {
     // 🟢 v228.03：豁免标记 —— 带 .no-col-collapse 的表格（如「违约扣款规则」这类静态说明表）
     //   移动端一律全部显示：不折叠任何列、不挂载「展开剩余 N 列」按钮。
@@ -322,10 +333,16 @@ const TableStickyOverlay = {
     wrap._colCollapseBtn = btn;
     btn.addEventListener('click', () => {
       wrap._colCollapsed = !wrap._colCollapsed;
+      // 🟢 v229.45：记录用户手动意图 → 翻页重渲染后按 tableKey 恢复
+      const sk = TableUtils._deriveTableKey(table);
+      if (sk) this._sessionExpand[sk] = !wrap._colCollapsed;
       this._applyCollapse(wrap, table);   // 🟢 v228.93：仅当次会话展开，不落盘记忆（每次进入默认收起）
     });
     if (wrap._colCollapsed === undefined) {
-      wrap._colCollapsed = true;   // 🟢 v228.93：每次进入默认收起，不读取历史记忆状态
+      // 🟢 v229.45：翻页/重渲染重建 wrap 时，若用户本会话手动展开过同 key 表格 → 保持展开；
+      //   否则维持 v228.93 默认收起
+      const sk = TableUtils._deriveTableKey(table);
+      wrap._colCollapsed = !(sk && this._sessionExpand[sk] === true);
     }
     this._applyCollapse(wrap, table);
   },
@@ -349,7 +366,8 @@ const TableStickyOverlay = {
     const btn = wrap._colCollapseBtn;
     // 🟢 v227.50：移动端收起态保留列策略
     //   有模块配置（COLLAPSE_KEEP / QUERY_KEEP）→ 按列头文字匹配保留指定列（多为“存货名称+规格型号+关键列”）；
-    //   无配置（订货核对 / 出库模块 / 违约 / 低周转 / 档案页非配置区等）→ 回退“保留前 3(+复选框) 列”（v227.49 行为，满足“不改”）。
+    //   无配置（订货核对 / 出库模块 / 档案页非配置区等）→ 回退“保留前 3(+复选框) 列”（v227.49 行为，满足“不改”）。
+    //   🟢 v229.40：违约台账 / 低周转材料 已补配置，订单跟踪配置键修正为 orderTrack。
     const keepTokens = this._resolveKeepConfig(table);
     const keepIdx = keepTokens ? this._resolveKeepHeaders(table, keepTokens) : null;
     const useKeepIdx = !!(keepIdx && keepIdx.length > 0 && keepIdx.length < colCount);
@@ -405,7 +423,12 @@ const TableStickyOverlay = {
       const keepMin = Math.min(3 + (hasCheckCol ? 1 : 0), Math.max(1, colCount - 1));
       if (colCount <= keepMin) { if (btn) btn.style.display = 'none'; return; }
       if (!wrap._colCollapsed) {
-        table.style.tableLayout = 'fixed'; table.style.width = 'auto'; table.style.minWidth = '0';
+        // 🟢 v229.40：展开态布局策略——有显式列宽（th inline width / colgroup）的表格维持 fixed 布局
+        //   （列宽按声明生效、总宽超出容器 → 横向滚动条）；无任何显式列宽的表格在 fixed+width:auto 下
+        //   会被压进容器宽 → 无溢出 → 无横向滚动条、滑不到右侧（违约台账 13 列实测）。
+        //   此类表格回退 auto 自然布局：移动端 td nowrap + min-width:88px 兜底，内容自然撑宽可滑动。
+        if (this._hasWidthSpec(table, ths)) { table.style.tableLayout = 'fixed'; table.style.width = 'auto'; table.style.minWidth = '0'; }
+        else { table.style.tableLayout = 'auto'; table.style.width = ''; table.style.minWidth = ''; }
         // 🟢 v228.77：幂等写入（不替换文本节点 → 不再触发 MutationObserver 自激环）
         if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, '收起 ▴'); btn.dataset.state = 'expanded'; }
         return;
@@ -427,10 +450,17 @@ const TableStickyOverlay = {
 
     // —— 按列头文字匹配保留（useKeepIdx）：只隐藏不在 keepIdx 的列，可见列等宽分配 ——
     if (!wrap._colCollapsed) {
-      // 展开态：还原所有列，恢复自然列宽，允许横向滑动看剩余列
-      table.style.tableLayout = 'fixed';
-      table.style.width = 'auto';
-      table.style.minWidth = '0';
+      // 展开态：还原所有列，允许横向滑动看剩余列
+      // 🟢 v229.40：同上——无显式列宽的表格回退 auto 自然布局，保证展开后有横向滚动条可滑到右侧
+      if (this._hasWidthSpec(table, ths)) {
+        table.style.tableLayout = 'fixed';
+        table.style.width = 'auto';
+        table.style.minWidth = '0';
+      } else {
+        table.style.tableLayout = 'auto';
+        table.style.width = '';
+        table.style.minWidth = '';
+      }
       if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, '收起 ▴'); btn.dataset.state = 'expanded'; }
       return;
     }
@@ -499,6 +529,40 @@ const TableStickyOverlay = {
       }
       cols.forEach((c, i) => { c.style.width = (visIdx.has(i) ? each : 0) + 'px'; });
     }
+    // 🟢 v229.40：按模块配置把指定可见列覆盖为「自动换行完整显示」（如供应商名称长文本）
+    this._applyColWrap(table);
+  },
+
+  // 🟢 v229.40：表格是否带显式列宽（th inline width 或 colgroup col width）——决定展开态用 fixed 还是 auto 布局
+  _hasWidthSpec(table, ths) {
+    if (Array.from(ths).some(th => { const w = th.style.width; return w && w !== 'auto'; })) return true;
+    return !!table.querySelector('colgroup col[style*="width"]');
+  },
+
+  // 🟢 v229.40：收起态指定列自动换行完整显示——覆盖 _equalizeCols 设的 nowrap+ellipsis，
+  //   命中列改为 white-space:normal + word-break，长文本在等宽列内多行撑高行（如供应商名称）。
+  _applyColWrap(table) {
+    if (!table) return;
+    const key = TableUtils._deriveTableKey(table);
+    const tokens = key ? (COLLAPSE_WRAP[key] || null) : null;
+    if (!tokens) return;
+    const allThs = Array.from(table.querySelectorAll('thead th'));
+    const idxs = this._resolveKeepHeaders(table, tokens);
+    const visIdx = new Set(idxs.filter(i => i >= 0 && allThs[i] && !allThs[i].classList.contains('col-collapsed')));
+    if (!visIdx.size) return;
+    allThs.forEach((th, i) => {
+      if (visIdx.has(i)) { th.style.whiteSpace = 'normal'; th.style.wordBreak = 'break-word'; th.style.textOverflow = ''; }
+    });
+    table.querySelectorAll('tbody tr').forEach(tr => {
+      Array.from(tr.children).forEach((td, i) => {
+        if (visIdx.has(i)) {
+          td.style.whiteSpace = 'normal';
+          td.style.wordBreak = 'break-word';
+          td.style.textOverflow = '';
+          td.style.overflow = 'hidden';
+        }
+      });
+    });
   },
 
   _hideColInTable(tableEl, idx, hide) {
@@ -695,6 +759,8 @@ const TableStickyOverlay = {
    * App.go 切换模块前调用，避免多模块累计
    */
   uninstallAll() {
+    // 🟢 v229.45：模块切换 = 离开当前模块 → 清空会话级手动展开记忆（翻页保持展开，切模块重置收起）
+    this._sessionExpand = {};
     // 拷贝已注册的 wraps
     const installed = window._overlayGlobalListeners.map(l => l.wrap);
     const uniqWraps = Array.from(new Set(installed));
@@ -922,10 +988,12 @@ const TableUtils = {
       const excluded = (fs && Array.isArray(fs.excluded)) ? fs.excluded
                       : (Array.isArray(fs?.unchecked) ? fs.unchecked : []); // 旧格式兼容
       if (excluded.length > 0) {
-        const excludedSet = new Set(excluded.map(v => v.toLowerCase()));
+        const excludedSet = new Set(excluded.map(v => String(v).toLowerCase()));
         rows.forEach(tr => {
           const td = tr.children[col];
-          const val = td ? td.textContent.trim().toLowerCase() : '';
+          const raw = td ? td.textContent.trim().toLowerCase() : '';
+          // 🟢 v229.48：空单元格按弹窗展示名「(空)」参与匹配 —— 修复未勾选 (空) 后空值行仍被带出的漏排
+          const val = raw === '' ? '(空)' : raw;
           if (excludedSet.has(val)) tr.style.display = 'none';
         });
       }
@@ -2143,9 +2211,9 @@ const TableUtils = {
         <button class="wb-pager-btn wb-last" onclick="${module}.goPage(${secArg}${tp})" ${p === tp ? 'disabled' : ''} aria-label="尾页" title="尾页"></button>
       </span>
       <span style="font-size:12px;color:var(--text-secondary);">
-        每页 <select aria-label="每页显示条数" onchange="${module}.changePageSize(${secArg}this.value === 'all' ? 'all' : parseInt(this.value, 10))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
+        <i class="pg-word">每页</i> <select aria-label="每页显示条数" onchange="${module}.changePageSize(${secArg}this.value === 'all' ? 'all' : parseInt(this.value, 10))" style="height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--card-bg);color:var(--text-body);font-size:11px;padding:0 4px;">
           ${optsHtml}
-        </select> 条
+        </select> <i class="pg-word">条</i>
       </span>
       <span style="font-size:12px;color:var(--text-secondary);">
         跳至 <input type="number" id="${jumperId}" min="1" max="${tp}" value="${p}" aria-label="跳转到指定页码"
@@ -2376,37 +2444,10 @@ const TableUtils = {
     });
   },
 
-  // 距离今天的天数（向上取整；负数=已过期；无日期=null）
-  daysUntil(dateStr) {
-    if (!dateStr) return null;
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return null;
-    return Math.ceil((d - new Date()) / (1000 * 60 * 60 * 24));
-  },
-
-  // 月份标签 YYYY-MM（兼容 Date 或日期字符串）
-  monthLabel(dateOrStr) {
-    const d = (dateOrStr instanceof Date) ? dateOrStr : new Date(dateOrStr);
-    if (isNaN(d.getTime())) return '';
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  },
-
   // 存货编码查找键：名称|规格，去空白（O5 去重，逻辑与原内联完全一致）
   buildStockKey(name, spec) {
     return ((name || '') + '|' + (spec || '')).replace(/\s+/g, '');
   },
-
-  // 最近 N 个月标签（YYYY-MM，含本月），档案趋势图复用
-  lastNMonths(n) {
-    const out = [];
-    const now = new Date();
-    for (let i = n - 1; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-    }
-    return out;
-  },
-
 
   // 🟢 v228.25 健壮性加固：安全写入 innerHTML。
   //   背景：全站 12+ 模块存在 `document.getElementById('xxx').innerHTML = ...` 直赋值写法。

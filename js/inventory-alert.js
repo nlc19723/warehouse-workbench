@@ -230,18 +230,20 @@ const InventoryAlertModule = {
               // 🟢 v229.00：状态三态渲染（急/需补货/正常），补货值>0 红色加粗
               const st = a.派生状态 || '正常';
               const needRestock = st !== '正常';
-              const catTag = (a.分类 === 'A' || a.分类 === 'A工程类') ? 'tag-success'
-                : a.分类 === 'B' ? 'tag-warning' : 'tag-neutral';
+              // 🟢 v229.20：分类 2B 暖色 ABC 递减（A深红 > B橙 > C浅黄 > D描边灰）
+              const catTag = (a.分类 === 'A' || a.分类 === 'A工程类') ? 'cat-b1'
+                : a.分类 === 'B' ? 'cat-b2'
+                : a.分类 === 'C' ? 'cat-b3' : 'cat-b4';
               return `
                 <tr class="${needRestock ? 'row-warning' : ''}">
                   <td>${TableUtils.link('stock', a.存货编码 ?? '', a.存货编码 ?? '')}</td>
-                  <td><strong>${esc(a.存货名称 ?? '')}</strong></td>
-                  <td>${esc(a.规格型号 ?? '')}</td>
+                  <td style="font-weight:600">${esc(a.存货名称 ?? '')}</td>
+                  <td style="font-weight:600">${esc(a.规格型号 ?? '')}</td>
                   <td>${a.分类 ? `<span class="tag ${catTag}">${esc(a.分类)}</span>` : ''}</td>
                   <td>${TableUtils.formatNum(a.近一年月均入库量)}</td>
                   <td>${TableUtils.formatNum(a.最低库存预警)}</td>
                   <td>${TableUtils.formatNum(a.最高库存)}</td>
-                  <td>${TableUtils.formatNum(a.现存量)}</td>
+                  <td>${a.现存量 !== undefined && a.现存量 !== null && a.现存量 !== '' ? (parseFloat(a.现存量) === 0 ? `<span class="tag tag-danger">${TableUtils.formatNum(a.现存量)}</span>` : `<span class="tag tag-info">${TableUtils.formatNum(a.现存量)}</span>`) : ''}</td>
                   <td style="${needRestock ? 'color:var(--status-danger);font-weight:600;' : ''}">${a.补货值 ? TableUtils.formatNum(a.补货值) : ''}</td>
                   <td>${a.在途订单 ? TableUtils.formatNum(a.在途订单) : ''}</td>
                   <td>${st === '急' ? '<span class="tag tag-danger">急</span>' : st === '需补货' ? '<span class="tag tag-warning">需补货</span>' : '<span class="tag tag-success">正常</span>'}</td>

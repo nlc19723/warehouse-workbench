@@ -6,7 +6,7 @@
 // 🟢 v206：CACHE_NAME 曾长期停留在 v24，导致旧缓存永不失效、用户看不到新版样式。
 // 🟢 v207：P0 修复（XSS 转义 / DataStore 缓存失效 / 核对单事务）。每次发版必须同步 bump。
 //   现改为跟随 CSS 版本号（index.html 里 style.css?v=NNN），发版 bump 时缓存自动整体换新。
-const CACHE_NAME = 'warehouse-workbench-v229.17';
+const CACHE_NAME = 'warehouse-workbench-v229.55';
 
 // 预缓存：应用外壳（离线可打开的最低文件集）
 // 🟢 v227.72：把「登录链路必需」的 JS 也纳入预缓存。
@@ -28,9 +28,12 @@ const PRECACHE = [
   'js/data-loader.js',
   'js/table-utils.js',
   'js/query.js',
+  'js/boot-canvas-worker.js',
   // 🟢 性能优化 P2-9：按需加载器本身必须预缓存 —— 它是 chart/xlsx/jszip/jsqr 的入口，
   //   离线冷启动时若拿不到它，所有按需加载能力都会失效（虽已有 504 兜底，但功能不可用）。
-  'js/lazy-lib.js'
+  'js/lazy-lib.js',
+  // 🟢 v229.29：移动端左缘手势（右滑开侧边栏），随首屏预缓存
+  'js/mobile-gestures.js'
 ];
 
 // 第三方库（大文件，Cache-First 加速）

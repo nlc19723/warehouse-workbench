@@ -10,10 +10,21 @@ const App = {
   _navStack: [],
   // 模块切换状态记忆：搜索/筛选/分页/页大小/tab 等，页面刷新后清空
   moduleState: {},
+  _MODULE_STATE_KEY: 'wb_module_state',
+  _loadModuleState() {
+    try { return JSON.parse(localStorage.getItem(this._MODULE_STATE_KEY)) || {}; }
+    catch (e) { return {}; }
+  },
+  _persistModuleState() {
+    try { localStorage.setItem(this._MODULE_STATE_KEY, JSON.stringify(this.moduleState)); }
+    catch (e) { /* 隐私/配额超限：静默降级为仅内存记忆 */ }
+  },
 
   // 模块映射表
   modules: {
     dashboard: { title: '首页仪表盘', instance: DashboardModule },
+    // 🟢 v229.23：个人工作任务模块（备忘录 + 看进度 + 逾期提醒）
+    workTasks: { title: '我的任务', instance: WorkTasksModule },
     supplier: { title: '供应商管理', instance: SupplierModule },
     query: { title: '查询系统', instance: QueryModule },
     reconciliation: { title: '对账功能', instance: ReconciliationModule },
@@ -38,6 +49,17 @@ const App = {
   },
 
   async init() {
+    // 🟢 v229.50：页面刷新后从 localStorage 恢复模块状态记忆（顶部筛选/分页/tab），
+    //   使刷新不再丢失（切模块记忆本就走内存 save/restore，刷新由本行补齐）。
+    this.moduleState = this._loadModuleState();
+    // 页面卸载前保存当前模块状态，覆盖「筛选后直接刷新」这一 saveModuleState 未触发的场景
+    window.addEventListener('beforeunload', () => {
+      if (this.currentModule && this.modules[this.currentModule]) {
+        const inst = this.modules[this.currentModule].instance;
+        if (inst) this.saveModuleState(inst, this.currentModule);
+      }
+    });
+
     // 🟢 v149：进入工作台 / 刷新工作台时重置所有表头筛选记忆（列宽、对齐、草稿保留）。
     //   放在最前，确保所有模块渲染前筛选状态已是干净状态。
     if (typeof TablePrefs !== 'undefined' && TablePrefs.clearFilters) {
@@ -85,7 +107,7 @@ const App = {
     // 🟢 v228.91：数据就绪后做一次「库存预警 ↔ 现存量」存货编码数量对账，
     //   不一致则自动 Toast 提醒（用户需求：两表编码数量对不上要主动提醒）。
     //   挂在 _whenBootDone —— 无论已登录交互链路还是未登录后台链路，数据收口后都触发一次。
-    this._whenBootDone(() => this._checkInvStockCodeMismatch());
+    // 🟢 v229.18：库存预警改派生，停用编码对账提醒（避免删表后误弹 Toast）
 
     // ============================================================
     // 🟢 v228.89：登录态前置判定 —— 「先弹登录窗，加载全静默」
@@ -117,6 +139,7 @@ const App = {
       : true;   // AppConfig 缺失属于异常场景，按"已登录"处理 → 走原有链路，避免误把人锁在登录页
     if (AppConfig && AppConfig.isLoggedIn && !_loggedIn) {
       hideLoading();
+      if (window.BootSplash) window.BootSplash.complete();
       this.currentModule = '';
       this.showLoginView();
       // 后台静默启动数据链路（不 await）。它内部完成后的 go() 会被下面的守卫拦掉。
@@ -125,6 +148,10 @@ const App = {
     }
 
     await this._bootData(true);
+    // 🟢 v229.23：工作任务模块启动钩子（业务驱动：订单未批自动生成任务；内部已自吞异常）
+    if (typeof this._whenBootDone === 'function') {
+      this._whenBootDone(() => { if (typeof WorkTasksModule !== 'undefined') WorkTasksModule.bootstrap(); });
+    }
   },
 
   // ============================================================
@@ -138,6 +165,7 @@ const App = {
   //   只是历史上写在了同一个方法里。解耦后登录页可以立刻出现，数据在背后安静地就位。
   // ============================================================
   async _bootData(interactive) {
+    if (interactive && window.BootSplash) window.BootSplash.setProgress(5);   // 🟢 v229.40：启动屏真实进度锚点
     // 未登录的后台模式：一律不亮遮罩。showLoading/hideLoading 是全局单例，
     // 后台亮起来会把登录页顶掉（数据显示层 z-index 1000 < 登录页 4000，看似无害，
     // 但一旦用户点「登录」触发_doLogin 的交互提示，两处会互相 hide，状态就乱了）。
@@ -171,6 +199,7 @@ const App = {
       await cleanOldDB();
       await db.open();
       console.log('IndexedDB opened, version:', db.verno);
+      if (interactive && window.BootSplash) window.BootSplash.setProgress(25);
 
       // v164：云端设置数据初始化（连接 + 恢复搜索历史/出库列表跨设备记忆）
       // 🟢 v226-fix：必须 await init() 完成（连接探测是异步的），否则 restoreOutboundFromSettings()
@@ -178,6 +207,7 @@ const App = {
       let syncInitOk = false;
       if (typeof SyncManager !== 'undefined') {
         try { await SyncManager.init(); syncInitOk = true; } catch (e) { console.warn('SyncManager init 失败:', e); }
+        if (interactive && window.BootSplash) window.BootSplash.setProgress(40);
       }
       // 🟢 v228.89：连接探测落定后回填登录页的云端状态标（见 showLoginView 的「检测中」态）。
       //   只在登录页仍挂在 DOM 上时才写 —— 用户可能在这 1 秒内已经登录进工作台了。
@@ -223,20 +253,24 @@ const App = {
           // 🟢 v227.77：临时出库独立云端数据包，启动时一并恢复
           await DataStore.restoreTemporaryOutboundFromSettings();
         } catch (e) { console.warn('设置数据恢复失败:', e); }
+      if (interactive && window.BootSplash) window.BootSplash.setProgress(55);
       }
 
       // 🟢 v228.89：interactive=false 时把 silent 透传给 DataLoader ——
       //   后台链路绝不点亮全局加载遮罩（否则登录后的等待遮罩会被后台劫持，
       //   且链路末尾的 hideLoading 关不掉后台后续再点亮的遮罩，遮罩会永久挂在工作台上）。
       const imported = await DataLoader.init({ silent: !interactive });
+      if (interactive && window.BootSplash) window.BootSplash.setProgress(85);
       // 🟢 v228.89：数据链路收口信号 —— 无论界面模式如何都要置位，
       //   登录页可能在后台等它（_awaitBootThenEnter）。
       this._markBootDone();
+      if (interactive && window.BootSplash) window.BootSplash.setProgress(92);
       // 🟢 v228.89：后台静默模式下，数据链路**到此为止** —— 不 hideLoading（本来就没亮）、
       //   不导航。界面归属由用户登录后的 showLoginView → _enterWorkbench 决定。
       if (!interactive) return;
       if (imported) {
         hideLoading(); // 先关闭加载遮罩，再渲染模块
+        if (window.BootSplash) window.BootSplash.complete();   // 🟢 v229.40：启动屏收口→全亮→淡出
         // 🟢 v228.49-fix4（回归套件 v22845 的 C-8 偶发失败抓到，跨端走查同源）：
         //   数据导入完成**也不得**抢走用户已打开的界面。
         //   缺陷链：DataLoader.init() 是异步的（云端拉取 / Excel 解析，弱网下可达 10s+）。
@@ -278,6 +312,7 @@ const App = {
       this._markBootDone();   // 🟢 v228.89：异常也算收口，否则登录页会一直等
       if (!interactive) return;   // 🟢 v228.89：后台模式无界面可恢复，只留日志
       hideLoading();
+      if (window.BootSplash) window.BootSplash.complete();
       // 🟢 v228.49-fix4：异常兜底同样不得把用户从已打开的模块踢回仪表盘
       const errNavAway = !!(this.currentModule && this.currentModule !== 'dashboard');
       try { this.go(errNavAway ? this.currentModule : 'dashboard'); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
@@ -312,6 +347,7 @@ const App = {
   // 🟢 M7：无可用数据时的空状态引导页（新链接 / 清空本地后首屏）
   showEmptyState() {
     hideLoading();
+    if (window.BootSplash) window.BootSplash.complete();
     const area = document.getElementById('contentArea');
     if (!area) return;
     // 🟢 v228.45：最后一道防线 —— 若用户已经进了别的模块，直接放弃这次覆盖。
@@ -350,6 +386,7 @@ const App = {
   // 🟢 v227.38：占位页与登录表单合并为整页式登录界面（showLoginView），此处仅做转发
   showNotLoggedInState() {
     hideLoading();
+    if (window.BootSplash) window.BootSplash.complete();
     this.currentModule = '';
     document.querySelectorAll('.sidebar-item[data-module]').forEach(item => item.classList.remove('active'));
     this.showLoginView();
@@ -372,7 +409,7 @@ const App = {
   },
 
   // ===== 模块切换状态记忆 =====
-  // 保存模块实例的搜索/筛选/分页/tab 等状态；页面刷新后 moduleState 为空，自动重置
+  // 保存模块实例的搜索/筛选/分页/tab 等状态；v229.50 起 moduleState 同时持久化到 localStorage，刷新后也能恢复
   saveModuleState(inst, key) {
     if (!inst || !key) return;
     const state = {};
@@ -390,6 +427,7 @@ const App = {
       }
     });
     this.moduleState[key] = state;
+    this._persistModuleState();
   },
 
   // 恢复模块实例状态；恢复后不清除缓存，允许反复切换回来都保持同一状态
@@ -1279,32 +1317,6 @@ const App = {
   //      预警比现存【少】= 缺覆盖（有货未纳入预警）。
   // 注：仅比"编码数量"，不比数值 —— 数量差已是用户能直接处理的症状信号；
   //   跨表字段名口径分裂（如 orders 用「存货编号」）不在本提醒范围。
-  _INVSTOCK_MISMATCH_KEY: 'wb_invstock_mismatch_baseline',
-  _checkInvStockCodeMismatch() {
-    const self = this;
-    const _norm = (v) => (v == null ? '' : String(v).trim());
-    const _getBase = () => { try { return JSON.parse(localStorage.getItem(self._INVSTOCK_MISMATCH_KEY) || 'null'); } catch (e) { return null; } };
-    const _setBase = (v) => {
-      try { if (v) localStorage.setItem(self._INVSTOCK_MISMATCH_KEY, JSON.stringify(v)); else localStorage.removeItem(self._INVSTOCK_MISMATCH_KEY); } catch (e) { /* 隐私模式忽略 */ }
-    };
-    Promise.all([
-      (typeof DataStore !== 'undefined') ? DataStore.getRows('inventoryAlerts') : Promise.resolve([]),
-      (typeof DataStore !== 'undefined') ? DataStore.getRows('stock') : Promise.resolve([])
-    ]).then(([alerts, stock]) => {
-      const alertCodes = new Set((alerts || []).map(a => _norm(a.存货编码)).filter(Boolean));
-      const stockCodes = new Set((stock || []).map(s => _norm(s.存货编码)).filter(Boolean));
-      const alertCount = alertCodes.size, stockCount = stockCodes.size;
-      if (alertCount === stockCount) { _setBase(null); return; }   // 一致 → 清 baseline
-      const prev = _getBase();
-      if (prev && prev.alertCount === alertCount && prev.stockCount === stockCount) return;  // 差异未变 → 不重复弹
-      _setBase({ alertCount, stockCount });
-      const diff = alertCount - stockCount;
-      const msg = (diff > 0)
-        ? `库存预警 ${alertCount} 个存货编码，比现存量 ${stockCount} 个多 ${diff} 个（预警有、现存量查无档案）`
-        : `库存预警 ${alertCount} 个存货编码，比现存量 ${stockCount} 个少 ${Math.abs(diff)} 个（有货未纳入预警）`;
-      if (typeof window.showToast === 'function') window.showToast(msg, 'warn', 9000);
-    }).catch(e => console.warn('[对账] 库存预警↔现存量 编码比对失败(已忽略):', e && e.message));
-  },
 
   // 🟢 v228.89：登录后等数据就绪再进工作台。
   //   ⚠️ 关键约束：超时后进入也**不能**取消/打断数据链路 —— 它自己会跑完并把数据落库，
@@ -1372,24 +1384,6 @@ const App = {
     return { ok: true, role: 'keeper', name: name };
   },
 
-  // 🟢 v227.38：兼容旧调用（测试 / 身份切换器）——委托 attemptLogin，成功走 _enterWorkbench 老式弹窗提示清理
-  _doKeeperLogin() {
-    const n = document.getElementById('keeperLoginName');
-    const p = document.getElementById('keeperLoginPwd');
-    const name = n ? n.value.trim() : '';
-    const pwd = p ? p.value : '';
-    this.attemptLogin(name, pwd).then(r => {
-      if (!r.ok) { WBModal.alert(r.msg); return; }
-      const overlay = document.getElementById('modalOverlay'); if (overlay) overlay.classList.remove('show');
-      this.renderAccountBar();
-      // v217：登录后若当前停留的模块无权访问，跳第一个有权限模块
-      if (this.currentModule && !this._canAccessModule(this.currentModule)) {
-        const alt = this._firstAllowedModule();
-        if (alt) this.go(alt);
-      }
-      WBModal.alert('登录成功：' + r.name);
-    });
-  },
 
   // v222：身份切换器 —— 作业身份决定盘点记录归属给谁，需能显式切换
   // 🟢 v227.44：改用 WBModal.choice（按钮由弹窗 footer 统一绑定，样式与账号弹窗一致）。

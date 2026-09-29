@@ -11,6 +11,34 @@ const CLOUD_MTIME_MAP_KEY = 'wb_cloud_mtime_map';
 // 🟢 v229.06（Phase 3）：逐表「上次成功推送的指纹」映射存储键 { 表名: fingerprint }
 const LAST_PUSHED_FP_KEY = 'wb_last_pushed_fp';
 
+// 🟢 v229.46 AUDIT-F4：XLSX 解析纵深防御
+//   ① 体积护栏：拒绝 >50MB 的文件，缓解 ReDoS / 内存耗尽类拒绝服务；
+//   ② 原型污染清洗：即便未来 SheetJS 回退到含 CVE-2023-30533 的版本，
+//      解析结果若混入 __proto__/constructor/prototype 自有键，递归剔除，
+//      阻断其被下游 for...in 逻辑当作业务数据使用。
+const MAX_XLSX_BYTES = 50 * 1024 * 1024;
+function _sanitizeWorkbook(wb) {
+  if (!wb || typeof wb !== 'object') return wb;
+  const stack = [wb];
+  let seen = 0;
+  while (stack.length) {
+    const o = stack.pop();
+    if (!o || typeof o !== 'object' || seen++ > 300000) continue;
+    try {
+      ['__proto__', 'constructor', 'prototype'].forEach(function (k) {
+        if (Object.prototype.hasOwnProperty.call(o, k)) delete o[k];
+      });
+    } catch (e) { /* 某些宿主对象不可删，忽略 */ }
+    for (const p in o) {
+      if (Object.prototype.hasOwnProperty.call(o, p)) {
+        const v = o[p];
+        if (v && typeof v === 'object') stack.push(v);
+      }
+    }
+  }
+  return wb;
+}
+
 const DataLoader = {
   // Excel 源文件相对路径（与 config.js 中的 app.dataPath 保持一致，避免两处硬编码不同步）
   filePath: (typeof AppConfig !== 'undefined' && AppConfig.app && AppConfig.app.dataPath) || '',
@@ -1074,8 +1102,6 @@ const DataLoader = {
       { name: '订单', fn: () => this.loadOrders(workbook) },
       { name: '入库', fn: () => this.loadInbound(workbook) },
       { name: '库存', fn: () => this.loadStock(workbook) },
-      { name: '库存预警', fn: () => this.loadInventoryAlerts(workbook) },
-      { name: '订货', fn: () => this.loadOrderChecks(workbook) },
       { name: '价格', fn: () => this.loadPricing(workbook) },
       { name: '低周转', fn: () => this.loadLowTurnover(workbook) },
       { name: '违约', fn: () => this.loadBreach(workbook) }
@@ -1145,18 +1171,22 @@ const DataLoader = {
   //   ⚠️ 原实现在此处 `typeof XLSX === 'undefined'` 时仍会调用 XLSX.read → 崩溃，
   //      移除预载后必须改成先 await 加载再用，否则导入功能直接报错。
   async _parseWorkbookAsync(arrayBuffer) {
+    // 🟢 v229.46 AUDIT-F4：体积护栏（ReDoS / DoS 缓解）
+    if (arrayBuffer && arrayBuffer.byteLength > MAX_XLSX_BYTES) {
+      throw new Error('文件过大（>' + (MAX_XLSX_BYTES / 1024 / 1024) + 'MB），已拒绝解析以防拒绝服务');
+    }
     if (typeof Worker === 'undefined') {
       // 无 Worker → 主线程兜底：先加载 XLSX 再解析（行为与旧版一致）
       const XLSX = await LazyLib.xlsx();
-      return XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
+      return _sanitizeWorkbook(XLSX.read(arrayBuffer, { type: 'array', cellDates: true }));
     }
     // 解析 XLSX 组件地址（与 LazyLib 中 lib/xlsx.full.min.js 同源），供 Worker importScripts
-    const xlsxUrl = new URL('lib/xlsx.full.min.js', location.href).href;
+    const xlsxUrl = new URL('lib/xlsx.full.min.js?v=229.55', location.href).href;
     return new Promise((resolve, reject) => {
       // 🟢 v228.53：主线程兜底提取为独立函数 —— Worker「加载失败」≠「文件有问题」，
       //   旧版 onerror 直接报「文件解析失败」会把可导入的文件误判为坏文件。
       const mainThreadFallback = () => LazyLib.xlsx().then(function (X) {
-        try { resolve(X.read(arrayBuffer, { type: 'array', cellDates: true })); }
+        try { resolve(_sanitizeWorkbook(X.read(arrayBuffer, { type: 'array', cellDates: true }))); }
         catch (err) { reject(err); }
       }).catch(reject);
       let worker;
@@ -1176,7 +1206,7 @@ const DataLoader = {
       };
       worker.onmessage = (e) => {
         const d = e.data || {};
-        if (d.type === 'result') finish(() => resolve(d.workbook));
+        if (d.type === 'result') finish(() => resolve(_sanitizeWorkbook(d.workbook)));
         // 🟢 v228.53：透传 Worker 内真实错误（如「File is password-protected」「CPK 头损坏」），
         //   不再替换成通用文案 —— 否则用户与排障者都无法区分「文件坏」还是「程序坏」。
         else if (d.type === 'error') finish(() => reject(new Error(d.error || 'XLSX 解析失败')));
@@ -1955,140 +1985,10 @@ const DataLoader = {
     console.log(`库存数据导入完成: ${clean.length} 条`);
   },
 
-  // 5. 库存预警 — 补货值取J列"是否需补货"原始数值（按位置硬编码，不依赖名称匹配）
-  async loadInventoryAlerts(workbook) {
-    showLoading('正在导入库存预警数据...', { variant:'fluid' });
-
-    const sheet = workbook.Sheets['库存预警数量'];
-    if (!sheet) { console.warn('[data-loader] ⚠️ 工作表"库存预警数量"不存在！可用工作表:', Object.keys(workbook.Sheets)); return; }
-
-    // 用 parseSheet 解析（headerRow=4 → 第5行=表头）
-    const rows = this.parseSheet(workbook, '库存预警数量', 4);
-    if (rows.length === 0) { console.warn('[data-loader] 库存预警数量表解析后无数据'); return; }
-
-    const sampleRow = rows[0] || {};
-    const allKeys = Object.keys(sampleRow);
-    console.log(`[data-loader] 库存预警: 解析出 ${allKeys.length} 个列`);
-
-    // ===== 现存量列 =====
-    const stockKey = allKeys.find((k, i) => {
-      const ck = String(k).trim().replace(/[\u200B-\u200D\uFEFF\u00A0\u3000]/g, '');
-      return ck.includes('现存量') && !ck.includes('预警') && !ck.includes('最低');
-    }) || allKeys.find((k, i) => {
-      const ck = String(k).trim().replace(/[\u200B-\u200D\uFEFF\u00A0\u3000]/g, '');
-      return ck.includes('现存量');
-    }) || '2026-08-03现存量';
-
-    // ===== 补货值列：按位置硬编码 J列(index=9) + 名称匹配双重保险 =====
-    let restockKey = null;
-
-    // 方法A：名称匹配（清理不可见字符后）
-    for (let i = 0; i < allKeys.length; i++) {
-      const ck = String(allKeys[i]).trim()
-        .replace(/[\u200B-\u200D\uFEFF\u00A0\u3000]/g, '').replace(/\s+/g, ' ');
-      if (ck.includes('补货') || ck.includes('需补') || ck === '是否需补货' || ck === '补货值') {
-        restockKey = allKeys[i];
-        break;
-      }
-    }
-
-    // 方法B：如果名称匹配失败，强制用第10列(J列, index=9)
-    if (!restockKey && allKeys.length >= 10) {
-      restockKey = allKeys[9];
-    }
-
-    const clean = rows.map(r => {
-      const 现存量 = this.parseNum(r[stockKey] || r['现存量'] || r['现存数量']);
-      const 最低库存预警 = this.parseNum(r['最低库存预警']);
-      const 最高库存 = this.parseNum(r['最高库存']);
-      const 在途订单 = this.parseNum(r['在途订单']);
-      // 补货值：直接取源数据J列原始数值，不做任何计算
-      let 补货值 = 0;
-      if (restockKey) {
-        补货值 = this.parseNum(r[restockKey]);
-      }
-      return {
-        序号: this.parseNum(r['序号']),
-        仓库名称: r['仓库名称'] || '',
-        存货编码: r['存货编码'] ? String(r['存货编码']) : '',
-        存货名称: r['存货名称'] || '',
-        规格型号: r['规格型号'] ? String(r['规格型号']) : '',
-        近一年月均入库量: this.parseNum(r['近一年月均入库量']),
-        最低库存预警,
-        最高库存: this.parseNum(r['最高库存']),
-        现存量,
-        补货值,
-        在途订单,
-        所上或库房: String(r['所上或库房'] || ''),
-        工程项目: String(r['工程项目'] || ''),
-        分类: r['分类'] || '',
-        涉及订单号: r['涉及订单号'] ? String(r['涉及订单号']) : ''
-      };
-    }).filter(r => r.存货编码 || r.存货名称);
-
-    // ===== 补货值统计（汇总）=====
-    const withRestock = clean.filter(r => r.补货值 > 0);
-    console.log(`[data-loader] 库存预警: 总 ${clean.length} 条, 补货值>0 的有 ${withRestock.length} 条`);
-
-    // 若现存量仍全为0，从库存表(中心库房现存量)交叉补全
-    const allZero = clean.length > 0 && clean.every(r => !r.现存量 || r.现存量 === 0);
-    if (allZero) {
-      console.log('[data-loader] 库存预警现存量全0，尝试从库存表交叉补全...');
-      try {
-        const stockRows = await db.stock.toArray();
-        const stockMap = new Map();
-        stockRows.forEach(s => {
-          const key = s.存货编码 || s.存货名称;
-          if (key) stockMap.set(key, s.现存数量);
-        });
-        let fixed = 0;
-        clean.forEach(item => {
-          const key = item.存货编码 || item.存货名称;
-          if (key && stockMap.has(key)) {
-            item.现存量 = stockMap.get(key);
-            fixed++;
-          }
-        });
-        console.log(`[data-loader] 从库存表补全 ${fixed}/${clean.length} 条现存量`);
-      } catch(e) { console.warn('[data-loader] 库存表补全失败:', e); }
-    }
-
-    await this.bulkAddSafe(db.inventoryAlerts, clean);
-    const restockPositive = clean.filter(r => r.补货值 > 0);
-    console.log(`库存预警数据导入完成: 总 ${clean.length} 条, 补货值>0 的有 ${restockPositive.length} 条`);
-    if (restockPositive.length === 0) {
-      console.warn('[data-loader] ⚠️ 补货值全部为0！请检查源数据"是否需补货"列');
-    }
-  },
-
-  // 6. 订货核对 (headerRow=2)
-  async loadOrderChecks(workbook) {
-    showLoading('正在导入订货数据...', { variant:'fluid' });
-    const rows = this.parseSheet(workbook, '订货', 2);
-    // 🟢 v227.20：订货表的现存量列名带日期前缀（如「2026-09-04现存量」），随文件变化，
-    //   写死 r['2026-08-03现存量'] 会读不到 → 现存量全为 0。改用与库存预警一致的 stockKey 智能匹配。
-    const _ocKeys = Object.keys(rows[0] || {});
-    const _ocStockKey = _ocKeys.find(k => {
-      const ck = String(k).replace(/\n/g, '').replace(/[\u200B-\u200D\uFEFF\u00A0\u3000]/g, '').replace(/\s+/g, ' ');
-      return ck.includes('现存量') && !ck.includes('预警') && !ck.includes('最低');
-    }) || '2026-09-04现存量';
-    const clean = rows.map(r => ({
-      存货编码: r['存货编码'] ? String(r['存货编码']) : '',
-      存货名称: r['存货名称'] || '',
-      规格型号: r['规格型号'] ? String(r['规格型号']) : '',
-      主计量: r['主计量'] || '',
-      数量: this.parseNum(r['数量']),
-      现存量: this.parseNum(r[_ocStockKey] || r['现存量'] || r['现存数量']),
-      在途订单: this.parseNum(r['在途订单']),
-      所上或库房: String(r['所上或库房'] || ''),
-      工程项目: String(r['工程项目'] || ''),
-      分类: r['分类'] || '',
-      低周转: r['低周转'] || ''
-    })).filter(r => r.存货编码 || r.存货名称);
-
-    await this.bulkAddSafe(db.orderChecks, clean);
-    console.log(`订货数据导入完成: ${clean.length} 条`);
-  },
+  // 🟢 v229.18：库存预警 / 订货核对 不再从 Excel 解析（用户确认这两个 sheet 为派生数据，
+  //   库存预警工作台走 buildDerivedAlerts() 实时派生，订货核对为工作台手工建单）。
+  //   原 loadInventoryAlerts / loadOrderChecks 整段删除；db.inventoryAlerts / db.orderChecks 仍保留
+  //   （orderChecks 承载用户核对单数据，不可删；inventoryAlerts 留作 Dexie 结构兼容）。
 
   // 7. 供应商价格 (headerRow=1)
   async loadPricing(workbook) {

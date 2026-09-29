@@ -1421,10 +1421,6 @@ const OutboundListModule = {
     catch (e) { return []; }
   },
 
-  _findImportHistory(fp) {
-    return this._readImportHistory().find(x => x.fp === fp) || null;
-  },
-
   _pushImportHistory(fp, name, count) {
     try {
       const all = this._readImportHistory().filter(x => x.fp !== fp);

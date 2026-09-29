@@ -17,6 +17,7 @@ const OrderCheckModule = {
     const myToken = token;
     const content = document.getElementById('contentArea');
     if (myToken !== undefined && myToken !== App._goToken) return;
+    this._derivedAlertMap = null; // 🟢 v229.21：进入工作台重建派生预警缓存（保证导入新数据后取到最新）
 
     // 🟢 v113：先暂存录入草稿（如果之前有未保存的明细行），防止切换模块回来被重建清空
     const hasDraft = !!this._formDraft;
@@ -409,7 +410,20 @@ const OrderCheckModule = {
     document.querySelectorAll('.autocomplete-dropdown').forEach(d => d.remove());
   },
 
-  // 按编码自动填充：先读 stock 名称/规格，再到库存预警读分类/现存量/在途/仓库/项目，
+  // 🟢 v229.21：派生预警缓存（Map: 存货编码 → 派生预警行），render() 时失效。
+  //   v229.18 起 Excel 不再解析库存预警表，本机导入后 db.inventoryAlerts 为空表（仅云端同步路径有重建）——
+  //   本工作台改读 InventoryAlertModule.buildDerivedAlerts()（与库存预警工作台/查询系统存量板块同源同值）。
+  async _getDerivedAlertMap() {
+    if (this._derivedAlertMap) return this._derivedAlertMap;
+    let list = [];
+    if (typeof InventoryAlertModule !== 'undefined' && InventoryAlertModule.buildDerivedAlerts) {
+      list = await InventoryAlertModule.buildDerivedAlerts();
+    }
+    this._derivedAlertMap = new Map(list.map(a => [String(a.存货编码 || '').trim(), a]));
+    return this._derivedAlertMap;
+  },
+
+  // 按编码自动填充：先读 stock 名称/规格，再到派生库存预警读分类/现存量/在途/仓库/项目，
   // 最后到低周转读是否低周转/暂无法使用量。若库存预警中无匹配，提示并清空本行。
   async autoFillByCode(code, rowIdx) {
     if (!code) return;
@@ -421,8 +435,8 @@ const OrderCheckModule = {
       this._setVal(rowIdx, '.oc-spec-input', stock.规格型号 || '');
     }
 
-    // 2. 从库存预警读取关联字段
-    const alert = await db.inventoryAlerts.where('存货编码').equals(code).first();
+    // 2. 从派生库存预警读取关联字段（v229.21：不再读已停填充的 db.inventoryAlerts 死表）
+    const alert = (await this._getDerivedAlertMap()).get(String(code).trim());
     if (!alert) {
       this.showMsg(`❌ 未找到物料 "${code}" 的库存预警信息`, true);
       this._clearAutoFilled(rowIdx);
@@ -521,13 +535,14 @@ const OrderCheckModule = {
     let 最高库存 = NaN, 最低库存 = NaN;
     if (编码) {
       try {
-        const 预警 = await db.inventoryAlerts.where('存货编码').equals(编码).first();
+        // 🟢 v229.21：改读派生库存预警（字段名 最低库存预警/最高库存 与旧解析表一致，无需换名）
+        const 预警 = (await this._getDerivedAlertMap()).get(String(编码).trim());
         if (预警) {
           if (typeof 预警.最高库存 === 'number') 最高库存 = 预警.最高库存;
           if (typeof 预警.最低库存预警 === 'number') 最低库存 = 预警.最低库存预警;
         }
       } catch (e) {
-        /* 忽略 */ console.warn('[order-check.js:469] 异常(已忽略):', e);
+        /* 忽略 */ console.warn('[order-check.js] 派生预警查询异常(已忽略):', e);
       }
     }
     return { 最高库存, 最低库存 };
