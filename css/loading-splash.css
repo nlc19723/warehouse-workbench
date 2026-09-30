@@ -1,0 +1,94 @@
+/* ============================================================
+ * 启动加载屏 BootSplash —— 设计预览（粒子汇聚 StockHub + 纸雕圆环）
+ * 圆环 24 切片 / 中心数字 / 词标 / 四角取景框 / 顶部装饰 / 底部 --progress 进度线
+ * ============================================================ */
+#bootSplash {
+  position: fixed; inset: 0; z-index: 10000;
+  display: flex;
+  align-items: center; justify-content: center;
+  background:
+    radial-gradient(120% 90% at 28% 12%, #FFFFFF 0%, rgba(255,255,255,0) 46%),
+    radial-gradient(130% 100% at 78% 88%, #E0F7FA 0%, rgba(224,247,250,0) 55%),
+    linear-gradient(158deg, #F8F9FA 0%, #E0F7FA 100%);
+  overflow: hidden;
+  opacity: 1;
+  font-family: 'Inter','SF Pro Display',-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+#bootSplash.is-active { display: flex; }
+#bootSplash.is-leaving { opacity: 0; transition: opacity .52s ease; }
+
+/* 极光柔光（与工作台一致） */
+#bootSplash .boot-aurora { position: absolute; border-radius: 50%; filter: blur(40px); opacity: .5; pointer-events: none; }
+#bootSplash .ba1 { width: 340px; height: 340px; left: -90px; top: -70px; background: radial-gradient(circle,#FFFFFF 0%,rgba(255,255,255,0) 70%); animation: bootDr1 17s ease-in-out infinite; }
+#bootSplash .ba2 { width: 300px; height: 300px; right: -80px; top: 28%; background: radial-gradient(circle,#B2EBF2 0%,rgba(178,235,242,0) 70%); animation: bootDr2 21s ease-in-out infinite; }
+#bootSplash .ba3 { width: 360px; height: 360px; left: -60px; bottom: -110px; background: radial-gradient(circle,#E0F7FA 0%,rgba(224,247,250,0) 70%); animation: bootDr3 25s ease-in-out infinite; }
+@keyframes bootDr1 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(30px,26px)} }
+@keyframes bootDr2 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-26px,22px)} }
+@keyframes bootDr3 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(24px,-20px)} }
+
+#bootSplashCanvas { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+
+/* 四角取景框角标 */
+#bootSplash .boot-corner { position: absolute; width: 26px; height: 26px; border: 1.5px solid rgba(0,168,150,0.20); pointer-events: none; z-index: 3; }
+#bootSplash .boot-corner.tl { left: 26px; top: 26px; border-right: none; border-bottom: none; border-top-left-radius: 6px; }
+#bootSplash .boot-corner.tr { right: 26px; top: 26px; border-left: none; border-bottom: none; border-top-right-radius: 6px; }
+#bootSplash .boot-corner.bl { left: 26px; bottom: 26px; border-right: none; border-top: none; border-bottom-left-radius: 6px; }
+#bootSplash .boot-corner.br { right: 26px; bottom: 26px; border-left: none; border-top: none; border-bottom-right-radius: 6px; }
+
+/* 顶部装饰行：细线 ◆ 菱形 */
+#bootSplash .boot-topdeco { position: absolute; left: 0; right: 0; top: 8.1%; display: flex; align-items: center; justify-content: center; gap: 12px; z-index: 3; }
+#bootSplash .boot-topdeco::before { content: ''; width: 44px; height: 1px; background: linear-gradient(90deg, rgba(0,168,150,0), rgba(0,168,150,0.30)); }
+#bootSplash .boot-topdeco::after { content: ''; width: 44px; height: 1px; background: linear-gradient(270deg, rgba(0,168,150,0), rgba(0,168,150,0.30)); }
+#bootSplash .boot-topdeco .dm { width: 5px; height: 5px; transform: rotate(45deg); background: rgba(0,168,150,0.35); }
+
+/* 圆环（168px，与设计原型一致） */
+#bootSplash .boot-ring { position: absolute; left: 50%; top: var(--cy-ring, 50%); transform: translate(-50%,-50%); width: 168px; height: 168px; z-index: 2; }
+#bootSplash .boot-ring svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+/* 切片为分组（空格=纸雕光源组，点亮格=位置渐变组），仅做透明度过渡 */
+#bootSplash .boot-slice { opacity: 0; transition: opacity .3s ease; }
+#bootSplash .boot-slice.on { opacity: 1; }
+
+/* 中心数字（.boot-ring 的子元素，定位上下文是圆环本身，必须用 50% 而非视口 px 变量） */
+#bootSplash .boot-center {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  width: 63%; height: 63%; border-radius: 50%; z-index: 3;
+  background: #EBF3F1;
+  box-shadow: inset 7px 8px 13px rgba(126,154,150,0.55), inset -6px -7px 12px rgba(255,255,255,0.95);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+}
+#bootSplash .boot-center .cap { font-size: 12px; font-weight: 400; letter-spacing: .18em; color: #5A6F6B; text-indent: .18em; }
+#bootSplash .boot-center .num { font-size: 28px; font-weight: 700; line-height: 1; color: #0E4D47; font-variant-numeric: tabular-nums; display: flex; align-items: baseline; }
+#bootSplash .boot-center .num .pct { font-size: 19px; margin-left: 1px; }
+
+/* 副文案（圆环下方） */
+#bootSplash .boot-sub {
+  position: absolute; left: 0; right: 0; top: var(--cy-sub, 60%); text-align: center;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  font-size: 12px; font-weight: 400; color: rgba(0,168,150,0.85); z-index: 3;
+  transition: opacity .5s ease;
+}
+#bootSplash .boot-sub::before, #bootSplash .boot-sub::after { content: ''; width: 16px; height: 1px; background: rgba(0,168,150,0.35); }
+#bootSplash .boot-sub span { letter-spacing: .3em; margin-right: -.3em; }
+
+/* 底部：--progress 进度线 + 版本行 */
+#bootSplash .boot-bottom { position: absolute; left: 0; right: 0; top: var(--cy-bottom, 86%); display: flex; flex-direction: column; align-items: center; gap: 12px; z-index: 3; }
+#bootSplash .boot-loadline { position: relative; width: 150px; height: 2px; border-radius: 2px; background: rgba(0,168,150,0.12); overflow: hidden; }
+#bootSplash .boot-loadline::after {
+  content: ''; position: absolute; top: 0; left: -40%; width: 40%; height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, rgba(0,168,150,0), rgba(0,168,150,0.45), rgba(0,168,150,0));
+  animation: bootSweep 2.2s ease-in-out infinite;
+}
+@keyframes bootSweep { 0% { left: -40%; } 62%,100% { left: 100%; } }
+#bootSplash .boot-cap { font-size: 9px; font-weight: 500; letter-spacing: .32em; text-indent: .32em; color: rgba(0,120,110,0.42); }
+
+/* 暗色主题适配 */
+[data-theme="dark"] #bootSplash {
+  background:
+    radial-gradient(120% 90% at 28% 12%, #1b2733 0%, rgba(27,39,51,0) 46%),
+    radial-gradient(130% 100% at 78% 88%, #11343b 0%, rgba(17,52,59,0) 55%),
+    linear-gradient(158deg, #0f1a22 0%, #11343b 100%);
+}
+[data-theme="dark"] #bootSplash .boot-center { background: #16313a; box-shadow: inset 7px 8px 13px rgba(0,0,0,0.55), inset -6px -7px 12px rgba(255,255,255,0.06); }
+[data-theme="dark"] #bootSplash .boot-center .num { color: #7fd8c4; }
+[data-theme="dark"] #bootSplash .boot-center .cap { color: #8fb0aa; }

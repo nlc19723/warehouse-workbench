@@ -6,9 +6,9 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="库管工作台">
-  <link rel="apple-touch-icon" href="icons/icon-192.png?v=229.55" type="image/png">
-  <link rel="icon" href="icons/icon-192.png?v=229.55" type="image/png">
-  <link rel="manifest" href="manifest.json?v=229.55">
+  <link rel="apple-touch-icon" href="icons/icon-192.png?v=229.56" type="image/png">
+  <link rel="icon" href="icons/icon-192.png?v=229.56" type="image/png">
+  <link rel="manifest" href="manifest.json?v=229.56">
   <meta name="theme-color" content="#357ABD">
   <!-- 🟢 v229.46 AUDIT-F3：CSP 正式生效（此前仅为无效注释，等同「无 CSP」）。
        说明：script-src 仍含 'unsafe-inline' —— 本应用大量通过 innerHTML 注入动态内联事件处理器
@@ -358,8 +358,8 @@ body{
     <!-- 🟢 v228.09 性能优化 P0-2：首屏关键 CSS 已内联（上方 CRITICAL_CSS 块，8.4KB），
          全量 style.css(211KB) 改为【非阻塞】加载：preload 拉取 → onload 转 stylesheet。
          首屏只依赖 8.4KB 内联样式，loading 遮罩即可正确显示；全量样式在遮罩期间并行加载完成。 -->
-    <link rel="preload" href="css/style.css?v=229.55" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="css/style.css?v=229.55"></noscript>
+    <link rel="preload" href="css/style.css?v=229.56" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="css/style.css?v=229.56"></noscript>
     <!-- 🟢 v229.45：启动加载屏样式已【全部内联】进上方 CRITICAL_CSS（原 loading-splash.css 异步加载
          在慢网下同样会裸 HTML 闪现，已废弃外部引用；css/loading-splash.css 保留仅作存档）。
          Inter 字体用于词标 StockHub -->
@@ -378,7 +378,7 @@ body{
         }
         if (!ok) {
           var l = document.createElement('link');
-          l.rel = 'stylesheet'; l.href = 'css/style.css?v=229.55';
+          l.rel = 'stylesheet'; l.href = 'css/style.css?v=229.56';
           document.head.appendChild(l);
         }
       }, 3000);
@@ -391,10 +391,10 @@ body{
          · jsqr.min.js(257KB)   → 打开「扫一扫」时
          · jszip.min.js(98KB)   → 点击「源码」打包下载时
          · qrcode.min.js(57KB)  → 现存量二维码 / 存货档案二维码（v228.17 恢复加载，见下方 <script>） -->
-  <script defer src="js/boot-splash.js?v=229.55"></script>
+  <script defer src="js/boot-splash.js?v=229.56"></script>
   <script defer src="lib/dexie.min.js?v=55"></script>
   <script defer src="lib/supabase.min.js?v=55"></script>
-  <script defer src="js/lazy-lib.js?v=229.55"></script>
+  <script defer src="js/lazy-lib.js?v=229.56"></script>
 <!-- 🟢 v228.53：beacon 统计脚本改为「动态异步注入」。
      旧版（M4）用 defer：defer 脚本会阻塞 DOMContentLoaded，而 App.init()（app.js）也绑在
      DOMContentLoaded 上 —— 一旦 beacon.cdn.qq.com 在用户网络下慢/不可达（DNS 挂起、办公网
@@ -736,56 +736,56 @@ body{
     </div>
   </div>
 
-  <script defer src="js/table-utils.js?v=229.55"></script>
+  <script defer src="js/table-utils.js?v=229.56"></script>
   <!-- 🟢 v228.17：恢复 qrcode.min.js 预载。二维码列（现存量列表 / 存货档案）依赖全局 qrcode 函数，
        此前 P0-1 性能优化误将其移除，导致 QR.thumb 全部返回“—”。文件仅 57KB，继续 defer 不阻塞首屏。 -->
   <script defer src="lib/qrcode.min.js?v=55"></script>
-  <script defer src="js/qr-util.js?v=229.55"></script>
-  <script defer src="js/qr-scan.js?v=229.55"></script>
-  <script defer src="js/search-select.js?v=229.55"></script>
-  <script defer src="js/entity-links.js?v=229.55"></script>
-  <script defer src="js/db.js?v=229.55"></script>
-  <script defer src="js/config.js?v=229.55"></script>
+  <script defer src="js/qr-util.js?v=229.56"></script>
+  <script defer src="js/qr-scan.js?v=229.56"></script>
+  <script defer src="js/search-select.js?v=229.56"></script>
+  <script defer src="js/entity-links.js?v=229.56"></script>
+  <script defer src="js/db.js?v=229.56"></script>
+  <script defer src="js/config.js?v=229.56"></script>
   <!-- 🟢 v200：工作台主题弹窗（替换浏览器原生 alert/confirm/prompt） -->
-  <script defer src="js/modal.js?v=229.55"></script>
-  <script defer src="js/sync.js?v=229.55"></script>
-  <script defer src="js/data-loader.js?v=229.55"></script>
-  <script defer src="js/dashboard.js?v=229.55"></script>
-  <script defer src="js/supplier.js?v=229.55"></script>
-  <script defer src="js/query.js?v=229.55"></script>
-  <script defer src="js/reconciliation.js?v=229.55"></script>
-  <script defer src="js/order-track.js?v=229.55"></script>
-  <script defer src="js/stock-alert-config.js?v=229.55"></script>
-  <script defer src="js/stock-alert-rules.js?v=229.55"></script>
-  <script defer src="js/inventory-alert.js?v=229.55"></script>
-  <script defer src="js/order-check.js?v=229.55"></script>
-  <script defer src="js/filter-layout.js?v=229.55"></script>
-  <script defer src="js/components/datepicker.js?v=229.55"></script>
-  <script defer src="js/orders.js?v=229.55"></script>
-  <script defer src="js/inbound.js?v=229.55"></script>
-  <script defer src="js/stock.js?v=229.55"></script>
-  <script defer src="js/pricing.js?v=229.55"></script>
-  <script defer src="js/low-turnover.js?v=229.55"></script>
-  <script defer src="js/breach.js?v=229.55"></script>
-  <script defer src="js/outbound.js?v=229.55"></script>
-  <script defer src="js/stock-detail.js?v=229.55"></script>
-  <script defer src="js/supplier-detail.js?v=229.55"></script>
-  <script defer src="js/order-detail.js?v=229.55"></script>
-  <script defer src="js/stocktake.js?v=229.55"></script>
-  <script defer src="js/stocktake-records.js?v=229.55"></script>
-  <script defer src="js/color-theme.js?v=229.55"></script>
+  <script defer src="js/modal.js?v=229.56"></script>
+  <script defer src="js/sync.js?v=229.56"></script>
+  <script defer src="js/data-loader.js?v=229.56"></script>
+  <script defer src="js/dashboard.js?v=229.56"></script>
+  <script defer src="js/supplier.js?v=229.56"></script>
+  <script defer src="js/query.js?v=229.56"></script>
+  <script defer src="js/reconciliation.js?v=229.56"></script>
+  <script defer src="js/order-track.js?v=229.56"></script>
+  <script defer src="js/stock-alert-config.js?v=229.56"></script>
+  <script defer src="js/stock-alert-rules.js?v=229.56"></script>
+  <script defer src="js/inventory-alert.js?v=229.56"></script>
+  <script defer src="js/order-check.js?v=229.56"></script>
+  <script defer src="js/filter-layout.js?v=229.56"></script>
+  <script defer src="js/components/datepicker.js?v=229.56"></script>
+  <script defer src="js/orders.js?v=229.56"></script>
+  <script defer src="js/inbound.js?v=229.56"></script>
+  <script defer src="js/stock.js?v=229.56"></script>
+  <script defer src="js/pricing.js?v=229.56"></script>
+  <script defer src="js/low-turnover.js?v=229.56"></script>
+  <script defer src="js/breach.js?v=229.56"></script>
+  <script defer src="js/outbound.js?v=229.56"></script>
+  <script defer src="js/stock-detail.js?v=229.56"></script>
+  <script defer src="js/supplier-detail.js?v=229.56"></script>
+  <script defer src="js/order-detail.js?v=229.56"></script>
+  <script defer src="js/stocktake.js?v=229.56"></script>
+  <script defer src="js/stocktake-records.js?v=229.56"></script>
+  <script defer src="js/color-theme.js?v=229.56"></script>
   <!-- 🟢 v229.39：工作任务 · 云端同步独立分包（load/save/轻轮询/per-item 合并）；须在 work-tasks.js 之前加载 -->
-  <script defer src="js/worktasks-sync.js?v=229.55"></script>
+  <script defer src="js/worktasks-sync.js?v=229.56"></script>
   <!-- 🟢 v229.27：工作任务模块（个人备忘录 + 看进度 + 逾期提醒）；须在 app.js 之前加载以注册全局 WorkTasksModule -->
-  <script defer src="js/work-tasks.js?v=229.55"></script>
+  <script defer src="js/work-tasks.js?v=229.56"></script>
   <!-- 🟢 v229.37：移动端手势（左缘右滑开抽屉 / 右缘左滑返回）；右缘返回改为 Q弹果冻玻璃态；
        v229.35 起弹窗打开时右滑 = 关闭最上层弹窗（安卓返回键惯例），左缘拉抽屉仍跳过弹窗。
        v229.37 起按 z-index 取最上层弹窗并分体系关闭（WBModal #wbModalRoot / 遗留 #modalOverlay）。
        乳白微蓝玻璃(blur20)+外投影+内暗影厚度+2px 白边外晕，单峰高斯波形(σ42→82/H10→100)，
        拖拽跟手+速度张力，松手 spring(200/20/0.8)+果冻余震，达阈值液体收缩回右缘。仅 ≤768px 生效，须在 app.js 前加载 -->
-    <script defer src="js/mobile-gestures.js?v=229.55"></script>
-    <script defer src="js/app.js?v=229.55"></script>
-  <script defer src="js/globals.js?v=229.55"></script>
+    <script defer src="js/mobile-gestures.js?v=229.56"></script>
+    <script defer src="js/app.js?v=229.56"></script>
+  <script defer src="js/globals.js?v=229.56"></script>
   <script>
   /* 🟢 v228.57：脚本加载完整性守护 —— 解决「发布网关间歇性 502 → 核心 JS 没下来 →
         App is not defined → 永久白屏」，且用户刷新还可能再撞上同一份坏缓存。
@@ -853,7 +853,7 @@ body{
       window.addEventListener('load', function() {
         // 🟢 v227.21：注册 URL 带版本戳 + updateViaCache:'none'，确保每次发版浏览器都重新拉取 SW 脚本，
         //   避免「改了 CACHE_NAME 但旧 ?v= 被 CDN 缓存、SW 永不更新」的卡死。
-        navigator.serviceWorker.register('service-worker.js?v=229.55', { updateViaCache: 'none' }).then(function(reg) {
+        navigator.serviceWorker.register('service-worker.js?v=229.56', { updateViaCache: 'none' }).then(function(reg) {
           console.log('[PWA] Service Worker 注册成功:', reg.scope);
         }).catch(function(err) {
           console.warn('[PWA] Service Worker 注册失败:', err);
@@ -945,9 +945,11 @@ body{
         '.gitignore',
         'css/style.css',
         'docs/全局代码审查标准.md',
-        'bridge/decrypt_bridge.py', 'bridge/dump_one.py', 'bridge/start_bridge.bat',
-        'bridge/test_bridge.py', 'bridge/README.md', 'bridge/FRONTEND_INTEGRATION.md',
+        // 🟢 v229.56：兜底清单对齐现实 —— 移除已不存在的 bridge/*（打包时只会 404 跳过），
+        //   补入 v229 新增的 boot-splash / boot-canvas-worker / lazy-lib / mobile-gestures / work-tasks / worktasks-sync。
         'js/table-utils.js', 'js/db.js', 'js/config.js', 'js/sync.js', 'js/data-loader.js',
+        'js/lazy-lib.js', 'js/boot-splash.js', 'js/boot-canvas-worker.js',
+        'js/mobile-gestures.js', 'js/work-tasks.js', 'js/worktasks-sync.js',
         'js/stock-alert-config.js', 'js/stock-alert-rules.js',
         'js/dashboard.js', 'js/supplier.js', 'js/query.js', 'js/reconciliation.js',
         'js/order-track.js', 'js/inventory-alert.js', 'js/orders.js', 'js/inbound.js',
@@ -982,9 +984,15 @@ body{
       // 排除「根目录级别」的临时报告/草稿（如 全局代码审查报告_v227.50.md、UI优化方案.md 等），
       // 但【保留 docs/ 与 bridge/ 下的文档】——含《全局代码审查标准.md》及 bridge 的 README/集成说明。
       // 参数传相对路径（含目录），以区分根级垃圾与子目录里的正式文档。
+      // 🟢 v229.56：堵住预览/提案/对比稿漏入 —— 此前仅挡 *_preview.html 后缀，
+      //   docs/ 下中文命名预览（*预览*.html、*提案*.html）、*-compare.html 及任意位置的 preview
+      //   均会被「自愈补入 / 目录扫描回退」塞进下载包。
       function _isDevJunk(relPath) {
         var base = relPath.indexOf('/') >= 0 ? relPath.split('/').pop() : relPath;
-        if (/^(dp-|settings-verify)/.test(base) || base.endsWith('_preview.html')) return true;
+        if (/^(dp-|settings-verify)/.test(base) || /preview/i.test(base)) return true;
+        if (/预览|提案/.test(base)) return true;
+        // docs/ 下的 HTML 全部是方案预览/提案/对比稿等开发期产物（运行时不引用任何 docs/*.html）→ 一律不进包
+        if (/^docs\//.test(relPath) && /\.html?$/i.test(base)) return true;
         // 仅当 .md 位于仓库根目录时才视为垃圾；docs/、bridge/ 下的 .md 一律保留
         if (base.endsWith('.md') && relPath.indexOf('/') === -1) return true;
         return false;

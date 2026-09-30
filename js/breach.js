@@ -1,0 +1,181 @@
+// ============================================
+// 违约台账模块 V3 - 统一表格 · 统计卡片规范化 · 3D搜索按钮
+// ============================================
+
+const BreachModule = {
+  currentData: [],
+  currentFilter: { keyword: '' },
+  currentPage: 1,
+  pageSize: AppConfig.app.defaultPageSize,
+
+  async render(token) {
+    if (token !== undefined) this._rt = token;
+    const myToken = token;
+    const content = document.getElementById('contentArea');
+    content.innerHTML = `
+      <div class="filter-bar filter-bar-m" data-mod="breach">
+        <input type="text" id="breachKw" class="fb-search" placeholder="搜索供应商名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')BreachModule.applyFilter()">
+        <div class="fb-row fb-row--buttons">
+          <button class="btn--primary" onclick="BreachModule.applyFilter()">🔍 搜索</button>
+          <button class="btn--ghost" onclick="BreachModule.resetFilter()">重置</button>
+          <button class="btn--ghost" onclick="BreachModule.exportData()">📥 导出</button>
+        </div>
+      </div>
+
+      <!-- 统计卡片（2x2田字格） + 规则面板（并排） -->
+      <div id="breachSummary" class="chart-stats-row" style="margin-bottom:14px;">
+        <div id="breachStats" class="breach-stats-grid"></div>
+        <div id="breachRulesBox" class="breach-rules-panel"></div>
+      </div>
+
+      <div id="breachTableArea"></div>
+    `;
+
+    await this.loadData(myToken);
+  },
+
+  async loadData(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
+    let records = await DataStore.getBreachRecords();
+    const kw = (this.currentFilter.keyword || '').trim().toLowerCase();
+    if (kw) {
+      records = records.filter(r => r.公司名称 && r.公司名称.toLowerCase().includes(kw));
+    }
+
+    // 🟢 AUDIT-003：扣款总额改用 sumMoney（以分整数累加），消除浮点求和漂移；延迟天数为整数，math.round 求和防尾巴
+    const totalAmount = TableUtils.sumMoney(records, r => r.扣款金额);
+    const totalDelay = records.reduce((s, r) => s + Math.round(parseFloat(r.延迟天数) || 0), 0);
+    const companySet = new Set(records.map(r => r.公司名称).filter(Boolean));
+
+    if (rt !== undefined && rt !== App._goToken) return;
+    TableUtils.setHtml('breachStats', `
+      <div class="kpi-card card-danger">
+        <div class="kpi-label">违约记录数</div>
+        <div class="kpi-value">${records.length}</div>
+      </div>
+      <div class="kpi-card card-warning">
+        <div class="kpi-label">涉及供应商</div>
+        <div class="kpi-value">${companySet.size}</div>
+      </div>
+      <div class="kpi-card card-warning">
+        <div class="kpi-label">总延迟天数</div>
+        <div class="kpi-value">${totalDelay}</div>
+      </div>
+      <div class="kpi-card card-danger">
+        <div class="kpi-label">扣款总额</div>
+        <div class="kpi-value">¥${TableUtils.formatMoney(totalAmount)}</div>
+      </div>
+    `);
+
+    TableUtils.setHtml('breachRulesBox', `
+      <div class="glass-card" style="margin-bottom:0;">
+        <div class="glass-card-header">
+          <span class="glass-card-title"><span class="title-icon">📋</span>违约扣款规则</span>
+        </div>
+        <!-- 🟢 v228.03：no-col-collapse = 移动端不参与列折叠，两列始终全部显示 -->
+        <table class="data-table no-col-collapse">
+          <thead>
+            <tr><th>延迟天数</th><th>扣款比例</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>2天</td><td><span class="tag tag-warning">5%</span></td></tr>
+            <tr><td>4天</td><td><span class="tag tag-warning">10%</span></td></tr>
+            <tr><td>6天</td><td><span class="tag tag-warning">15%</span></td></tr>
+            <tr><td>8天及以上</td><td><span class="tag tag-danger">20%</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    `);
+
+    // 计算违约次数（按公司名称聚合的违约记录数）
+    const companyCountMap = new Map();
+    records.forEach(r => { if (r.公司名称) companyCountMap.set(r.公司名称, (companyCountMap.get(r.公司名称) || 0) + 1); });
+    // 扣款比例：优先用已存储值（Excel 导入时已计算）；缺失时按延迟天数规则实时计算，
+    // 以兼容从云端同步下来的旧版 bundle（旧数据未含该字段），保证显示始终正确。
+    records.forEach(r => {
+      if (r.扣款比例 == null || r.扣款比例 === '') {
+        r.扣款比例 = (typeof DataLoader !== 'undefined' && DataLoader._calcBreachRatio)
+          ? DataLoader._calcBreachRatio(r.延迟天数) : 0;
+      }
+      r.违约次数 = companyCountMap.get(r.公司名称) || 0;
+    });
+
+    this.currentData = records;
+    this.renderTable(rt);
+  },
+
+  renderTable(token) {
+    const rt = (token !== undefined) ? token : this._rt;
+    if (rt !== undefined && rt !== App._goToken) return;
+    const data = this.currentData;
+    const area = document.getElementById('breachTableArea');
+    if (data.length === 0) {
+      area.innerHTML = '<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-text">暂无违约记录</div></div>';
+      return;
+    }
+
+    area.innerHTML = `
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>公司名称</th>
+              <th>涉及订单号</th>
+              <th>存货编码</th>
+              <th>存货名称</th>
+              <th>规格型号</th>
+              <th>含税单价</th>
+              <th>数量</th>
+              <th>到货时间</th>
+              <th>延迟天数</th>
+              <th>扣款比例</th>
+              <th>扣款金额</th>
+              <th>违约次数</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${data.map(r => `
+              <tr>
+                <td><strong>${TableUtils.link('supplier', r.公司名称 ?? '', r.公司名称 ?? '')}</strong></td>
+                <td>${(() => { const v = (r.涉及订单号 ?? '').toString().trim(); return v ? TableUtils.link('order', v, v) : ''; })()}</td>
+                <td>${(() => { const v = (r.存货编码 ?? '').toString().trim(); return v ? TableUtils.link('stock', v, v) : ''; })()}</td>
+                <td>${esc(r.存货名称 ?? '')}</td>
+                <td>${esc(r.规格型号 ?? '')}</td>
+                <td>¥${TableUtils.formatMoney(r.单价)}</td>
+                <td>${r.数量}</td>
+                <td>${esc(r.到货时间 ?? '')}</td>
+                <td><span class="tag ${parseFloat(r.延迟天数) >= 8 ? 'tag-danger' : 'tag-warning'}">${r.延迟天数 || 0} 天</span></td>
+                <td>${r.扣款比例 ? r.扣款比例 + '%' : ''}</td>
+                <td><strong>¥${TableUtils.formatMoney(r.扣款金额)}</strong></td>
+                <td>${r.违约次数 || 0}</td>
+                <td>${esc(r.备注 ?? '')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    TableUtils.initSmartSelect('breachTableArea');
+    TableUtils.initSortableHeaders('breachTableArea');
+  },
+
+  applyFilter() {
+    this.currentFilter.keyword = (document.getElementById('breachKw')?.value || '').trim();
+    this.loadData();
+  },
+  resetFilter() {
+    this.currentFilter = { keyword: '' };
+    const input = document.getElementById('breachKw');
+    if (input) input.value = '';
+    this.loadData();
+  },
+  exportData() {
+    // 🟢 v229.03：导出列 = 工作台表格当前 13 列（含税单价列数据字段为「单价」）
+    const cols = ['公司名称', '涉及订单号', '存货编码', '存货名称', '规格型号',
+      { key: '单价', title: '含税单价' }, '数量', '到货时间', '延迟天数', '扣款比例', '扣款金额', '违约次数', '备注'];
+    TableUtils.exportToExcel(this.currentData, `违约台账_${new Date().toISOString().split('T')[0]}.xlsx`, '违约台账', cols);
+  }
+};

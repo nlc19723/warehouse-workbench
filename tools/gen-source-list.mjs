@@ -30,6 +30,13 @@ const RELEASE_FILES = ['releases/app-manifest.json'];
 const EXCLUDE_FILE_RE = [
   /^docs\/体验走查报告.*\.md$/,          // 体验走查报告
   /^docs\/(全局)?(代码)?审查报告.*\.md$/, // 代码审查报告
+  // 🟢 v229.56：堵住预览/提案/对比稿漏入 —— docs/ 下 HTML 全部是开发期产物（方案预览/提案/对比稿），
+  //   运行时不引用任何 docs/*.html；任意位置的 preview（含中文「预览/提案」）同样剔除。
+  //   此前仅靠 md 白名单，HTML 无过滤，导致 sidebar-footer-collapsible-preview.html 等 3 个预览进了清单，
+  //   且磁盘后来新增的 10+ 个 *预览*.html 会被 index.html 的「自愈补入」实时塞进下载包。
+  /^docs\/.+\.html?$/i,
+  /preview/i,
+  /预览|提案/,
 ];
 const EXCLUDE_DIRS = ['tools/ux-review'];  // 走查截图与采集数据目录（整棵子树）
 // 工具脚本（tools 在 SKIP_DIRS 内，需显式列入，确保「源码下载」包含凭证编码工具）
