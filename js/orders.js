@@ -235,7 +235,7 @@ const OrdersModule = {
     TableUtils.virtualTable(area, { items, rowHtml, thead, tableAttrs: 'data-table-key="orders"', threshold: 150 });
 
     this.renderPagination(total, totalPages);
-    TableUtils.initSmartSelect('orderTableArea');
+    TableUtils.initExcelSelection('orderTableArea');
     TableUtils.initSortableHeaders('orderTableArea');
   },
 

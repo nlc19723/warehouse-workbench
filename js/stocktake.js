@@ -147,11 +147,15 @@ const StocktakeModule = {
       this._sheetTouched = this._sheetTouched || { saved: true, finished: false, abandoned: false };
       content.innerHTML = this._rootHtml();
       this.renderTable();
+      // 🟢 v229.65：盘点主表启用 Excel 式框选 + 复制（计数/备注为 input，守卫自动放行，不影响录入）
+      if (typeof TableUtils !== 'undefined' && typeof TableUtils.initExcelSelection === 'function') TableUtils.initExcelSelection('stArea');
       this._restoreScroll();  // 🟢 v228.03：回到离开前的滚动位置
       this._syncAssignedTasks(3000).then(() => this._refreshTaskBar()); // 后台补同步任务栏
       return;
     }
     content.innerHTML = this._rootHtml();
+    // 🟢 v229.65：盘点主表启用 Excel 式框选 + 复制
+    if (typeof TableUtils !== 'undefined' && typeof TableUtils.initExcelSelection === 'function') TableUtils.initExcelSelection('stArea');
     // 🟢 v228.47：contentArea 重建后 stArea 是**新节点**，此前打的视图标记（data-st-view）随之丢失，
     //   而 _refreshQuarterPickerIfShown / _refreshQuarterPickerLight 的守卫正是读这个属性 ——
     //   标记一丢，后续 3s 轮询的轻量重渲全部静默失效（界面停止跟随云端，用户以为"不同步了"）。
@@ -3381,7 +3385,7 @@ const StocktakeModule = {
   // 🟢 v229.17（L1）：基线分片生命周期治理 —— 收口超过宽限期的分片自动删除。
   //   基线只在进行中那一轮有用，收口后任何组织都不再读取（_pullQuarterBaseline 只读 curKey），
   //   故收口 + 宽限期后即可安全删除，从构造上杜绝堆积。不分空批/真实批。
-  BASELINE_SHARD_GRACE_MS: 30 * 24 * 60 * 60 * 1000,   // 收口后 30 天宽限期（留给离线设备补传）
+  BASELINE_SHARD_GRACE_MS: 24 * 60 * 60 * 1000,   // 收口后 24 小时宽限期（留给离线设备补传）
   _gcBaselineThrottleKey: 'wb_stocktake_gc_baseline_at',
   _gcBaselineMinIntervalMs: 6 * 60 * 60 * 1000,         // 6h 节流，避免每次进入都扫桶
   async _gcExpiredBaselineShards() {

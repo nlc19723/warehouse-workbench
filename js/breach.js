@@ -158,7 +158,7 @@ const BreachModule = {
       </div>
     `;
 
-    TableUtils.initSmartSelect('breachTableArea');
+    TableUtils.initExcelSelection('breachTableArea');
     TableUtils.initSortableHeaders('breachTableArea');
   },
 

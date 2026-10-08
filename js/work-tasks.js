@@ -101,51 +101,19 @@ const WorkTasksModule = (function () {
       }
     }
 
-    // 日期/时间解析
-    let due = null;
-    // 绝对日期 yyyy-mm-dd / yyyy/mm/dd
-    let m = text.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-    if (m) due = new Date(+m[1], +m[2] - 1, +m[3]);
-    // X月X日
-    if (!due) { m = text.match(/(\d{1,2})月(\d{1,2})[日号]?/); if (m) due = new Date(now().getFullYear(), +m[1] - 1, +m[2]); }
-    // 周几（本周内最近的那天）
-    const wmap = { '周日': 0, '周天': 0, '星期一': 1, '周二': 2, '周三': 3, '周四': 4, '周五': 5, '周六': 6, '周一': 1, '周二': 2, '周三': 3, '周四': 4, '周五': 5, '周六': 6 };
-    if (!due) {
-      for (const k in wmap) { if (text.indexOf(k) >= 0) { const t = addDays(startOfDay(now()), (wmap[k] - now().getDay() + 7) % 7); due = t; break; } }
-    }
-    if (!due) { if (/明天/.test(text)) due = addDays(startOfDay(now()), 1); else if (/后天/.test(text)) due = addDays(startOfDay(now()), 2); }
-    if (!due) due = startOfDay(now()); // 默认今天
-
-    // 时间 HH点 / HH:mm（含中文数字：十点 / 十一点 / 九点）
-    let hh = null, mm = 0;
-    m = text.match(/(\d{1,2})[点:：](\d{2})?/);
-    if (m) { hh = +m[1]; if (m[2] != null) mm = +m[2]; }
-    if (hh == null) {
-      const cn = text.match(/(十[一二]?|[一二三四五六七八九])点/);
-      if (cn) {
-        const CN = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12 };
-        hh = CN[cn[1]] || 0;
-      }
-    }
-    if (hh != null) {
-      due = new Date(due.getFullYear(), due.getMonth(), due.getDate(), hh, mm, 0);
-      res.allDay = false;
+    // 🟢 v229.75：日期/时间解析统一交给 NLPDate（纯函数，见 js/nlp-date.js）。
+    //   识别与标题剥离共用同一份 matched 区间，根治「下周四→今天 / 标题残留『下』」等旧 bug。
+    const nd = (typeof NLPDate !== 'undefined') ? NLPDate.parse(text, now()) : null;
+    if (nd && nd.matched.length) {
+      res.dueAt = ymdHms(nd.date);
+      res.allDay = nd.allDay;
+      res.title = nd.rest || '新任务';
     } else {
-      res.allDay = true; // 无具体时刻 → 全天
+      // 兜底（与旧行为一致）：默认今天、全天、标题不剥字
+      res.dueAt = ymdHms(startOfDay(now()));
+      res.allDay = true;
+      res.title = text || '新任务';
     }
-    res.dueAt = ymdHms(due);
-
-    // 标题：去掉已解析的时间/日期 token
-    let title = text
-      .replace(/(\d{4})[-/]\d{1,2}[-/]\d{1,2}/g, '')
-      .replace(/\d{1,2}月\d{1,2}[日号]?/g, '')
-      .replace(/周[一二三四五六日天]/g, '')
-      .replace(/\d{1,2}[点:：]\d{2}/g, '')
-      .replace(/\d{1,2}点/g, '')
-      .replace(/(十[一二]?|[一二三四五六七八九])点/g, '')
-      .replace(/(明天|后天|今天)/g, '')
-      .replace(/\s+/g, ' ').trim();
-    res.title = title || '新任务';
     return res;
   }
 
@@ -349,7 +317,8 @@ const WorkTasksModule = (function () {
     }
     // 快速新增
     html += `<div class="wt-quick">
-        <input id="wtQuickInput" class="wt-qinput" placeholder="快速添加：如「周五十点 复盘库存预警配置」或「王经理 新招供应商」" onkeydown="if(event.key==='Enter')WorkTasksModule.onQuickAdd(this.value)">
+        <input id="wtQuickInput" class="wt-qinput" placeholder="快速添加：如「下周四 复盘」或「周五下午三点 评审」" oninput="WorkTasksModule.onQuickInput(this.value)" onkeydown="if(event.key==='Enter')WorkTasksModule.onQuickAdd(this.value)">
+        <div class="wt-qchip" id="wtQuickChip"></div>
         <button class="wt-qbtn" onclick="WorkTasksModule.onQuickAdd(document.getElementById('wtQuickInput').value)">+ 添加</button>
       </div>`;
     return html;
@@ -511,6 +480,16 @@ const WorkTasksModule = (function () {
   function shiftMonth(d) { _cursor = new Date(_cursor.getFullYear(), _cursor.getMonth() + d, 1); _mode = 'month'; render(); }
   function toggleMonth(v) { _monthOpen = (v === undefined) ? !_monthOpen : v; render(); }
 
+  // 🟢 v229.75：实时解析预览 chip —— 智能解析最怕「猜错了用户不知道」，先把结果亮出来
+  function onQuickInput(val) {
+    const chip = document.getElementById('wtQuickChip');
+    if (!chip) return;
+    const nd = (typeof NLPDate !== 'undefined') ? NLPDate.parse(val || '', new Date()) : null;
+    if (!nd || !nd.matched.length) { chip.className = 'wt-qchip is-none'; chip.textContent = '未识别日期 → 今天'; return; }
+    chip.className = 'wt-qchip' + (nd.allDay ? ' is-allday' : '');
+    chip.innerHTML = '<span class="wt-qarr">▸</span>' + NLPDate.label(nd) + (nd.allDay ? ' · 全天' : '');
+  }
+
   async function onQuickAdd(val) {
     val = (val || '').trim(); if (!val) return;
     const suppliers = await getSuppliers();
@@ -645,7 +624,7 @@ const WorkTasksModule = (function () {
   return {
     render, renderSummaryInto, refreshBell, bellInfo, bootstrap,
     setMode, goToday, shiftCursor, goDate, shiftMonth, toggleMonth,
-    onQuickAdd, onToggle, onRemove,
+    onQuickAdd, onQuickInput, onToggle, onRemove,
     addFromBusiness, ensureOrderApproveTasks,
     startSync, stopSync, onLeave,
     _debug: { _load: WorkTasksSync.load, getStats, addTask, removeTask, toggleDone },

@@ -408,7 +408,7 @@ const QueryModule = {
     `;
     // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（查询页使用 30/50/100/全部）
     TableUtils.renderPagination('queryPagination', { module: 'QueryModule', total, totalPages, page: this.page, pageSize: this.pageSize, pageSizes: [30, 50, 100, 'all'] });
-    TableUtils.initSmartSelect('queryResultArea');
+    TableUtils.initExcelSelection('queryResultArea');
     TableUtils.initSortableHeaders('queryResultArea');
   },
 

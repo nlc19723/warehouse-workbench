@@ -40,7 +40,10 @@ const EXCLUDE_FILE_RE = [
 ];
 const EXCLUDE_DIRS = ['tools/ux-review'];  // 走查截图与采集数据目录（整棵子树）
 // 工具脚本（tools 在 SKIP_DIRS 内，需显式列入，确保「源码下载」包含凭证编码工具）
-const TOOL_FILES = ['tools/credential-tool.mjs', 'tools/gen-source-list.mjs', 'tools/gen-critical-css.mjs'];
+// 🟢 v229.73：加入 sync-boot-worker-inline —— 发版必跑（worker 改动后同步 index.html 内联块，
+//   内联块含约 37KB 矢量路径数据，人工编辑会破坏字形且无法目视校验）。属用户可复用的常备工具。
+//   注意：一次性验收脚本（verify-*.mjs / tide-harness.html）不入包 —— harness 还内嵌了 worker 副本，冗余 54KB。
+const TOOL_FILES = ['tools/credential-tool.mjs', 'tools/gen-source-list.mjs', 'tools/gen-critical-css.mjs', 'tools/sync-boot-worker-inline.mjs'];
 // 点文件（CDN 可能 403，index.html 有内嵌兜底，仍列入清单保证常规托管可下载）
 const DOT_FILES = ['.gitignore', '.gitlab-ci.yml', '.nojekyll', '.github/workflows/deploy.yml'];
 // 🟢 v228.66：源码下载包内的 markdown 文档「仅保留两类」——

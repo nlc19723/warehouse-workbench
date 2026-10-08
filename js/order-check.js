@@ -139,6 +139,10 @@ const OrderCheckModule = {
     if (typeof TableUtils !== 'undefined' && TableUtils.initSortableHeaders) {
       TableUtils.initSortableHeaders('ocDetailTable', { tableKey: 'orderChecks' });
     }
+    // 🟢 v229.65：通用 Excel 式单元格框选 + 复制（输入框/＋按钮由守卫自动放行，不影响录入）
+    if (typeof TableUtils !== 'undefined' && typeof TableUtils.initExcelSelection === 'function') {
+      TableUtils.initExcelSelection('ocDetailTable');
+    }
     // 🟢 v157：行渲染（含草稿恢复）后按内容上色
     this._paintCells();
   },

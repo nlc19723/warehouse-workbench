@@ -200,6 +200,8 @@ const OrderTrackModule = {
     TableUtils.renderPagination('trackPagination', { module: 'OrderTrackModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
     TableUtils.initSortableHeaders('trackTableArea');
+    // 🟢 v229.65：通用 Excel 式单元格框选 + 复制
+    if (typeof TableUtils.initExcelSelection === 'function') TableUtils.initExcelSelection('trackTableArea');
     // 🟢 v133：移动端安装浮动表头/首列（绕开 iOS Safari thead sticky bug）
     if (window.TableStickyOverlay) TableStickyOverlay.install('trackTableArea');
   },

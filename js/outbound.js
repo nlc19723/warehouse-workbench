@@ -1185,7 +1185,7 @@ const OutboundListModule = {
     });
 
     this.renderPagination(total, totalPages);
-    TableUtils.initSmartSelect('oblTableArea');
+    TableUtils.initExcelSelection('oblTableArea');
     TableUtils.initSortableHeaders('oblTableArea');
   },
 

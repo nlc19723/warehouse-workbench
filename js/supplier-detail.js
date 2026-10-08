@@ -216,7 +216,7 @@ window.SupplierDetailModule = {
 
     // 5) 智能选区 + 排序/筛选（仅当有表格时挂）
     if (items.length > 0) {
-      TableUtils.initSmartSelect(sectionId);
+      TableUtils.initExcelSelection(sectionId);
       TableUtils.initSortableHeaders(sectionId, {
         initialSort: s.sort ? { col: s.columns.findIndex(c => c.field === s.sort.field), dir: s.sort.dir } : null,
         onSortChange: (field, dir) => {

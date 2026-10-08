@@ -216,7 +216,7 @@ const SupplierModule = {
     `;
 
     this.renderPagination(total, totalPages);
-    TableUtils.initSmartSelect('supplierTableArea');
+    TableUtils.initExcelSelection('supplierTableArea');
     TableUtils.initSortableHeaders('supplierTableArea');
   },
 

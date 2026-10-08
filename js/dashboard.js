@@ -437,6 +437,10 @@ const DashboardModule = {
       ? `<div class="todo-detail-table"><table class="data-table"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c2 => `<td>${c2}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
       : '<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-text">暂无缺失记录</div></div>';
     overlay.classList.add('show');
+    // 🟢 v229.65：下钻明细浮层表启用 Excel 式框选 + 复制
+    if (typeof TableUtils !== 'undefined' && typeof TableUtils.initExcelSelectionAll === 'function') {
+      TableUtils.initExcelSelectionAll('modalBody');
+    }
   },
 
   // ===== 3D CoverFlow =====
@@ -748,6 +752,10 @@ const DashboardModule = {
       ? `<div class="todo-detail-table"><table class="data-table"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
       : '<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-text">暂无相关记录</div></div>';
     overlay.classList.add('show');
+    // 🟢 v229.65：待办下钻明细浮层表启用 Excel 式框选 + 复制
+    if (typeof TableUtils !== 'undefined' && typeof TableUtils.initExcelSelectionAll === 'function') {
+      TableUtils.initExcelSelectionAll('modalBody');
+    }
   },
 
   fmt(v) {

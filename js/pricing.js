@@ -216,7 +216,7 @@ const PricingModule = {
     // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
     TableUtils.renderPagination('pricingPagination', { module: 'PricingModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
-    TableUtils.initSmartSelect('pricingTableArea');
+    TableUtils.initExcelSelection('pricingTableArea');
     TableUtils.initSortableHeaders('pricingTableArea');
   },
 

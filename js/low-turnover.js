@@ -122,7 +122,7 @@ const LowTurnoverModule = {
     // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
     TableUtils.renderPagination('ltPagination', { module: 'LowTurnoverModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
-    TableUtils.initSmartSelect('ltTableArea');
+    TableUtils.initExcelSelection('ltTableArea');
     TableUtils.initSortableHeaders('ltTableArea');
   },
 

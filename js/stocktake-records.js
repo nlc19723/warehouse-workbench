@@ -207,9 +207,13 @@ const StocktakeRecordModule = {
               <th class="stRec-opcell">操作</th>
             </tr>
           </thead>
-          <tbody>${body}</tbody>
+          <tbody>${body}          </tbody>
         </table>
       </div>`;
+    // 🟢 v229.65：盘点记录表启用 Excel 式框选 + 复制（首列勾选框由守卫自动放行，不影响多选删除）
+    if (typeof TableUtils !== 'undefined' && typeof TableUtils.initExcelSelection === 'function') {
+      TableUtils.initExcelSelection('stRecArea');
+    }
     this._updateSelBar();
   },
 

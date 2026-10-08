@@ -285,7 +285,11 @@ const App = {
                        '」模块 —— 保留当前界面并原地重渲（不抢跳仪表盘）');
           try { this.go(this.currentModule); } catch (e) { /* 重渲失败也不抢跳 */ }
         } else {
-          this.go('dashboard');
+          // 🟢 v229.72：落点由 _bootTarget() 统一解析 —— 下拉刷新后直接落目标模块，
+          //   不再先渲染 dashboard 再改道（那会造成闪屏 + 重复渲染）。
+          //   无意图标记时 _bootTarget() 返回 _firstAllowedModule()，与改造前逐字一致。
+          const bt = this._bootTarget();
+          this.go(bt.mod);
         }
       } else {
         // 🟢 v228.45 修复（跨端走查发现）：启动期「空状态」不得覆盖用户已经打开的界面。
@@ -315,7 +319,10 @@ const App = {
       if (window.BootSplash) window.BootSplash.complete();
       // 🟢 v228.49-fix4：异常兜底同样不得把用户从已打开的模块踢回仪表盘
       const errNavAway = !!(this.currentModule && this.currentModule !== 'dashboard');
-      try { this.go(errNavAway ? this.currentModule : 'dashboard'); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
+      // 🟢 v229.72：兜底分支同样走 _bootTarget()，保证「有下拉刷新意图」时落点一致
+      //（否则数据链路异常时又被踢回驾驶舱，出现第三种表现：闪两次）。
+      const errTarget = errNavAway ? this.currentModule : this._bootTarget().mod;
+      try { this.go(errTarget); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
       WBModal.alert('初始化出现异常，已尝试继续加载；如仍空白请刷新重试。\n' + (err && err.message ? err.message : err));
     }
   },
@@ -725,6 +732,23 @@ const App = {
     } catch (e) {
     /* 探测失败不影响主流程 */ console.warn('[app.js:376] 异常(已忽略):', e);
   }
+  },
+
+  // 🟢 v229.76：新 SW 接管时由 index.html 主动唤起的一次性版本探测提示。
+  //   复用 startVersionWatch 的探测逻辑（比对 releases/app-manifest.json 权威版本号），
+  //   发现新版本即滑出「🆕 有新版本，刷新后生效」提示条 —— 不打断当前会话，用户点击才刷新。
+  _notifyNewVersion() {
+    try {
+      const norm = (s) => { const m = String(s || '').match(/(\d+(?:\.\d+)*)/); return m ? parseFloat(m[1]) : 0; };
+      const currentV = norm((typeof AppConfig !== 'undefined' && AppConfig.app && AppConfig.app.version) || '');
+      if (!currentV) return;
+      fetch('releases/app-manifest.json?_vchk=' + Date.now(), { cache: 'no-store' })
+        .then(r => r.ok ? r.json().catch(() => null) : null)
+        .then(data => {
+          const latestV = norm(data && data.version);
+          if (latestV && latestV > currentV) this._showUpdateBar(currentV, latestV);
+        }).catch(() => { /* 离线/失败静默 */ });
+    } catch (e) { /* 探测失败不影响主流程 */ }
   },
 
   // 顶部滑入提示条：有新版本，点击即刷新
@@ -1284,7 +1308,9 @@ const App = {
     this._applyEntryVisibility();
     this._wireEntryGuards();
     const ov = document.getElementById('modalOverlay'); if (ov) ov.classList.remove('show');
-    const first = this._firstAllowedModule();
+    // 🟢 v229.72：首屏落点统一走 _bootTarget()（含下拉刷新意图）；
+    //   无意图标记时等价于 _firstAllowedModule()，与改造前逐字一致。
+    const first = this._bootTarget().mod;
 
     // 数据链路是否已收口（_bootDone 由 _bootData 结束时置位，见下方 _markBootDone）
     if (this._bootDone) { this.go(first || 'dashboard'); return; }
@@ -1750,6 +1776,57 @@ const App = {
       if (this._canAccessModule(AppConfig.MODULES[i].key)) return AppConfig.MODULES[i].key;
     }
     return 'dashboard';
+  },
+
+  // ============================================================
+  // 🟢 v229.72：首屏落点统一解析器 —— 消除「进入工作台先闪一下驾驶舱 + 渲染两次」
+  //
+  // 问题（v229.70 下拉刷新引入、v229.71 未根治）：
+  //   _bootData 的首次导航硬编码 go('dashboard')，而下拉刷新要的落点是用户原所在模块。
+  //   于是「先渲染 dashboard → 再被切到目标模块」= 闪一下 + 同一模块可能渲染两次，
+  //   弱网下 DataLoader.init() 可达 10s+，等待感被放大为「卡了两遍」。
+  //
+  // 治法：**让启动链路一开始就知道最终要去哪，一次导航到位**，
+  //   而不是在启动之后再补偿式改道（补偿式改道天然会多渲染一次）。
+  //
+  // 决策优先级（严格顺序，任一不满足即回落下一条）：
+  //   ① sessionStorage.wb_boot_target —— **只有**下拉刷新在 location.reload() 之前写入时才存在；
+  //      带时间戳，超过 60s 视为陈旧丢弃。读取即删（一次性消费），避免后续刷新二次生效。
+  //   ② _firstAllowedModule() —— 兜底，与改造前行为**逐字一致**（普通冷启动完全不变）。
+  //
+  // ⚠️ 三重校验（缺一不可）：
+  //   · _canAccessModule —— 防止越权导航到无权限模块（目标可能来自客户端可控的存储）；
+  //   · modules 存在性 —— 防止指向已下线/拼错的 key；
+  //   · 时间戳新鲜度 —— 防止陈旧标记把落点钉在早已离开的模块上。
+  //
+  // ⚠️ 与 v228.49 系列「不得抢跳用户界面」守卫的关系：
+  //   那套守卫管的是「**何时**跳」（用户已离开起始页就不许覆盖），本函数管的是「**跳哪**」。
+  //   两者正交，因此不改动任何 v228.49 判定，也就不存在互相打架的可能。
+  // ============================================================
+  _bootTarget() {
+    // ① 意图落点（下拉刷新写入）
+    try {
+      const KEY = 'wb_boot_target', AT = 'wb_ptr_at';
+      const at = Number(sessionStorage.getItem(AT) || 0);
+      const mod = String(sessionStorage.getItem(KEY) || '');
+      // 一次性消费：无论后续校验是否通过都先删，避免陈旧标记反复生效
+      sessionStorage.removeItem(KEY);
+      sessionStorage.removeItem(AT);
+      if (mod && at && (Date.now() - at <= 60 * 1000)) {
+        const exists = this.modules && this.modules[mod];
+        if (exists) {
+          let allowed = true;
+          try { allowed = this._canAccessModule(mod); } catch (e) { allowed = false; }
+          if (allowed) return { mod: mod, source: 'ptr' };
+          console.warn('[boot] 忽略下拉刷新落点「' + mod + '」：当前账号无权限');
+        } else {
+          console.warn('[boot] 忽略下拉刷新落点「' + mod + '」：模块不存在');
+        }
+      }
+    } catch (e) { /* 隐私模式等：失败即走兜底 */ }
+
+    // ② 兜底：按权限取第一个可见模块（与改造前逐字一致）
+    return { mod: this._firstAllowedModule() || 'dashboard', source: 'default' };
   },
   // 按权限显隐侧边栏项（不带 data-module 的通用入口始终可见）
   _applySidebarVisibility() {

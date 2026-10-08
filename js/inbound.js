@@ -222,7 +222,7 @@ const InboundModule = {
     TableUtils.virtualTable(area, { items, rowHtml, thead, tableAttrs: 'data-table-key="inbound"', threshold: 150 });
 
     this.renderPagination(total, totalPages);
-    TableUtils.initSmartSelect('inboundTableArea');
+    TableUtils.initExcelSelection('inboundTableArea');
     TableUtils.initSortableHeaders('inboundTableArea');
   },
 

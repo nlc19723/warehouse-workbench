@@ -23,7 +23,8 @@ window.StockDetailModule = {
     const code = pe && pe.type === 'stock' ? pe.key : '';
     if (!code) { content.innerHTML = this._buildStockEmptyState(); return; }
 
-    showLoading('正在加载存货档案...');
+    // 🟢 v229.64：不再弹全屏「正在加载存货档案…」遮罩——查询为内存内同步级操作，
+    //   切模块的轻量骨架+顶栏进度条（go 内 _showSwitchSkeleton）已足够，避免多余弹窗。
     try {
       const rel = await DataStore.queryByEntity('stock', code);
       if (token !== undefined && token !== App._goToken) return;
@@ -49,8 +50,6 @@ window.StockDetailModule = {
     } catch (e) {
       console.error('[StockDetailModule]', e);
       content.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-text">加载失败: ${esc(e.message || e)}</div></div>`;
-    } finally {
-      hideLoading();
     }
   },
 
@@ -272,7 +271,7 @@ window.StockDetailModule = {
 
     // 5) 智能选区 + 排序/筛选
     if (items.length > 0) {
-      TableUtils.initSmartSelect(sectionId);
+      TableUtils.initExcelSelection(sectionId);
       TableUtils.initSortableHeaders(sectionId, {
         initialSort: s.sort ? { col: s.columns.findIndex(c => c.field === s.sort.field), dir: s.sort.dir } : null,
         onSortChange: (field, dir) => {

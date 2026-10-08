@@ -2527,6 +2527,49 @@ button{
   outline-color: var(--primary);
 }
 
+/* 库存预警表：保留拖拽求和（气泡/合计），但关闭数值格的蓝色高亮（仅作用于本表，其它模块不变） */
+#alertTableArea td.cell-selected{
+  background: transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  z-index: auto !important;
+}
+
+/* 库存预警表：禁止原生文字选区——鼠标按下拖动不再把数字涂成蓝色选块（拖拽求和为 JS 实现，不受影响） */
+#alertTableArea .data-table{
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 库存预警表：Excel 式单元格框选高亮（淡蓝填充 + 细描边，行选高亮互不冲突） */
+#alertTableArea .data-table tbody{ cursor: cell; }
+#alertTableArea tbody td.cell-picked{
+  background: rgba(91,155,213,0.16) !important;
+  box-shadow: inset 0 0 0 1px rgba(91,155,213,0.40);
+}
+[data-theme="dark"] #alertTableArea tbody td.cell-picked{
+  background: rgba(56,189,248,0.18) !important;
+  box-shadow: inset 0 0 0 1px rgba(56,189,248,0.45);
+}
+
+/* 通用 Excel 式框选（v229.65）：替换旧拖拽求和，统一全表交互 */
+.excel-sel .data-table,
+.excel-sel table{
+  -webkit-user-select: none;
+  user-select: none;
+}
+.excel-sel .data-table tbody,
+.excel-sel table tbody{ cursor: cell; }
+.excel-sel tbody td.cell-picked{
+  background: rgba(91,155,213,0.16) !important;
+  box-shadow: inset 0 0 0 1px rgba(91,155,213,0.40);
+}
+[data-theme="dark"] .excel-sel tbody td.cell-picked{
+  background: rgba(56,189,248,0.18) !important;
+  box-shadow: inset 0 0 0 1px rgba(56,189,248,0.45);
+}
+
 /* 浮动汇总提示 */
 .cell-summary-tooltip{
   position: fixed;
@@ -2559,6 +2602,76 @@ button{
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
+
+/* ============================================================
+   🟢 L1：库存预警 批量复制 —— 行选高亮 / 选择条 / 右键菜单
+   ============================================================ */
+.data-table tbody tr.row-selected > td{
+  background: rgba(91,155,213,0.14) !important;
+}
+.data-table tbody tr.row-selected{
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+[data-theme="dark"] .data-table tbody tr.row-selected > td{
+  background: rgba(56,189,248,0.16) !important;
+}
+
+/* 底部选择条 */
+.sel-bar{
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translate(-50%, 16px);
+  z-index: 320;
+  opacity: 0;
+  pointer-events: none;
+  transition: all .22s cubic-bezier(.16,1,.3,1);
+}
+.sel-bar.show{ opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.sel-bar-inner{
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel-bg, #fff);
+  backdrop-filter: var(--glass-blur, blur(12px));
+  -webkit-backdrop-filter: var(--glass-blur, blur(12px));
+  border: 1px solid var(--primary, #5b9bd5);
+  border-radius: var(--radius-md, 14px);
+  box-shadow: 0 8px 32px rgba(0,0,0,.18), 0 0 16px var(--primary-glow, rgba(91,155,213,.25));
+  padding: 8px 12px;
+}
+.sel-bar-count{ font-size: 13px; color: var(--text, #1f2937); margin-right: 4px; }
+.sel-bar-count b{ color: var(--primary, #5b9bd5); font-size: 15px; }
+.sel-btn{
+  border: 1px solid var(--border, rgba(148,163,184,.3));
+  background: transparent; color: var(--text, #1f2937);
+  border-radius: var(--radius-sm, 8px); padding: 6px 10px; font-size: 13px; cursor: pointer;
+  transition: all .15s;
+}
+.sel-btn:hover{ border-color: var(--primary, #5b9bd5); background: rgba(91,155,213,.12); }
+.sel-btn.ghost{ color: var(--text-muted, #94a3b8); }
+
+/* 右键菜单 */
+.ctx-menu{
+  position: fixed; z-index: 340;
+  min-width: 210px;
+  background: var(--panel-bg, #fff);
+  backdrop-filter: var(--glass-blur, blur(12px));
+  -webkit-backdrop-filter: var(--glass-blur, blur(12px));
+  border: 1px solid var(--border, rgba(148,163,184,.25));
+  border-radius: var(--radius-md, 14px);
+  box-shadow: 0 8px 32px rgba(0,0,0,.22);
+  padding: 6px;
+  opacity: 0; transform: scale(.96); transform-origin: top left;
+  transition: all .14s cubic-bezier(.16,1,.3,1);
+}
+.ctx-menu.show{ opacity: 1; transform: scale(1); }
+.ctx-item{
+  padding: 8px 12px; font-size: 13px; color: var(--text, #1f2937);
+  border-radius: var(--radius-sm, 8px); cursor: pointer; white-space: nowrap;
+}
+.ctx-item:hover{ background: rgba(91,155,213,.16); }
+.ctx-sep{ height: 1px; background: var(--border, rgba(148,163,184,.2)); margin: 4px 2px; }
+
 
 /* ========== Excel式表头排序/筛选（Premium 升级版）========== */
 /* 🟢 v185：背景/阴影/文字同步 D' 冰川蓝渐变，避免覆盖主规则效果 */
@@ -5360,6 +5473,20 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
 }
 .wt-qbtn:hover{ background: var(--primary-deep, #3B82C4); }
 
+/* 🟢 v229.75：实时解析预览 chip */
+.wt-qchip{ margin-top:9px; min-height:0; font-size:12.5px; line-height:1.6; color:var(--text-muted); }
+.wt-qchip:empty{ display:none; }
+.wt-qchip.is-none{ color:var(--text-muted); }
+.wt-qchip.is-allday,
+.wt-qchip:not(.is-none){
+  color:var(--text-2,#5A6B7F);
+  background:color-mix(in srgb, var(--accent-mint,#6DBF9F) 14%, transparent);
+  border-radius:8px; padding:6px 11px; display:inline-block; font-weight:600;
+}
+.wt-qarr{ color:var(--accent-mint,#6DBF9F); margin-right:5px; font-weight:700; }
+[data-theme="dark"] .wt-qchip.is-allday,
+[data-theme="dark"] .wt-qchip:not(.is-none){ color:#9FE7C9; }
+
 /* ---- 周视图 ---- */
 .wt-week{ display: grid; grid-template-columns: repeat(7, 1fr); gap: 7px; }
 .wt-wcol{
@@ -5484,3 +5611,46 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
   box-shadow:0 30px 70px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06); }
 [data-theme="dark"] .brief-glyph{ background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.14); }
 
+
+/* ============================================
+   移动端下拉刷新指示器 🟢 v229.70
+   挂 fixed 在视口顶部居中：#contentArea 是滚动容器，指示器不能随它滚动，
+   故fixed 到 body 下由 JS 变换位移驱动。默认隐藏，仅 armed 后淡入。
+   ============================================ */
+.wb-ptr{
+  position: fixed; left: 50%; top: 0; z-index: 90;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  width: 62px; height: 42px; margin-left: -31px;
+  color: var(--primary); pointer-events: none; user-select: none;
+  opacity: 0; transform: translate3d(0,-100%,0);
+  transition: opacity .16s ease;
+}
+.wb-ptr.is-hidden{ opacity: 0; }
+/* 箭头：JS 按下拉进度旋转 0→180°，到阈值正好翻面提示"松手刷新" */
+.wb-ptr-arrow{ transition: transform .08s linear; will-change: transform; }
+/* 刷新中：外圈转圈，箭头淡出让位 */
+.wb-ptr-ring{
+  position: absolute; top: 10px; width: 20px; height: 20px; border-radius: 50%;
+  border: 2.4px solid currentColor; border-top-color: transparent;
+  opacity: 0; transform: scale(.6);
+}
+.wb-ptr.is-refreshing .wb-ptr-ring{
+  opacity: .95; animation: wb-ptr-spin .8s linear infinite;
+}
+.wb-ptr.is-refreshing .wb-ptr-arrow{ opacity: 0; }
+@keyframes wb-ptr-spin{ to{ transform: rotate(360deg); } }
+/* 文案：下拉提示（超过 42px 容器高度时不至于挤掉图标，用绝对定位下沉） */
+.wb-ptr-text{
+  position: absolute; top: 40px; left: 50%; transform: translateX(-50%);
+  font-size: 11px; line-height: 1; white-space: nowrap; color: var(--text-body);
+  text-shadow: 0 1px 2px rgba(0,0,0,.08);
+}
+/* 暗色主题：文字用反色，描边环随主色 */
+[data-theme="dark"] .wb-ptr-text{ color: var(--text-inverse); text-shadow: 0 1px 3px rgba(0,0,0,.5); }
+/* 尊重系统减弱动效偏好 */
+@media (prefers-reduced-motion: reduce){
+  .wb-ptr, .wb-ptr-arrow{ transition: none !important; }
+  .wb-ptr.is-refreshing .wb-ptr-ring{ animation: none; border-top-color: currentColor; opacity:.7; }
+}
+/* 仅移动端显示：桌面无 touch，不提供此交互 */
+@media (min-width: 769px){ .wb-ptr{ display: none; } }

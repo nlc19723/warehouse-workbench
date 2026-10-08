@@ -121,6 +121,11 @@ window.OrderDetailModule = {
         fullOrderSection +
         DetailCommon.section('入库明细', inboundRows, inboundCols, 50);
 
+      // 🟢 v229.65：订单档案内多张明细表（主订单 / 关联完整订单 / 入库明细）统一启用 Excel 式框选 + 复制
+      if (typeof TableUtils !== 'undefined' && typeof TableUtils.initExcelSelectionAll === 'function') {
+        TableUtils.initExcelSelectionAll('contentArea');
+      }
+
       // 若该订单存在"是否需补货"关联存货，给出跳转入口（打通模块）
       if (main.存货名称) {
         const codeMap = (typeof DataLoader !== 'undefined' && DataLoader.getStockNameSpecCodeMap) ? await DataLoader.getStockNameSpecCodeMap().catch(() => null) : null;

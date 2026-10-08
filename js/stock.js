@@ -138,7 +138,7 @@ const StockModule = {
     // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
     TableUtils.renderPagination('stockPagination', { module: 'StockModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
-    TableUtils.initSmartSelect('stockTableArea');
+    TableUtils.initExcelSelection('stockTableArea');
     TableUtils.initSortableHeaders('stockTableArea');
 
     // 🟢 v197：A3 多选 + 全选 + 计数
