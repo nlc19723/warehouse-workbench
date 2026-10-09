@@ -1068,7 +1068,8 @@ const OutboundListModule = {
         <div class="fb-row fb-row--buttons">
           <button class="btn--primary" onclick="OutboundListModule.applyFilter()">筛选</button>
           <button class="btn--ghost" onclick="OutboundListModule.resetFilter()">重置</button>
-          <button class="btn--ghost" onclick="OutboundListModule.importData()" title="把本文件明细追加到现有数据之后（不清空）">⬆ 增量导入</button>
+          <button class="btn--ghost" onclick="OutboundListModule.importData()" title="按出库单号增量：文件中已有的单号先删旧明细再重写，其余单号追加保留（不清空库）">⬆ 增量导入</button>
+          <button class="btn--ghost" onclick="OutboundListModule.importData('overwrite')" title="清空全部现有出库记录，只保留本次导入的内容（未包含在本文件中的出库单将被删除）">⬆ 覆盖导入</button>
           <button class="btn--ghost" onclick="OutboundListModule.exportData()">📥 导出</button>
         </div>
       </div>
@@ -1248,9 +1249,13 @@ const OutboundListModule = {
     TableUtils.exportToExcel(rows, `出库明细_${new Date().toISOString().split('T')[0]}.xlsx`, '出库明细', cols);
   },
 
-  // ===== v227.78：导入 Excel（整体覆盖当前「中心出库列表」） =====
+  // ===== v227.78：导入 Excel =====
+  // 🟢 v229.81：同一入口支持两种模式 ——
+  //   importData()              增量（replace）：以「出库单号」为单位局部替换，库里其它单号保留
+  //   importData('overwrite')   覆盖：清空全表，只留本次文件内容（未包含在内的单号被删除）
   // 源表头(22列) 关联至工作台列；领用人列已删除故不导入；序号列渲染时自然递增（不入库）。
-  importData() {
+  importData(mode) {
+    const m = (mode === 'overwrite') ? 'overwrite' : 'replace';
     let input = document.getElementById('oblImportFile');
     if (!input) {
       input = document.createElement('input');
@@ -1258,9 +1263,12 @@ const OutboundListModule = {
       input.id = 'oblImportFile';
       input.accept = '.xlsx,.xls';
       input.style.display = 'none';
-      input.addEventListener('change', (e) => this._onImportFile(e));
+      // 🟢 v229.81：input 是复用的（两个按钮共用），mode 每次调用都可能变。
+      //   存在 dataset 上由回调现场读取，避免闭包捕获第一次的 mode 导致按钮「串味」。
+      input.addEventListener('change', (e) => this._onImportFile(e, e.target.dataset.mode || 'replace'));
       document.body.appendChild(input);
     }
+    input.dataset.mode = m;
     input.value = '';
     input.click();
   },
@@ -1278,9 +1286,16 @@ const OutboundListModule = {
    *       - 跳过：保留旧明细，只写入库中不存在的新单号
    *   · 删除 + 写入在同一事务内完成，中途失败自动回滚，不会出现「删了没插上」。
    */
-  async _onImportFile(e) {
+  /**
+   * 🟢 v229.81：mode = 'replace'（增量，默认）| 'overwrite'（覆盖）
+   *   两种模式共用「①解析 + 映射」这一段，之后分流：
+   *     replace   → 按出库单号局部替换（见下方 v228.16 逻辑）
+   *     overwrite → _doOverwriteImport：清空全表后只写入本次文件
+   */
+  async _onImportFile(e, mode) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
+    const overwrite = (mode === 'overwrite');
 
     // 🟢 v228.17：全流程无确认弹窗 —— 解析 → 查重 → 替换写入一气呵成，结果用 Toast 反馈。
     showLoading('正在读取 Excel…');
@@ -1302,6 +1317,12 @@ const OutboundListModule = {
       const mapped = res.rows;
       if (!mapped.length) { Toast.warn('未识别到可导入明细（请确认表头含「出库单号/项目/出库日期」等列）'); return; }
       this._importSkipped = res.skipped;
+
+      // 🟢 v229.81：覆盖模式在此分流（清空全表 → 只写本次文件），下方增量逻辑完全不动
+      if (overwrite) {
+        await this._doOverwriteImport(file, mapped, this._fileFingerprint(mapped));
+        return;
+      }
 
       // —— ② 查重（按出库单号）→ ③ 先删重复单号旧明细、再写入本次全部行（同一事务）——
       showLoading('正在导入…');
@@ -1398,6 +1419,61 @@ const OutboundListModule = {
       .map(c => ({ code: c, old: oldByCode.get(c), now: newByCode.get(c) }))
       .sort((a, b) => (b.old - b.now) - (a.old - a.now));
     return { codes, newByCode, oldByCode, dupCodes: dupCodes.length, delCount, freshCount, shrink };
+  },
+
+  /**
+   * 🟢 v229.81：覆盖导入 —— 清空「中心出库列表」全部现有记录，只保留本次文件的内容。
+   *
+   *   与增量导入的区别：
+   *     · 增量以「出库单号」为单位局部替换，库里未涉及的单号原样保留；
+   *     · 覆盖以「库」为单位整体替换，未出现在本次文件中的出库单会被删除。
+   *   适用场景：源 Excel 本身就是一份完整台账（每次导出都是全量），而不是增量流水。
+   *
+   *   两处关键保障：
+   *   ① 清空 + 写入在同一个 Dexie 事务内 —— 中途失败自动回滚，
+   *      不会出现「库已清空但没写进去」的空库状态（否则用户会以为数据丢了）。
+   *   ② 云端同步必须传 force 绕过 SyncManager 的「同包并集保护」——
+   *      该保护会把云端留存的旧记录并回来，下次启动 restoreOutboundFromSettings
+   *      就拿这份并集写回本地，覆盖等于静默失效（最隐蔽的数据 bug）。
+   */
+  async _doOverwriteImport(file, mapped, fp) {
+    const before = await db.outbound.count();
+    const orderCnt = new Set(mapped.map(r => String(r.出库单号 || '').trim()).filter(Boolean)).size;
+    // 注意：WBModal.confirm 的 body 走 textContent（不支持 HTML 标签），但支持 \n 换行
+    const ok = await WBModal.confirm(
+      `将清空现有出库记录 ${before} 条，写入本次文件的 ${mapped.length} 条（${orderCnt} 个出库单）。\n` +
+      `未包含在本次文件中的出库单会被删除，操作不可恢复。\n\n` +
+      `建议先点「📥 导出」备份当前数据，确认无误后再覆盖。`,
+      { title: '⚠ 危险操作 · 覆盖导入', okText: '确认覆盖', cancelText: '取消' }
+    );
+    if (!ok) { Toast.warn('已取消覆盖导入，现有数据未做任何改动'); return; }
+
+    showLoading('正在覆盖导入…');
+    await DataStore.write('outbound', () => db.transaction('rw', db.outbound, async () => {
+      await db.outbound.clear();
+      await db.outbound.bulkAdd(mapped);
+    }));
+    this._pushImportHistory(fp, file.name || '', mapped.length);
+
+    // 同 v227.78：不同步的话，下次启动 restoreOutboundFromSettings 会用旧云端数据把本次结果盖回去
+    let syncOk = false;
+    if (typeof DataStore.syncOutboundToSettings === 'function') {
+      syncOk = await DataStore.syncOutboundToSettings({ force: true });   // ← 必须 force，见上方 ②
+    }
+    this.currentFilter = {};
+    this.currentPage = 1;
+    await this.loadData();
+    const after = await db.outbound.count();
+    const filledMsg = this._stockFilled ? `，其中 ${this._stockFilled} 条依据存货档案补全编码` : '';
+    const skipMsg = this._importSkipped ? `，跳过 ${this._importSkipped} 条无单号行` : '';
+    const base = `覆盖导入完成：清空 ${before} 条，写入 ${mapped.length} 条，现有共 ${after} 条${filledMsg}${skipMsg}`;
+    if (syncOk) {
+      Toast.success(`${base}（已同步云端）`);
+    } else {
+      // 离线/未同步是覆盖导入最大的隐患场景：此时云端仍存着被删掉的旧数据，
+      // 下次联网启动会被还原，必须明确告知而不是静默过去。
+      Toast.warn(`${base}；云端未同步 —— 下次联网启动可能被旧云端数据还原，请尽快联网后重新覆盖导入`, 9000);
+    }
   },
 
   /**

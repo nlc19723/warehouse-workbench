@@ -103,7 +103,7 @@
     const { r1, c1, r2, c2 } = state.sel;
     const rows = bodyRows(state.tbody);
     const matrix = [];
-    // 🟢 v229.67：复制只含选中的数据行，不再拼接表头（thead）行——避免粘贴时多出「标题行」。
+    // 复制只含选中的数据行，不拼接表头（thead）行——用户要求粘贴结果不带标题行。
     for (let r = r1; r <= r2 && r < rows.length; r++) {
       const tds = rows[r].children;
       const row = [];
@@ -292,9 +292,32 @@
     docBound = true;
   }
 
+  // 🟢 v229.80：移动端禁用 Excel 式框选 —— 手机上手指滑动本意是滚页，极易误出选区；
+  //   底部浮条还会遮住分页栏（用户实测反馈）。判定为移动端时 bindContainer 直接不绑定，
+  //   交互整段关闭（不会产生选区 → 浮条永不出现）；CSS 再对 .sel-bar 做媒体查询隐藏兜底。
+  //   判定口径：
+  //     · 纯触摸设备（pointer:coarse 且 hover:none）→ 一律移动端。iPad Pro 横屏宽达 1366px，
+  //       单看宽度会漏判，故以「能不能悬停」为准；Windows 触屏笔记本有鼠标 → hover:hover，不受影响。
+  //     · 窄屏窗口（≤820px）→ 移动端（桌面把窗口拉窄时同样不该糊出浮条）。
+  function isMobileLike() {
+    try {
+      const mm = window.matchMedia ? window.matchMedia.bind(window) : null;
+      if (mm) {
+        const coarse = mm('(pointer: coarse)').matches;
+        const noHover = mm('(hover: none)').matches;
+        if (coarse && noHover) return true;
+      }
+      return window.innerWidth <= 820;
+    } catch (e) { return window.innerWidth <= 820; }
+  }
+  // 🟢 暴露给其它模块复用同一口径，避免各写一份、判定漂移
+  if (TU) TU.isTouchLayout = isMobileLike;
+  if (typeof window !== 'undefined') window.isTouchLayout = isMobileLike;
+
   function bindContainer(container) {
     if (!container || container._excelSelBound) return false;
     if (!container.querySelector('table')) return false;
+    if (isMobileLike()) return false;                    // ← 移动端：不启用框选（v229.80）
     container._excelSelBound = true;
     container.classList.add('excel-sel');
     container.addEventListener('mousedown', onContainerMouseDown);

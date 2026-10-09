@@ -2,6 +2,18 @@
 // 库存预警模块 V3 - 统一表格 · 3D搜索按钮
 // ============================================
 
+// 🟢 v229.80：移动端（纯触摸设备 / 窄屏）统一判定。优先复用 excel-select.js 暴露的
+//   TableUtils.isTouchLayout 保持同一口径；旧缓存下该函数缺失时退回宽度判定（行为一致）。
+function _isTouchLayout() {
+  try {
+    if (typeof TableUtils !== 'undefined' && TableUtils && typeof TableUtils.isTouchLayout === 'function') {
+      return !!TableUtils.isTouchLayout();
+    }
+    if (typeof window.isTouchLayout === 'function') return !!window.isTouchLayout();
+  } catch (e) { /* 忽略，走下面的宽度兜底 */ }
+  try { return window.innerWidth <= 820; } catch (e2) { return false; }
+}
+
 const InventoryAlertModule = {
   currentFilter: { keyword: '', category: '', status: 'yes' },
   currentPage: 1,
@@ -439,7 +451,8 @@ const InventoryAlertModule = {
         return (typeof v === 'number') ? TableUtils.formatNum(v) : String(v);
       }));
     }
-    const tsv = ClipboardUtils.toTSV([keys, ...body]);
+    // 🟢 v229.83：复制结果不含表头（用户要求）——只复制选区数据行，不再把列名拼到首行。
+    const tsv = ClipboardUtils.toTSV(body);
     ClipboardUtils.copy(tsv).then(ok => {
       if (typeof showToast === 'function') {
         showToast(ok ? `已复制 ${rows} 行 × ${cols} 列到剪贴板` : '复制失败，请手动选择后重试',
@@ -525,6 +538,10 @@ const InventoryAlertModule = {
 
   /** 底部选择条：单元格选区（复制选区/全选/清空）或行选（预设复制） */
   _updateSelBar() {
+    // 🟢 v229.80：移动端不创建选择条 —— 手机上批量复制属桌面向操作，浮条会遮住分页栏
+    //   （用户实测反馈）；CSS 媒体查询已兜底隐藏，这里不再创建避免不可见的残留状态。
+    //   判定复用 excel-select 的 isTouchLayout（同一口径，含 iPad Pro 横屏这类宽屏纯触摸设备）。
+    if (_isTouchLayout()) { const b = document.getElementById('iaSelBar'); if (b) b.remove(); return; }
     let bar = document.getElementById('iaSelBar');
     const n = this.selectedIdx.size;
     const rg = this.selRange;

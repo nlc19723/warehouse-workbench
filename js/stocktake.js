@@ -1483,7 +1483,20 @@ const StocktakeModule = {
     }
 
     // 🟢 v227.28：删除「已结束盘点号 xx 历史数据（只读）」冗余 banner（用户反馈：移动端和PC端都删除）
+    // 🟢 v229.77：日常盘点号差异核对入口 —— 日常无轮次/无补盘，落库且有差异即可复盘。
+    //   sheetId 取记录自身（list 均属同一盘点号），避免跨盘点号串批次。
+    const _dfSheetId = String((list[0] && list[0].sheetId) || info.sheetId || '');
+    const _dfCount = new Set(list.filter(r => r.差异量 != null && parseFloat(r.差异量) !== 0)
+      .map(r => String(r.存货编码 || ''))).size;
+    const _dfBtn = (_dfSheetId && _dfCount && this.canDiffFocus())
+      ? `<div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+           <button class="btn--ghost" onclick="StocktakeModule.openDiffFocus('${escAttr(_dfSheetId)}')"
+             style="padding:6px 14px;font-size:13px;" title="对本盘点号的差异逐笔复盘（可填写备注并同步保存）">🧭 差异核对（${_dfCount}）</button>
+           <span style="font-size:12px;color:var(--text-muted);">盘点号 ${esc(no)} 共 ${_dfCount} 笔差异</span>
+         </div>`
+      : '';
     area.innerHTML = `
+      ${_dfBtn}
       <div style="overflow:auto;max-height:60vh;border:1px solid var(--border-color,#e5e7eb);border-radius:8px;">
         <table class="data-table" style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead style="position:sticky;top:0;background:var(--bg-secondary,#f9fafb);z-index:1;">
@@ -2395,6 +2408,60 @@ const StocktakeModule = {
         ${closedBlock}
         ${adminBlock}
       </div>`;
+
+    // 🟢 v229.77：差异核对入口（异步门禁，失败静默，不影响主渲染）
+    try { this._mountDiffFocusEntry(sheetId); } catch (e) { console.warn('[stocktake] 差异核对入口挂载失败(已忽略):', e && e.message); }
+  },
+
+  /**
+   * 🟢 v229.78：差异核对权限判定（统一入口）。
+   *   与「查看/分派盘点任务」权限绑定 —— 管理员 ∨ stocktakeAssign 权限者皆可用，
+   *   口径直接复用 _hasAssignPerm()（v228.64 统一口径：isAdmin 优先，其次 keeper 模块权限，
+   *   老账号全开），避免同一套语义在库里再抄一份造成「某入口能用、另一入口不能用」。
+   */
+  canDiffFocus() {
+    try { return !!this._hasAssignPerm(); } catch (e) { return false; }
+  },
+
+  /**
+   * 🟢 v229.77：异步挂载「🧭 差异核对」入口。
+   *   显示条件（三者同时满足）：管理员 ∧ 轮次已收口（补盘已冻结）∧ 本批次存在汇总差异。
+   *   仅做 DOM 填充，不触碰任何盘点状态；任何异常都静默，绝不阻断季度视图渲染。
+   */
+  async _mountDiffFocusEntry(sheetId) {
+    try {
+      const _esc = s => (typeof escAttr === 'function' ? escAttr(s) : String(s == null ? '' : s));
+      const box = document.getElementById('stDfEntryQuarter');
+      if (!box) return;
+      box.innerHTML = '';
+      if (typeof StocktakeDiffFocus === 'undefined') return;
+      if (!this.canDiffFocus()) return;
+      const ok = await StocktakeDiffFocus.isReady(sheetId);
+      if (!ok) return;
+      const n = await StocktakeDiffFocus.count(sheetId);
+      box.innerHTML = `<button class="btn--ghost" onclick="StocktakeModule.openDiffFocus('${_esc(sheetId)}')"
+        style="padding:6px 14px;font-size:13px;" title="对本批次汇总差异逐笔复盘（可填写备注并同步保存）">🧭 差异核对${n ? '（' + n + '）' : ''}</button>`;
+    } catch (e) { console.warn('[stocktake] 差异核对入口判定失败(已忽略):', e && e.message); }
+  },
+
+  /**
+   * 🟢 v229.77：打开「差异核对」聚焦视图（入口统一走这里）。
+   *   只读 + 备注编辑：数据来源 stocktake_records，备注回写同一张表，与盘点表/记录列表同源。
+   */
+  async openDiffFocus(sheetId) {
+    try {
+      if (typeof StocktakeDiffFocus === 'undefined') { this.toast('差异核对模块未加载'); return; }
+      if (!this.canDiffFocus()) {
+        this.toast('只有管理员或具备【查看/分派盘点任务】权限者可进行差异核对'); return;
+      }
+      if (!(await StocktakeDiffFocus.isReady(sheetId))) {
+        this.toast('当前不满足差异核对条件：需批次轮次收口（含补盘结束）且存在汇总差异'); return;
+      }
+      await StocktakeDiffFocus.open(sheetId);
+    } catch (e) {
+      console.warn('[stocktake] 打开差异核对失败(已忽略):', e && e.message);
+      this.toast('差异核对打开失败：' + (e && e.message ? e.message : '未知错误'));
+    }
   },
 
   /**
@@ -2731,6 +2798,8 @@ const StocktakeModule = {
           ${endBatchBtn}
           ${emergencyBtn}
           ${nextRoundBtn}
+          <!-- 🟢 v229.77：差异核对入口占位 —— 由 _mountDiffFocusEntry 异步判定后填充（不满足则不渲染） -->
+          <span id="stDfEntryQuarter"></span>
         </div>
         ${returnedBlock}
       </div>

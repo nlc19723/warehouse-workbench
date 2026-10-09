@@ -42,10 +42,16 @@ const OrderCheckModule = {
 
       <div id="ocDetailTable" class="oc-entry-table-wrapper" style="overflow-x:auto;"></div>
 
-      <!-- 🟢 v153：一键回填建议量到数量列 -->
-      <div style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <button class="glass-btn-3d" onclick="OrderCheckModule.applySuggestions()" title="把每行的『建议订货量』写回『数量』列（不覆盖你手填的需求原文前请先核对）">↩ 建议量回填数量列</button>
-        <button class="glass-btn-3d" onclick="OrderCheckModule.recomputeAll()" title="按当前所有行的数据重新计算建议量与决策">🔄 重新计算全部</button>
+      <!-- 🟢 v153：一键回填建议量到数量列；🟢 v229.82：统一工具条样式 + 新增「清空」 -->
+      <div class="oc-toolbar" role="toolbar" aria-label="批量操作">
+        <span class="oc-toolbar-label" aria-hidden="true">批量操作</span>
+        <button class="oc-act-btn" onclick="OrderCheckModule.applySuggestions()"
+          title="把每行的『建议订货量』写回『数量』列（不覆盖你手填的需求原文请先核对）">↩ 建议量回填数量列</button>
+        <button class="oc-act-btn" onclick="OrderCheckModule.recomputeAll()"
+          title="按当前所有行的数据重新计算建议量与决策">🔄 重新计算全部</button>
+        <span class="oc-toolbar-spacer" aria-hidden="true"></span>
+        <button class="oc-act-btn oc-act-btn--danger" onclick="OrderCheckModule.clearAllRows()"
+          title="清空当前录入表格的全部已填内容（不影响已保存的订单）">🗑 清空</button>
       </div>
 
       <!-- 状态提示 -->
@@ -160,7 +166,11 @@ const OrderCheckModule = {
           <input type="text" class="oc-code-input oc-input" placeholder="输入编码联想..."
             ${al('存货编码')}
             value="${escAttr(r.存货编码 || '')}"
-            data-row="${idx}" autocomplete="off">
+            data-row="${idx}" autocomplete="off" style="padding-right:24px;">
+          <!-- 🟢 v229.82：点击跳转存货档案（与库存预警等模块同一条 openEntity 管线） -->
+          <button type="button" class="oc-code-jump" data-row="${idx}"
+            aria-label="查看第 ${n} 行存货编码对应的存货档案" title="查看该编码的存货档案"
+            onclick="OrderCheckModule.openCodeProfile(${idx})" onmousedown="event.preventDefault()">🔍</button>
         </td>
         <td style="text-align:center;"><input type="text" class="oc-name-input oc-detail-input" readonly placeholder=""
           ${al('存货名称', '（自动带出，只读）')}
@@ -731,6 +741,45 @@ const OrderCheckModule = {
       await this._computeDecision(idx);
     }
     this.showMsg(`✅ 已重新计算 ${rows.length} 行`);
+  },
+
+  // 🟢 v229.82：点击存货编码旁的 🔍 跳转存货档案。
+  //   与库存预警/订单档案等模块走同一条 App.openEntity('stock', code) 管线（含返回栈），
+  //   粘贴上来的编码同样适用 —— 按钮读取的是输入框实时值，粘贴后无需刷新。
+  async openCodeProfile(rowIdx) {
+    const input = document.querySelector(`.oc-code-input[data-row="${rowIdx}"]`);
+    const code = ((input && input.value) || '').trim();
+    if (!code) { this.showMsg('此行还没有存货编码', true); return; }
+    // 档案中不存在时明确提示，避免跳过去开空白页
+    const stock = await db.stock.where('存货编码').equals(code).first();
+    if (!stock) { this.showMsg(`❌ 档案中未找到编码 "${code}"，无法跳转`, true); return; }
+    this.hideAutocomplete();
+    if (typeof App !== 'undefined' && App.openEntity) App.openEntity('stock', code);
+  },
+
+  // 🟢 v229.82：清空当前录入表（二次确认）。只清「录入中」的内容，不动已保存的订单。
+  async clearAllRows() {
+    const tbody = document.getElementById('ocTbody');
+    if (!tbody) return;
+    let filled = 0;
+    tbody.querySelectorAll('tr').forEach(tr => {
+      const idx = tr.dataset.row;
+      if (idx === undefined) return;
+      const code = document.querySelector(`.oc-code-input[data-row="${idx}"]`)?.value.trim();
+      const qty = document.querySelector(`.oc-qty-input[data-row="${idx}"]`)?.value.trim();
+      if (code || qty) filled++;
+    });
+    if (!filled) { this.showMsg('当前没有可清空的数据'); return; }
+    const ok = await WBModal.confirm(
+      `将清空当前录入表 ${filled} 行已填内容（共 ${tbody.querySelectorAll('tr').length} 行）。\n不影响已保存的订单与库存数据，是否继续？`,
+      { title: '清空录入表', okText: '清空', cancelText: '取消' });
+    if (!ok) return;
+    this.hideAutocomplete();
+    this._formDraft = null;          // 草稿一并作废，防止切模块回来被恢复
+    this.renderDetailRows();         // 重渲默认空白行
+    const banner = document.getElementById('ocKpiBanner');
+    if (banner) { banner.style.display = 'none'; banner.innerHTML = ''; }
+    this.showMsg('✅ 已清空当前录入表');
   },
 
 

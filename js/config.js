@@ -264,7 +264,7 @@ window.AppConfig = {
     // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
     // 🟢 v228.48：真实走查修复 —— 启动兜底「空状态」不再覆盖用户已打开的界面
     // 🟢 v228.45：季度盘点跨端一致性 —— 同一账号 PC/移动端任务、进度、批次区间完全统一
-    version: 'v229.76',
+    version: 'v229.84',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
@@ -362,6 +362,9 @@ window.AppConfig = {
   ],
   // v224：盘点模块下的子权限「查看分派 / 分派任务」，不勾选时任务栏只显示「我的任务」。
   // 单独抽成权限项，方便库里灵活控制谁能看其他人被分派了什么。
+  // 🟢 v229.78：本权限同时控制【🧭 差异核对】入口（季度批次块 / 日常盘点号 / 盘点记录单批视图），
+  //   判定统一走 StocktakeModule.canDiffFocus()（内部复用 _hasAssignPerm，与分派同一口径），
+  //   即：管理员 ∨ 勾选本权限者可用；未勾选者三处入口均不渲染，点击也会被拒绝。
   STOCKTAKE_SUB_MODULES: [
     { key: 'stocktakeAssign',   label: '查看/分派盘点任务', icon: '🧩', group: '盘点核心' }
   ],

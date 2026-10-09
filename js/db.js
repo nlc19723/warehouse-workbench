@@ -321,7 +321,12 @@ const DataStore = {
     return SyncManager.setSetting(key, value);
   },
   // 出库列表：录入/删除后实时同步到「设置数据包」settings.json（出库单只走这一条通道）
-  async syncOutboundToSettings() {
+  // 🟢 v229.81：opts.force = true 时【跳过下面的同包并集保护】，按本地为准整包覆盖写。
+  //   用于「覆盖导入」——用户明确要求以本次文件为唯一数据源时，若仍做并集，
+  //   云端留存的旧记录会被并回来，下次启动 restoreOutboundFromSettings 又会写回本地，
+  //   覆盖导入等于静默失效。其余调用（增量导入 / 录入 / 删除）不带该参数，行为完全不变。
+  async syncOutboundToSettings(opts) {
+    const force = !!(opts && opts.force);
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     const rows = await this.getRows('outbound');
     if (!Array.isArray(rows) || !rows.length) return false;
@@ -329,23 +334,26 @@ const DataStore = {
     //   避免「本地被工作包还原清成少量/空」后，一同步就把云端更多条覆盖掉。
     //   仅在 settings 这一条通道内合并，不跨包、不写 data.json，杜绝污染。
     try {
-      const cloud = await SyncManager.getSetting('outbound_list');
-      if (Array.isArray(cloud) && cloud.length) {
-        const seen = new Set();
-        const merged = [];
-        for (const r of cloud.concat(rows)) {
-          // 🟢 v228.15：并集键补齐「出库时间 + 出库数量」。
-          //   旧键只有 出库单号|存货编码 —— 同一张单、同一存货编码分多次出库（数量或日期不同）时，
-          //   这些合法明细会被当成同一条，合并时被静默丢弃（增量导入后更容易踩到）。
-          const key = [r['出库单号'] || '', r['存货编码'] || '', r['出库时间'] || '',
-                       (r['出库数量'] === undefined || r['出库数量'] === null) ? '' : r['出库数量']].join('|');
-          if (seen.has(key)) continue;
-          seen.add(key);
-          merged.push(r);
-        }
-        if (merged.length > rows.length) {
-          console.log(`[设置] 出库单同步做同包并集保护：本地 ${rows.length} + 云端 ${cloud.length} → 合并 ${merged.length} 条`);
-          return SyncManager.setSetting('outbound_list', merged);
+      // 🟢 v229.81：force（覆盖导入）不读云端、不做并集 —— 本地即最终态。
+      if (!force) {
+        const cloud = await SyncManager.getSetting('outbound_list');
+        if (Array.isArray(cloud) && cloud.length) {
+          const seen = new Set();
+          const merged = [];
+          for (const r of cloud.concat(rows)) {
+            // 🟢 v228.15：并集键补齐「出库时间 + 出库数量」。
+            //   旧键只有 出库单号|存货编码 —— 同一张单、同一存货编码分多次出库（数量或日期不同）时，
+            //   这些合法明细会被当成同一条，合并时被静默丢弃（增量导入后更容易踩到）。
+            const key = [r['出库单号'] || '', r['存货编码'] || '', r['出库时间'] || '',
+                         (r['出库数量'] === undefined || r['出库数量'] === null) ? '' : r['出库数量']].join('|');
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(r);
+          }
+          if (merged.length > rows.length) {
+            console.log(`[设置] 出库单同步做同包并集保护：本地 ${rows.length} + 云端 ${cloud.length} → 合并 ${merged.length} 条`);
+            return SyncManager.setSetting('outbound_list', merged);
+          }
         }
       }
     } catch (e) { console.warn('出库单同包合并探测跳过:', e); }

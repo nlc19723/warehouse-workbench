@@ -41,6 +41,15 @@ const StocktakeRecordModule = {
                   font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span>📦 已按批次筛选：<b>${esc(this.filter.sheetId)}</b></span>
         <button class="btn--ghost" onclick="StocktakeRecordModule.clearSheetFilter()">查看全部</button>
+        ${(() => {
+          /* 🟢 v229.78：同款「差异核对」入口 —— 仅在单批筛选视图提供，天然按 sheetId 隔离
+             日常/季度与不同盘点号，不会出现混排串批；权限与季度入口一致
+             （管理员 ∨【查看/分派盘点任务】权限），无权限者不渲染该按钮。 */
+          let can = false;
+          try { can = typeof StocktakeModule !== 'undefined' && !!StocktakeModule.canDiffFocus(); } catch (e) { can = false; }
+          return can ? `<button class="btn--ghost" onclick="StocktakeModule.openDiffFocus('${escAttr(this.filter.sheetId)}')"
+            title="对本批次的差异逐笔复盘（可填写备注并同步保存）">🧭 差异核对</button>` : '';
+        })()}
       </div>` : '';
 
     content.innerHTML = `${sheetTip}

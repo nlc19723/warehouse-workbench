@@ -2641,6 +2641,17 @@ button{
 }
 .sel-bar-count{ font-size: 13px; color: var(--text, #1f2937); margin-right: 4px; }
 .sel-bar-count b{ color: var(--primary, #5b9bd5); font-size: 15px; }
+/* 🟢 v229.80：移动端隐藏全部底部选择条（Excel 式框选条 + 各模块行选条）——
+   手机上框选/批量复制属桌面向操作，浮条还会遮住分页栏（用户实测反馈）。
+   excel-select.js 在移动端已不启用框选交互，此处媒体查询再兜底隐藏，双保险。 */
+@media (max-width: 820px){
+  .sel-bar{ display: none !important; }
+}
+/* 纯触摸设备（手机 / 平板，含 iPad Pro 横屏 1366px 这类「宽屏但无悬停」）同样隐藏；
+   带鼠标的 Windows 触屏笔记本 hover:hover，不受影响。 */
+@media (hover: none) and (pointer: coarse){
+  .sel-bar{ display: none !important; }
+}
 .sel-btn{
   border: 1px solid var(--border, rgba(148,163,184,.3));
   background: transparent; color: var(--text, #1f2937);
@@ -5000,6 +5011,68 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
   .oc-guide{ padding: 9px 12px; font-size: 12px; gap: 8px; }
   .oc-guide-text span{ line-height: 1.65; }
 }
+
+/* ---------- 🟢 v229.82：订货核对底部批量操作工具条 ----------
+   原先两个按钮裸排在表格下方（无内边距/无层级），视觉上像误落的散件。
+   收进一条带标题的 pill 工具条，与全站 btn 风格对齐；「清空」为危险操作走红色系。 */
+.oc-toolbar{
+  margin: 12px 0 8px; padding: 8px 12px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border-radius: var(--radius-sm, 10px);
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--card-border, rgba(0,0,0,0.08));
+}
+.oc-toolbar-label{
+  font-size: 11.5px; font-weight: 700; letter-spacing: 0.5px;
+  color: var(--text-muted, #8a94a6);
+  padding-right: 10px; border-right: 1px solid var(--card-border, rgba(0,0,0,0.08));
+  flex: 0 0 auto;
+}
+.oc-toolbar-spacer{ flex: 1 1 auto; }
+.oc-act-btn{
+  appearance: none; cursor: pointer;
+  padding: 7px 14px; border-radius: 9px;
+  font-size: 12.5px; font-weight: 600; line-height: 1.4;
+  color: var(--text-main, #1e293b);
+  background: var(--bg-hover, rgba(15,23,42,0.045));
+  border: 1px solid var(--card-border, rgba(0,0,0,0.10));
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+.oc-act-btn:hover{
+  background: color-mix(in srgb, var(--primary, #2563eb) 10%, transparent);
+  border-color: color-mix(in srgb, var(--primary, #2563eb) 35%, transparent);
+  color: var(--primary, #2563eb);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08);
+}
+.oc-act-btn:active{ transform: translateY(0); box-shadow: none; }
+.oc-act-btn--danger{ color: var(--status-danger, #dc2626); }
+.oc-act-btn--danger:hover{
+  background: color-mix(in srgb, var(--status-danger, #dc2626) 10%, transparent);
+  border-color: color-mix(in srgb, var(--status-danger, #dc2626) 38%, transparent);
+  color: var(--status-danger, #dc2626);
+}
+[data-theme="dark"] .oc-act-btn{
+  color: #e2e8f0;
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.12);
+}
+[data-theme="dark"] .oc-act-btn:hover{
+  background: color-mix(in srgb, var(--primary, #4a7ce8) 22%, transparent);
+  color: #dbe7ff;
+}
+[data-theme="dark"] .oc-act-btn--danger:hover{
+  background: color-mix(in srgb, #ef4444 20%, transparent);
+  color: #ffb4b4;
+}
+/* 编码列 🔍 跳转档案按钮：吸附在输入框右侧，hover 行内提亮 */
+.oc-code-jump{
+  position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+  border: none; background: none; cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 2px;
+  opacity: 0.42; transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.oc-code-jump:hover{ opacity: 1; transform: translateY(-50%) scale(1.15); }
 
 /* ---------- W-3：表格内实体链接命中区提升为全表通用规则 ---------- */
 /* 问题：a.entity-link 实测 35×15px，低于 WCAG 2.5.5 推荐的 24×24 CSS px；
