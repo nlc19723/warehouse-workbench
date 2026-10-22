@@ -155,13 +155,20 @@
     //     · 旧逻辑 Esc   取最后一个    → Esc  = 确定（危险操作按 Esc 直接执行！）
     //   现统一：Enter = primary 按钮（确定）；Esc = 非 primary 按钮（取消）。
     //   alert 只有一个 primary 按钮，两种按键都返回 true，行为保持不变。
+    // 🟢 v229.98（AUDIT-229-98-01）：openOverlayHandler 此前从未被赋值 → :50 的「点遮罩关闭」是死代码。
+    //   这里与 ESC 走同一条「取消/默认关闭」通路（取非 primary 按钮的 value）：
+    //     · confirm（[取消,确定]）→ false，删除等破坏性操作不会被误确认；
+    //     · prompt（[取消,确定]）  → null，resolve 走「不接受输入值」分支而非采纳空串；
+    //     · alert / 单按钮弹窗      → 唯一的按钮值，行为不变。
+    const btns = (opts.buttons && opts.buttons.length) ? opts.buttons : [{ value: true, primary: true }];
+    const cancelValue = (btns.find(b => !b.primary) || btns[0]).value;
+    openOverlayHandler = () => closeDialog(cancelValue);
+
     openKeyHandler = (e) => {
-      const btns = (opts.buttons && opts.buttons.length) ? opts.buttons : [{ value: true, primary: true }];
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
-        const cancelBtn = btns.find(b => !b.primary) || btns[0];
-        closeDialog(cancelBtn.value);
+        closeDialog(cancelValue);
       } else if (e.key === 'Enter') {
         e.preventDefault();
         const okBtn = btns.find(b => b.primary) || btns[btns.length - 1];
@@ -186,18 +193,20 @@
     const r = root;
     if (r) r.classList.remove('show');
 
+    // 🟢 v229.98（AUDIT-229-98-01）：关闭时一并摘掉遮罩处理器，避免弹窗关闭后点遮罩仍触发上一次的关闭逻辑
+    if (openOverlayHandler) openOverlayHandler = null;
     if (openKeyHandler) {
       document.removeEventListener('keydown', openKeyHandler, true);
       openKeyHandler = null;
     }
     if (openResolve) {
-      try { openResolve(value); } catch (_) {}
+      try { openResolve(value); } catch (_) { console.warn('[js/modal.js:203] 异常(已忽略):', _); }
       openResolve = null;
     }
     openDialogEl = null;
     // 归还焦点
     if (openPrevActive && openPrevActive.focus) {
-      try { openPrevActive.focus(); } catch (_) {}
+      try { openPrevActive.focus(); } catch (_) { console.warn('[js/modal.js:209] 异常(已忽略):', _); }
     }
     openPrevActive = null;
 
@@ -315,7 +324,9 @@
       msg.style.marginBottom = '10px';
       const input = document.createElement('input');
       input.type = opts.type || 'text';
-      input.value = opts.default || '';
+      // 🟢 v229.98（AUDIT-229-98-07②）：`opts.default || ''` 会把合法的 0 / false 吞成空串，
+      //   仅当 default 为 undefined/null 时才取空串。
+      input.value = (opts.default === undefined || opts.default === null) ? '' : opts.default;
       input.placeholder = opts.placeholder || '';
       input.style.width = '100%';
       input.style.height = '34px';
@@ -366,7 +377,7 @@
     });
   }
 
-  // 吐司：右下角，自动消失
+  // 吐司：底部居中上滑淡入，白底/深底胶囊（与 .wt-undo 撤销浮条风格统一），无按钮、自动消失
   function notify(message, type, ms) {
     type = type || 'info';
     ms = ms || 2500;
@@ -375,37 +386,40 @@
     if (!host) {
       host = document.createElement('div');
       host.id = 'wbToastHost';
-      host.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:5500;display:flex;flex-direction:column;gap:10px;align-items:flex-end;pointer-events:none;';
+      host.style.cssText = 'position:fixed;left:50%;bottom:84px;transform:translateX(-50%);z-index:5500;display:flex;flex-direction:column-reverse;gap:10px;align-items:center;pointer-events:none;';
       document.body.appendChild(host);
     }
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const bg = isDark ? '#26304F' : 'var(--bg-card, #fff)';
+    const bd = isDark ? 'rgba(255,255,255,.1)' : 'var(--border-color, #e5e7eb)';
+    const fg = isDark ? '#E5E9F2' : 'var(--text-main, #1F2937)';
     const t = document.createElement('div');
     t.style.cssText = [
-      'background:var(--panel-bg)',
-      'backdrop-filter:var(--glass-blur)',
-      '-webkit-backdrop-filter:var(--glass-blur)',
-      'border:1px solid var(--panel-border)',
+      'background:' + bg,
+      'border:1px solid ' + bd,
       'border-left:3px solid ' + meta.accent,
-      'border-radius:10px',
-      'padding:10px 14px',
+      'border-radius:999px',
+      'padding:9px 18px',
       'font-size:13px',
-      'color:var(--text-main)',
-      'box-shadow:0 6px 20px rgba(0,0,0,0.10)',
+      'color:' + fg,
+      'box-shadow:0 10px 28px rgba(15,23,42,.16)',
       'min-width:160px',
-      'max-width:360px',
+      'max-width:380px',
       'pointer-events:auto',
       'display:flex',
       'align-items:center',
       'gap:8px',
-      'transform:translateX(120%)',
-      'transition:transform .25s ease',
+      'transform:translateY(16px)',
+      'opacity:0',
+      'transition:opacity .22s ease, transform .26s cubic-bezier(.25,1,.5,1)',
       'cursor:pointer'
     ].join(';');
     t.innerHTML = '<span style="font-size:15px;">' + meta.icon + '</span><span></span>';
     t.querySelector('span:last-child').textContent = message;
     host.appendChild(t);
-    requestAnimationFrame(() => { t.style.transform = 'translateX(0)'; });
+    requestAnimationFrame(() => { t.style.transform = 'translateY(0)'; t.style.opacity = '1'; });
     const dismiss = () => {
-      t.style.transform = 'translateX(120%)';
+      t.style.transform = 'translateY(12px)';
       t.style.opacity = '0';
       setTimeout(() => t.remove(), 280);
     };

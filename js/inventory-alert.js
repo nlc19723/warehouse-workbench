@@ -34,6 +34,10 @@ const InventoryAlertModule = {
   _keyBound: false,
   _ctxBound: false,
   _ctxMenu: null,
+  // 🟢 v230.23：派生结果缓存（key = 四表行数组引用 —— DataStore.invalidate 后 getRows 重新
+  //   toArray 产生新引用即自动失效，无脏读窗口）。查询系统「存量」板块与本模块共用
+  //   buildDerivedAlerts，两边来回切换不再重复做全量派生装配。
+  _derivedCache: null,
 
   async render(token) {
     if (token !== undefined) this._rt = token;
@@ -99,6 +103,13 @@ const InventoryAlertModule = {
       ]);
     } catch (e) { console.warn('[inventory-alert] 数据加载失败:', e); return []; }
 
+    // 🟢 v230.23：引用缓存命中 → 直接返回上次派生结果（四表均未被 invalidate 时成立）
+    const c = this._derivedCache;
+    if (c && c.refs.stock === stockRows && c.refs.orders === orderRows
+        && c.refs.inbound === inboundRows && c.refs.pricing === pricingRows) {
+      return c.rows;
+    }
+
     // 类型：合同价格表编码关联（一码多价取首个非空类型）
     const typeByCode = new Map();
     pricingRows.forEach(p => {
@@ -112,7 +123,7 @@ const InventoryAlertModule = {
     const ordersMap = StockAlertRules.computeOrdersSplit(orderRows);
     const CFG = window.StockAlertConfig;
 
-    return stockRows.map(s => {
+    const derived = stockRows.map(s => {
       const code = String(s.存货编码 || '').trim();
       const name = s.存货名称 || '';
       const lv = CFG.STOCK_LEVELS[code] || [0, 0];
@@ -137,15 +148,34 @@ const InventoryAlertModule = {
         类型: typeByCode.get(code) || ''
       };
     });
+    // 🟢 v230.23：写入引用缓存。rows 为共享引用，调用方仅可只读使用（filter/map/slice 均安全，
+    //   严禁 sort/reverse 等原地改写——那样会污染缓存与查询系统「存量」板块的同源数据）。
+    this._derivedCache = {
+      refs: { stock: stockRows, orders: orderRows, inbound: inboundRows, pricing: pricingRows },
+      rows: derived
+    };
+    return derived;
   },
-
   async loadData(token) {
     const rt = (token !== undefined) ? token : this._rt;
     if (rt !== undefined && rt !== App._goToken) return;
 
     // 🟢 v229.04：v229.00 全派生装配抽为 buildDerivedAlerts（查询系统存量板块同源复用）
     let alerts = await this.buildDerivedAlerts();
-    if (!alerts.length) return;
+    // 🟢 v229.98（AUDIT-229-98-01）：派生结果为空时不再直接 return 留白 —— 渲染全站同款空态，
+    //   并让分页栏正常显示「共 0 条」（此前表格区空白、无提示、分页栏也不渲染）。
+    if (!alerts.length) {
+      if (rt !== undefined && rt !== App._goToken) return;
+      this.currentData = [];
+      this.clearSelection(); // 🟢 数据集已空，旧选区/选择条一并清掉（与下方非空分支口径一致）
+      TableUtils.setHtml('alertSummary', '');
+      TableUtils.setHtml('alertTableArea',
+        '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无数据</div></div>');
+      TableUtils.renderPagination('alertPagination', {
+        module: 'InventoryAlertModule', total: 0, totalPages: 1, page: 1, pageSize: this.pageSize
+      });
+      return;
+    }
 
     const kw = (this.currentFilter.keyword || '').replace(/\s+/g, '').toLowerCase();
     const category = this.currentFilter.category || '';
@@ -209,6 +239,10 @@ const InventoryAlertModule = {
   },
 
   resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     this.currentFilter = { keyword: '', category: '', status: 'yes' };
     this.currentPage = 1;
     const kwInput = document.getElementById('alertKw');
@@ -297,8 +331,24 @@ const InventoryAlertModule = {
     // 🟢 O3：分页栏统一由 TableUtils.renderPagination 渲染（行为等价去重）
     TableUtils.renderPagination('alertPagination', { module: 'InventoryAlertModule', total, totalPages, page: this.currentPage, pageSize: this.pageSize });
 
+    // 🟢 v230.23：innerHTML 之后、paint 之前同步应用列宽（首帧即最终宽，消除 auto→flex 二段跳）。
+    //   App.go 收口处也会调一次（模块整体 render 路径），这里是模块内筛选/翻页重渲染的自保。
+    if (typeof TableUtils !== 'undefined' && TableUtils.applyColumnWidthsNow) {
+      try { TableUtils.applyColumnWidthsNow(document.getElementById('alertTableArea')); } catch (e) { /* 列宽应用失败不影响数据渲染 */ }
+    }
+
     // 🟢 L2：Excel 式单元格框选取代拖拽求和气泡，本表不再绑定 SmartSelect
     TableUtils.initSortableHeaders('alertTableArea');
+
+    // 🟢 v229.98（AUDIT-229-98-14）：本表由模块自己 innerHTML 渲染、没走 virtualTable，
+    //   筛选弹窗的候选值此前只能从【当前页 DOM 行】取 → 只出现在其它页的取值在弹窗里根本看不到
+    //   （用户会以为数据里没有这个值）。这里把【当前筛选后的全量数据】挂上去，
+    //   候选值立即覆盖所有分页。用取值器按列键取数（本表没有独立的行渲染函数）。
+    TableUtils.attachDataset(document.getElementById('alertTableArea'), this.currentData || [],
+      null, (row, colIdx) => {
+        const k = this.COL_KEYS[colIdx];
+        return (k && row) ? row[k] : '';
+      });
 
     // 🟢 翻页/重渲染后同步选区高亮与底部选择条
     this._applyRowHighlight();
@@ -356,7 +406,9 @@ const InventoryAlertModule = {
     }
   },
 
-  /** Excel 式：左键按下 = 选中该格；拖动 = 矩形连续选区；Shift+按下 = 从锚点扩展 */
+  /** Excel 式：左键按下 = 选中该格；拖动 = 矩形连续选区；Shift+按下 = 从锚点扩展
+   *  🟢 v230.07：恢复单击选中单格（v230.06 曾改为只设锚点，用户反馈「点击无反应也没浮条」）。
+   *    「乱求和」由列过滤兜底：_rangeSum 只统计 NUMERIC_COL_IDX 数值列，编码列点击只有选区、不出合计。 */
   _onCellMouseDown(e) {
     if (e.button !== 0) return;
     if (e.target.closest('.entity-link, a, button, input, select, .col-resize-handle')) return;
@@ -587,6 +639,12 @@ const InventoryAlertModule = {
         <button class="sel-btn ghost" data-act="clear">清空</button>`;
     }
     bar.innerHTML = `<div class="sel-bar-inner">${inner}</div>`;
+    // 🟢 v230.06：定位到表格区左沿 +16px（复用 excel-select 的 positionSelBar，含分页栏避让），
+    //   不再底部居中遮挡翻页栏；侧栏收起/窗口缩放由 excel-select 的全局监听负责重定位。
+    bar._wbAnchor = document.getElementById('alertTableArea');
+    if (bar._wbAnchor && typeof window.positionSelBar === 'function') {
+      window.positionSelBar(bar, bar._wbAnchor);
+    }
     requestAnimationFrame(() => bar.classList.add('show'));
   },
 

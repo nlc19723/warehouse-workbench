@@ -250,8 +250,8 @@ const StockModule = {
           const c = String(s.存货编码 ?? '').trim();
           if (c && need.has(c) && !map.has(c)) map.set(c, { name: s.存货名称 || '', spec: s.规格型号 || '' });
         });
-      } catch (_) {
-    /* 补查失败不阻断打印，缺信息时只显示二维码 */ console.warn('[stock.js:249] 异常(已忽略):', e);
+      } catch (e) {
+    /* 补查失败不阻断打印，缺信息时只显示二维码 */ console.warn('[stock.js] 补查异常(已忽略):', e);
   }
     }
     // 仍缺信息的编码用空名（打印时只显示二维码）
@@ -275,6 +275,10 @@ const StockModule = {
   },
 
   resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     this.currentFilter = { keyword: '' };
     this.currentPage = 1;
     // 🟢 v198：重置时一并退出多选模式并清空已选（只渲染一次，由 loadData 触发）

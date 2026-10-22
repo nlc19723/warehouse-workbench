@@ -9,15 +9,19 @@ const App = {
   // 实体档案导航栈：解决跨实体跳转后返回 pendingEntity 丢失导致空白的问题
   _navStack: [],
   // 模块切换状态记忆：搜索/筛选/分页/页大小/tab 等，页面刷新后清空
+  // 🟢 v230.25（用户反馈）：刷新/重进工作台必须「全部重置所有修改后的筛选条件至默认」——
+  //   v229.50 曾把 moduleState 持久化到 localStorage（刷新恢复），导致再次进入时日期框等
+  //   显示的是上次改过的旧值（如查询系统结束日期停在 2026-10-08 而非最新日期）。
+  //   现改回纯内存记忆：同一次使用过程（不刷新）中切模块保留筛选；刷新/重开一律回默认。
+  //   启动时顺手清掉 v229.50~v230.24 遗留的旧持久化键，防止旧值复活。
   moduleState: {},
   _MODULE_STATE_KEY: 'wb_module_state',
   _loadModuleState() {
-    try { return JSON.parse(localStorage.getItem(this._MODULE_STATE_KEY)) || {}; }
-    catch (e) { return {}; }
+    try { localStorage.removeItem(this._MODULE_STATE_KEY); } catch (e) { /* 隐私模式忽略 */ }
+    return {};
   },
   _persistModuleState() {
-    try { localStorage.setItem(this._MODULE_STATE_KEY, JSON.stringify(this.moduleState)); }
-    catch (e) { /* 隐私/配额超限：静默降级为仅内存记忆 */ }
+    // v230.25 起不再持久化：刷新即重置是预期语义（见上方注释）。保留空实现避免调用点改造。
   },
 
   // 模块映射表
@@ -49,8 +53,9 @@ const App = {
   },
 
   async init() {
-    // 🟢 v229.50：页面刷新后从 localStorage 恢复模块状态记忆（顶部筛选/分页/tab），
-    //   使刷新不再丢失（切模块记忆本就走内存 save/restore，刷新由本行补齐）。
+    // 🟢 v230.25（用户反馈）：moduleState 不再跨刷新持久化——每次重新进入工作台
+    //   （刷新/重开）全部重置所有修改后的筛选条件至默认；仅同一次使用过程中切模块保留。
+    //   _loadModuleState 内部会清掉 v229.50~v230.24 遗留的 localStorage 旧键。
     this.moduleState = this._loadModuleState();
     // 页面卸载前保存当前模块状态，覆盖「筛选后直接刷新」这一 saveModuleState 未触发的场景
     window.addEventListener('beforeunload', () => {
@@ -165,6 +170,7 @@ const App = {
   //   只是历史上写在了同一个方法里。解耦后登录页可以立刻出现，数据在背后安静地就位。
   // ============================================================
   async _bootData(interactive) {
+    this._cloudBootStepsDone = false;   // 🟢 v229.85：每次启动重置「云步骤已跑」标记
     if (interactive && window.BootSplash) window.BootSplash.setProgress(5);   // 🟢 v229.40：启动屏真实进度锚点
     // 未登录的后台模式：一律不亮遮罩。showLoading/hideLoading 是全局单例，
     // 后台亮起来会把登录页顶掉（数据显示层 z-index 1000 < 登录页 4000，看似无害，
@@ -202,58 +208,22 @@ const App = {
       if (interactive && window.BootSplash) window.BootSplash.setProgress(25);
 
       // v164：云端设置数据初始化（连接 + 恢复搜索历史/出库列表跨设备记忆）
-      // 🟢 v226-fix：必须 await init() 完成（连接探测是异步的），否则 restoreOutboundFromSettings()
-      //   会在 isOnline 仍为 false 时同步 return，导致另一台设备刷新后拉不到出库列表。
+      // 🟢 v229.85：启动【不再阻塞】等云端 —— 连接探测改为后台跑，
+      //   云端慢 / 冷项目（GitHub Pages 线路）也不卡启动屏；连上后由 _runCloudBootSteps 补跑云步骤。
+      //   旧版 await SyncManager.init() 会硬等 verifyConnection 的 Supabase 响应；
+      //   而该探测的 10s 超时从未真正接到请求（AbortController 没传 signal），
+      //   Supabase 慢响应时启动屏会卡到 14s 兜底才进。改为「先不阻塞、连上再补跑」，
+      //   语义与 v226-fix 等价（isOnline 落定后照样 restore*），但启动屏秒进。
       let syncInitOk = false;
       if (typeof SyncManager !== 'undefined') {
-        try { await SyncManager.init(); syncInitOk = true; } catch (e) { console.warn('SyncManager init 失败:', e); }
+        SyncManager.init().then(() => {
+          syncInitOk = true;
+          // 连接落定：回填登录页云端状态标（原仅 !interactive 调用，登录页不在即空操作）
+          if (!interactive) { try { this._refreshLoginCloudBadge(); } catch (e) { console.warn('[js/app.js:217] 异常(已忽略):', e); } }
+          // 首屏渲染时 isOnline 尚为 false，下列云步骤此前会被跳过 —— 连上后统一在此补回
+          this._runCloudBootSteps(interactive);
+        }).catch(e => console.warn('SyncManager init 失败:', e));
         if (interactive && window.BootSplash) window.BootSplash.setProgress(40);
-      }
-      // 🟢 v228.89：连接探测落定后回填登录页的云端状态标（见 showLoginView 的「检测中」态）。
-      //   只在登录页仍挂在 DOM 上时才写 —— 用户可能在这 1 秒内已经登录进工作台了。
-      if (!interactive) this._refreshLoginCloudBadge();
-      // 🟢 v227.37 / v228.72：启动后若已连云端，拉取一次共享云配置并跟随（管理员改凭证后全员自动切）
-      //   （云端 cloudConfig 为权威；已是最新则 pull 内部直接返回，不会重复连）
-      if (typeof SyncManager !== 'undefined' && SyncManager.isOnline && typeof AppConfig !== 'undefined' && typeof AppConfig.pullCloudConfigFromCloud === 'function') {
-        try { await AppConfig.pullCloudConfigFromCloud(); } catch (e) { console.warn('[cloudConfig] 启动自动拉取失败(已忽略):', e && e.message); }
-      }
-      if (typeof DataStore !== 'undefined') {
-        try {
-          // 🟢 v227.96：已连云端 → 进入即自动同步最新「工作/设置/盘点」三包（静默、时间戳门控，不弹确认）
-          //
-          // 🔴 v228.62（真机实测：启动白等 19 秒的元凶，务必保持"后台化"）：
-          //   旧版这里对 autoSyncFromCloud / pullCloudRecords 都是 `await`。
-          //   实测（18.4MB 工作包）：
-          //       DL.autoSyncFromCloud START      t=400ms
-          //         pullDataPrivate（下载）        t=400→1658ms   ← 只占 1.26s
-          //       DL.autoSyncFromCloud END        t=19620ms      ← 总计 19.2s！
-          //   即 17.9s 全部花在下载之后的 loadBundleFromCloud()（把 18.4MB 还原进 IndexedDB），
-          //   而它被 await 卡在 App.init() 的主链上 → **用户要白等约 19 秒才看到界面**，
-          //   15s 看门狗先触发，还会打出"启动加载超过 15s"的告警。
-          //   更糟的是它拉完一次后，DataLoader.init()（t=20102ms）又拉了一次同一份 31.7MB
-          //   data.json —— 一次启动两份全量包，这正是用户反馈"同步速度有点慢"的直接来源。
-          //
-          //   修法：把这两个"静默后台同步"真正后台化（不 await）。
-          //     ① 它们本来就是**后台静默**语义（注释原文："静默、时间戳门控，不弹确认"），
-          //        阻塞启动没有任何收益；
-          //     ② 数据是否替换由各自内部的时间戳门控 + 完整性校验决定，与"何时开始"无关；
-          //     ③ DataLoader.init() 在下方紧接着执行，它自带「本地已完整→立即显示，后台再同步」
-          //        的完整策略，云端覆盖这一职责本就由它承担，此处只是提前预热缓存、加速它。
-          //   ⚠️ 顺序不变、门控不变、失败处理不变，只去掉「阻塞」。
-          if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
-            if (typeof DataLoader !== 'undefined' && typeof DataLoader.autoSyncFromCloud === 'function') {
-              DataLoader.autoSyncFromCloud().catch(e => console.warn('[autoSync] 失败(已忽略):', e && e.message));
-            }
-            if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.pullCloudRecords === 'function') {
-              StocktakeModule.pullCloudRecords().catch(e => console.warn('[stocktake] 自动同步失败(已忽略):', e && e.message));
-            }
-          }
-          await DataStore.migrateSearchHistoryToCloud();
-          await DataStore.restoreOutboundFromSettings();
-          // 🟢 v227.77：临时出库独立云端数据包，启动时一并恢复
-          await DataStore.restoreTemporaryOutboundFromSettings();
-        } catch (e) { console.warn('设置数据恢复失败:', e); }
-      if (interactive && window.BootSplash) window.BootSplash.setProgress(55);
       }
 
       // 🟢 v228.89：interactive=false 时把 silent 透传给 DataLoader ——
@@ -325,6 +295,40 @@ const App = {
       try { this.go(errTarget); } catch (e2) { /* 渲染兜底也失败则仅提示 */ }
       WBModal.alert('初始化出现异常，已尝试继续加载；如仍空白请刷新重试。\n' + (err && err.message ? err.message : err));
     }
+  },
+
+  // 🟢 v229.85：云端相关启动步骤（拉云配置 / 自动同步 / 恢复出库列表与搜索历史）。
+  //   原内联在 _bootData 中、依赖 await SyncManager.init() 落定 isOnline；
+  //   改造后由「连接探测在后台完成」的 .then 回调调用，从而启动屏不必等云端。
+  //   双保险：_cloudBootStepsDone 防止交互链路与后台链路重复跑同一批云步骤。
+  async _runCloudBootSteps(interactive) {
+    if (this._cloudBootStepsDone) return;
+    if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return;  // 没连上不跑（init 会自行重试/落定）
+    this._cloudBootStepsDone = true;
+    try {
+      // 🟢 v227.37 / v228.72：已连云端 → 拉取一次共享云配置并跟随（管理员改凭证后全员自动切）
+      if (typeof AppConfig !== 'undefined' && typeof AppConfig.pullCloudConfigFromCloud === 'function') {
+        try { await AppConfig.pullCloudConfigFromCloud(); } catch (e) { console.warn('[cloudConfig] 启动自动拉取失败(已忽略):', e && e.message); }
+      }
+      if (typeof DataStore !== 'undefined') {
+        try {
+          // 🟢 v227.96：已连云端 → 进入即自动同步最新「工作/设置/盘点」三包（静默、时间戳门控，不弹确认）
+          if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) {
+            if (typeof DataLoader !== 'undefined' && typeof DataLoader.autoSyncFromCloud === 'function') {
+              DataLoader.autoSyncFromCloud().catch(e => console.warn('[autoSync] 失败(已忽略):', e && e.message));
+            }
+            if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.pullCloudRecords === 'function') {
+              StocktakeModule.pullCloudRecords().catch(e => console.warn('[stocktake] 自动同步失败(已忽略):', e && e.message));
+            }
+          }
+          await DataStore.migrateSearchHistoryToCloud();
+          await DataStore.restoreOutboundFromSettings();
+          // 🟢 v227.77：临时出库独立云端数据包，启动时一并恢复
+          await DataStore.restoreTemporaryOutboundFromSettings();
+        } catch (e) { console.warn('设置数据恢复失败:', e); }
+        if (interactive && window.BootSplash) window.BootSplash.setProgress(55);
+      }
+    } catch (e) { console.warn('[cloudBoot] 失败(已忽略):', e && e.message); }
   },
 
   // 🟢 v228.89：未登录时的后台数据链路入口 —— 把 Promise 挂起来只是为了让「不 await」
@@ -416,7 +420,8 @@ const App = {
   },
 
   // ===== 模块切换状态记忆 =====
-  // 保存模块实例的搜索/筛选/分页/tab 等状态；v229.50 起 moduleState 同时持久化到 localStorage，刷新后也能恢复
+  // 保存模块实例的搜索/筛选/分页/tab 等状态（仅内存，v230.25 起不再持久化到 localStorage：
+  // 刷新/重进工作台一律重置回默认，仅同一次使用过程中切模块保留，见上方 moduleState 注释）
   saveModuleState(inst, key) {
     if (!inst || !key) return;
     const state = {};
@@ -648,7 +653,7 @@ const App = {
     if (!title) return;
     this._refreshSidebarTitle(title);
     // 清理老版本残留
-    try { localStorage.removeItem('sidebarTitle'); } catch (e) {}
+    try { localStorage.removeItem('sidebarTitle'); } catch (e) { console.warn('[js/app.js:650] 异常(已忽略):', e); }
     title.addEventListener('click', () => {
       this._openAccountMenu(title);
     });
@@ -727,6 +732,9 @@ const App = {
   }
       };
       setTimeout(check, 15000);                       // 启动 15s 后首次探测
+      // ⚙️ 常驻定时器①（v230.20 标记）：云端连通性探测，每 5 分钟一次。
+      //    设计为进程生命周期内不 clear——单页应用无路由卸载；页面重新可见时
+      //    由下方 visibilitychange 立即补探测，无需暂停定时器。
       setInterval(check, 5 * 60 * 1000);              // 之后每 5 分钟
       document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
     } catch (e) {
@@ -925,7 +933,7 @@ const App = {
       //   盘点人会变成「管理员」，记录归属错乱。
       //   管理员要以自己身份作业，用侧边栏状态条的「切换 → 以管理员身份作业」。
       if (!cur || !cur.username) {
-        try { localStorage.setItem('wb_current_keeper', JSON.stringify({ username: '管理员', role: 'admin', loginAt: new Date().toISOString() })); } catch (e) {}
+        try { localStorage.setItem('wb_current_keeper', JSON.stringify({ username: '管理员', role: 'admin', loginAt: new Date().toISOString() })); } catch (e) { console.warn('[js/app.js:930] 异常(已忽略):', e); }
       }
     }
     this.renderAccountBar();
@@ -1164,7 +1172,7 @@ const App = {
       sunset:   'assets/login-bg/sunset.svg'
     };
     let savedBg = 'warehouse';
-    try { savedBg = localStorage.getItem('wb_login_bg') || 'warehouse'; } catch (e) {}
+    try { savedBg = localStorage.getItem('wb_login_bg') || 'warehouse'; } catch (e) { console.warn('[js/app.js:1169] 异常(已忽略):', e); }
     const photoUrl = bgMap[savedBg] || bgMap.warehouse;
     screen.innerHTML =
       '<div class="login-bg">' +
@@ -1225,10 +1233,10 @@ const App = {
     const ru0 = (() => { try { return parseInt(localStorage.getItem('wb_remember_until') || '0', 10); } catch (e) { return 0; } })();
     if (ru0 && ru0 > Date.now() && remEl0) {
       remEl0.checked = true;
-      let rn = ''; try { rn = localStorage.getItem('wb_remember_name') || ''; } catch (e) {}
+      let rn = ''; try { rn = localStorage.getItem('wb_remember_name') || ''; } catch (e) { console.warn('[js/app.js:1230] 异常(已忽略):', e); }
       if (rn && nEl) nEl.value = rn;
     }
-    if (nEl) setTimeout(() => { try { nEl.focus(); } catch (e) {} }, 60);
+    if (nEl) setTimeout(() => { try { nEl.focus(); } catch (e) { console.warn('[js/app.js:1233] 异常(已忽略):', e); } }, 60);
     const doSubmit = () => this._doLogin();
     if (submit) submit.addEventListener('click', doSubmit);
     if (nEl) nEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { if (pEl) pEl.focus(); } });
@@ -1250,7 +1258,7 @@ const App = {
         bgSwitch.querySelectorAll('.login-bg-dot').forEach(d => d.classList.toggle('is-active', d === dot));
         const photo = document.getElementById('loginPhoto');
         if (photo) photo.style.backgroundImage = "url('" + (bgMap[key] || bgMap.warehouse) + "')";
-        try { localStorage.setItem('wb_login_bg', key); } catch (e) {}
+        try { localStorage.setItem('wb_login_bg', key); } catch (e) { console.warn('[js/app.js:1255] 异常(已忽略):', e); }
       });
     });
   },
@@ -1275,7 +1283,7 @@ const App = {
           localStorage.removeItem('wb_remember_until');
           localStorage.removeItem('wb_remember_name');
         }
-      } catch (e) {}
+      } catch (e) { console.warn('[js/app.js:1280] 异常(已忽略):', e); }
       this._enterWorkbench();
     });
   },
@@ -1301,7 +1309,7 @@ const App = {
     const screen = document.getElementById('loginScreen');
     if (screen) {
       screen.classList.add('login-screen--out');
-      setTimeout(() => { try { screen.remove(); } catch (e) {} }, 360);
+      setTimeout(() => { try { screen.remove(); } catch (e) { console.warn('[js/app.js:1306] 异常(已忽略):', e); } }, 360);
     }
     this.renderAccountBar();
     this._applySidebarVisibility();
@@ -1385,7 +1393,7 @@ const App = {
       AppConfig.setAdminSession();
       const cur = AppConfig.getCurrentUser();
       if (!cur || !cur.username) {
-        try { localStorage.setItem('wb_current_keeper', JSON.stringify({ username: '管理员', role: 'admin', loginAt: new Date().toISOString() })); } catch (e) {}
+        try { localStorage.setItem('wb_current_keeper', JSON.stringify({ username: '管理员', role: 'admin', loginAt: new Date().toISOString() })); } catch (e) { console.warn('[js/app.js:1390] 异常(已忽略):', e); }
       }
       return { ok: true, role: 'admin', name: '管理员' };
     }
@@ -1493,7 +1501,7 @@ const App = {
       document.querySelectorAll('.sidebar-item[data-module]').forEach(i => i.classList.remove('active'));
       this.renderAccountBar();
       if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.refreshCounter === 'function') {
-        try { StocktakeModule.refreshCounter(); } catch (e) {}
+        try { StocktakeModule.refreshCounter(); } catch (e) { console.warn('[js/app.js:1498] 异常(已忽略):', e); }
       }
       this.showLoginView();
     });
@@ -1508,10 +1516,10 @@ const App = {
       return;
     }
     const role = (name === '管理员') ? 'admin' : 'keeper';
-    try { localStorage.setItem('wb_current_keeper', JSON.stringify({ username: name, role: role, loginAt: new Date().toISOString() })); } catch (e) {}
+    try { localStorage.setItem('wb_current_keeper', JSON.stringify({ username: name, role: role, loginAt: new Date().toISOString() })); } catch (e) { console.warn('[js/app.js:1513] 异常(已忽略):', e); }
     this.renderAccountBar();
     if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.refreshCounter === 'function') {
-      try { StocktakeModule.refreshCounter(); } catch (e) {}   // 盘点人跟着刷新
+      try { StocktakeModule.refreshCounter(); } catch (e) { console.warn('[js/app.js:1516] 异常(已忽略):', e); }   // 盘点人跟着刷新
     }
     WBModal.alert('作业身份已切换为：' + name);
   },
@@ -1540,7 +1548,7 @@ const App = {
     }
     this.renderAccountBar();
     if (typeof StocktakeModule !== 'undefined' && typeof StocktakeModule.refreshCounter === 'function') {
-      try { StocktakeModule.refreshCounter(); } catch (e) {}
+      try { StocktakeModule.refreshCounter(); } catch (e) { console.warn('[js/app.js:1545] 异常(已忽略):', e); }
     }
     // 🟢 v227.38：完全退出 → 直接回到整页登录界面（不再停留工作台）；回落管理员不算退出，保留提示
     if (fullyOut) {
@@ -1713,7 +1721,7 @@ const App = {
     const set = (preset && typeof AppConfig !== 'undefined' && AppConfig.KEEPER_PRESETS[preset]) ? AppConfig.KEEPER_PRESETS[preset] : null;
     try {
       document.querySelectorAll('.ke-mod, .ke-entry').forEach(function (b) { if (set) b.checked = set.indexOf(b.value) !== -1; });
-    } catch (e) {}
+    } catch (e) { console.warn('[js/app.js:1718] 异常(已忽略):', e); }
   },
   // 从编辑器表单保存（新增/编辑）
   _saveKeeperEditor() {
@@ -1740,7 +1748,7 @@ const App = {
       try {
         document.querySelectorAll('.ke-mod:checked').forEach(function (b) { modules.push(b.value); });
         document.querySelectorAll('.ke-entry:checked').forEach(function (b) { entries.push(b.value); });
-      } catch (e) {}
+      } catch (e) { console.warn('[js/app.js:1745] 异常(已忽略):', e); }
     }
     const res = AppConfig.upsertKeeper(uname, pwd || undefined, { modules: modules, entries: entries });
     if (!res.ok) { WBModal.alert(res.msg || '保存失败'); return; }
@@ -1765,6 +1773,11 @@ const App = {
     //   这是修 v227.36 之后普通 keeper 在「现存量」里点不开「存货档案」的回归：
     //   旧版靠 mods.indexOf('stock-detail') 兜底，新版用 modules 数组显式收口后丢了。
     if (typeof moduleName === 'string' && moduleName.indexOf('-detail') !== -1) return true;
+    // 🟢 v230.19：「我的任务」(workTasks) 是个人模块（自己的任务簿 + 逾期提醒），
+    //   不纳入管理员授权体系 —— 所有已登录账号均可访问（未登录在上面已 return false）。
+    //   修复 v229.23 漏登 MODULES 的遗留：库管员侧边栏项被隐藏、但顶栏 📌 铃铛无门控，
+    //   点击即弹「无权限访问」，个人任务功能对库管员形同虚设。
+    if (moduleName === 'workTasks') return true;
     const mods = AppConfig.getKeeperModules(u.username);
     if (!mods) return true;                              // 非库管员账号（管理员会话）→ 全开
     return mods.indexOf(moduleName) !== -1;
@@ -1837,7 +1850,7 @@ const App = {
         const mod = el.getAttribute('data-module');
         el.style.display = self._canAccessModule(mod) ? '' : 'none';
       });
-    } catch (e) {}
+    } catch (e) { console.warn('[js/app.js:1847] 异常(已忽略):', e); }
   },
 
   // 🟢 v227.37：4 个系统入口（云端同步 / 数据导入 / 设置 / 源码）按权限显隐
@@ -1860,7 +1873,7 @@ const App = {
         const allHidden = Array.from(items).every(function (el) { return el.style.display === 'none'; });
         group.style.display = allHidden ? 'none' : '';
       }
-    } catch (e) {}
+    } catch (e) { console.warn('[js/app.js:1870] 异常(已忽略):', e); }
   },
 
   // 🟢 v227.37：系统入口的统一守卫 —— DOM 隐藏的同时，把 onclick 临时改写为「无权限提示」
@@ -1895,12 +1908,12 @@ const App = {
     if (typeof BroadcastChannel !== 'undefined') {
       try {
         this._keepersCh = new BroadcastChannel('wb_keepers');
-        this._keepersCh.onmessage = () => { try { if (typeof AppConfig !== 'undefined' && AppConfig.keepersWatchTick) AppConfig.keepersWatchTick(); } catch (e) {} };
+        this._keepersCh.onmessage = () => { try { if (typeof AppConfig !== 'undefined' && AppConfig.keepersWatchTick) AppConfig.keepersWatchTick(); } catch (e) { console.warn('[js/app.js:1905] 异常(已忽略):', e); } };
       } catch (e) { this._keepersCh = null; }
     }
     try {
       window.addEventListener('storage', (ev) => {
-        if (ev && ev.key === 'wb_keepers') { try { if (typeof AppConfig !== 'undefined' && AppConfig.keepersWatchTick) AppConfig.keepersWatchTick(); } catch (e) {} }
+        if (ev && ev.key === 'wb_keepers') { try { if (typeof AppConfig !== 'undefined' && AppConfig.keepersWatchTick) AppConfig.keepersWatchTick(); } catch (e) { console.warn('[js/app.js:1910] 异常(已忽略):', e); } }
       });
     } catch (e) { /* 忽略 */ }
   },
@@ -2058,7 +2071,7 @@ const App = {
   _pauseDashboard() {
     try {
       if (typeof DashboardModule !== 'undefined' && DashboardModule.stopAutoCoverflow) DashboardModule.stopAutoCoverflow();
-    } catch (e) {}
+    } catch (e) { console.warn('[js/app.js:2068] 异常(已忽略):', e); }
   },
   _resumeDashboard() {
     try {
@@ -2068,7 +2081,7 @@ const App = {
       if (!DashboardModule.coverflowItems || !DashboardModule.coverflowItems.length) return;
       if (document.getElementById('modalOverlay')?.classList.contains('show')) return;  // 还有弹窗开着
       DashboardModule.startAutoCoverflow();
-    } catch (e) {}
+    } catch (e) { console.warn('[js/app.js:2078] 异常(已忽略):', e); }
   },
 
   // ===== 模块切换 =====
@@ -2152,7 +2165,7 @@ const App = {
     if (!this.modules[moduleName]) return;
     // 🟢 v228.79 P1-2：切模块先清掉上一个模块残留的吐司提示（含底部玻璃 toast 与历史胶囊），
     //   避免"当前模块出错"的误导。统一提示系统见 modal.js 的 window.showToast / dismissAllToasts。
-    if (typeof dismissAllToasts === 'function') { try { dismissAllToasts(); } catch (e) {} }
+    if (typeof dismissAllToasts === 'function') { try { dismissAllToasts(); } catch (e) { console.warn('[js/app.js:2162] 异常(已忽略):', e); } }
     // v217 模块权限拦截：无权限账号禁止进入，并落地到第一个有权限模块
     if (!this._canAccessModule(moduleName)) {
       // 🟢 v227.36：未登录 → 显示「请先登录」占位（不弹空白/不告警），账号条提供登录入口
@@ -2169,6 +2182,11 @@ const App = {
     // 🟢 v173：切换前关闭表格列筛选弹窗（挂在 body 上、不随模块 DOM 销毁）
     if (typeof TableUtils !== 'undefined' && typeof TableUtils._hideFilterPopup === 'function') {
       TableUtils._hideFilterPopup();
+    }
+    // 🟢 v229.98（AUDIT-229-98-02②）：切换前收起查询模块的搜索历史浮层（同样挂在 body 上），
+    //   否则浮层与它注册的 document 级 click 监听会残留到下一个模块。
+    if (typeof QueryModule !== 'undefined' && typeof QueryModule.hideHistory === 'function') {
+      try { QueryModule.hideHistory(); } catch (e) { console.error('[hideHistory]', e); }
     }
     const switching = !!(this.currentModule && this.currentModule !== moduleName);
     const targetMeta = this.modules[moduleName];
@@ -2212,9 +2230,17 @@ const App = {
     // 旧内容保留可见，渲染完成后再平滑淡入新内容；仅慢加载时显示轻量顶栏进度条。
     // 🟢 v227.25：切模块时挂一个独立骨架 overlay（覆盖在内容区之上，不随 innerHTML 清空），
     //   消除「卡片消失→出现」的空白期观感；同时旧内容半透明作为视觉衔接。
+    // 🟢 v230.23（用户报障：切模块「卡顿很久才切过去」）：骨架/半透明衔接改为按需挂载——
+    //   快切换（≤120ms，实测四高频模块 30-55ms）整体不挂骨架、旧内容不变暗，新内容直接到位，
+    //   消除「闪一下骨架/暗一下」的感知卡顿；仅慢加载（>120ms）才走骨架 + 半透明衔接。
     const realArea = document.getElementById('contentArea');
-    this._showSwitchSkeleton();
-    if (realArea) realArea.classList.add('content-switching');
+    let slowEngaged = false;
+    const slowTimer = setTimeout(() => {
+      if (token !== App._goToken) return;   // 已切走 → 不补挂
+      slowEngaged = true;
+      this._showSwitchSkeleton();
+      if (realArea) realArea.classList.add('content-switching');
+    }, 120);
     const bar = this._ensureSwitchBar();
     bar.classList.remove('switch-bar--done');
     bar.style.opacity = '0';
@@ -2225,16 +2251,35 @@ const App = {
     }, 140);
 
     // 先让浏览器绘制一帧（旧内容 + 进度条），再做可能较重的渲染，降低首帧卡顿感
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    // 🟢 v230.23：双 rAF → 单 rAF（一帧足以 paint 旧内容；省下的一帧直接降低切换感知延迟）
+    await new Promise(r => requestAnimationFrame(r));
 
     let renderErr = null;
     try {
       await targetMeta.instance.render(token);
+      // 🟢 v230.23（用户报障：表格列宽「先乱一下再自动调整」）：render 返回后、浏览器 paint 之前，
+      //   同步把列宽应用到位（内部含 _lockWidthsAndBaseline/_applyFlexWidths 两趟分配）——
+      //   首帧即最终宽度，消除 auto→flex 的二段跳。此前宽度改写发生在 MutationObserver 的
+      //   rAF 回调里（晚一帧），用户看到的就是「先按内容宽渲染、再跳成最终宽」。
+      if (typeof TableUtils !== 'undefined' && TableUtils.applyColumnWidthsNow) {
+        try { TableUtils.applyColumnWidthsNow(realArea); } catch (e) { console.warn('[applyColumnWidthsNow] 失败(已忽略):', e); }
+      }
+      // 🟢 v230.26（用户报障：PC 端切模块时下拉框文字「抖一下再居中」）：render 返回后、
+      //   paint 之前同步把筛选栏/分页栏的原生 <select> 增强为 SearchSelect 组件。此前增强走
+      //   MutationObserver + setTimeout(120ms) 异步路径——innerHTML 后浏览器先按原生 select
+      //   paint 一帧（min-width 120px），120ms 后才包 .ss-wrap/.ss-trigger 改成组件宽，
+      //   用户看到的就是「第一眼窄框、随后跳成宽框」的文字抖动。与 v230.23 列宽二段跳同源，
+      //   同款修复思路：同步收口，首帧即最终态；MutationObserver 的 120ms 回调退居异步兜底
+      //   （覆盖 render 内部后写入的 select 与弹窗场景）。
+      if (typeof window.autoEnhanceSelects === 'function') {
+        try { window.autoEnhanceSelects(realArea); } catch (e) { console.warn('[autoEnhanceSelects] 失败(已忽略):', e); }
+      }
     } catch (err) {
       renderErr = err;
       console.error(`${moduleName} render error:`, err);
     } finally {
       clearTimeout(barTimer);
+      clearTimeout(slowTimer);
     }
 
     if (token !== this._goToken) return; // 被更新的模块切换打断，丢弃过期结果
@@ -2250,8 +2295,11 @@ const App = {
       }
     } else if (realArea) {
       // 🟢 v227.25：render 完成后立刻清掉骨架、淡入新内容（避免骨架-数据双层闪烁）
-      this._hideSwitchSkeleton();
-      realArea.classList.remove('content-switching');
+      // 🟢 v230.23：快切换未挂过骨架/未变暗 → 跳过无效的移除操作，只保留淡入
+      if (slowEngaged) {
+        this._hideSwitchSkeleton();
+        realArea.classList.remove('content-switching');
+      }
       realArea.classList.remove('content-fade');
       void realArea.offsetWidth; // 触发重排以重启动画
       realArea.classList.add('content-fade');
@@ -2289,7 +2337,18 @@ const App = {
       TableUtils._hideFilterPopup();
     }
     // 跳转前保存当前视图状态，供返回时还原 pendingEntity（避免返回后空白）
-    this._navStack.push({ module: this.currentModule || 'dashboard', pendingEntity: this.pendingEntity });
+    // 🟢 v229.98（AUDIT-229-98-05）：连点同一编码 / 连点两条链接会把同一跳转压入两条记录，
+    //   back() 只弹一条 → 详情页要按两次返回才回得去。判定「本次目标与当前已打开的实体相同、
+    //   且当前已在对应详情页」= 上一次入栈已经保存了返回点（栈顶记录的 entity 即当前实体），
+    //   此时不再重复入栈。A→B→返回A→再点A 这类正常链路目标不同，不受影响。
+    const sig = type + '|' + key;
+    const top = this._navStack.length ? this._navStack[this._navStack.length - 1] : null;
+    const dupJump = !!(top && top.entity === sig &&
+      this.pendingEntity && this.pendingEntity.type === type && this.pendingEntity.key === key &&
+      (this.currentModule || 'dashboard') === def.detailModule);
+    if (!dupJump) {
+      this._navStack.push({ module: this.currentModule || 'dashboard', pendingEntity: this.pendingEntity, entity: sig });
+    }
     this.pendingEntity = { type, key };
     this._returnModule = this.currentModule || 'dashboard';
     this.pushRecent(type, key);
@@ -2331,6 +2390,9 @@ const App = {
       }
     };
     update();
+    // ⚙️ 常驻定时器②（v230.20 标记）：顶栏时钟刷新，每 30s 一次。
+    //    常驻不 clear：时钟需在页面整个生命周期保持走动；单页应用无卸载点，
+    //    唯一实例（bindTopbarClock 仅调用一次）。
     setInterval(update, 30000);
   },
 
@@ -2348,7 +2410,7 @@ const App = {
     try {
       if (window.__keeperAttentionWired) return;
       window.__keeperAttentionWired = true;
-      const fire = () => { try { if (typeof AppConfig !== 'undefined' && AppConfig.keepersWatchTick) AppConfig.keepersWatchTick(); } catch (e) {} };
+      const fire = () => { try { if (typeof AppConfig !== 'undefined' && AppConfig.keepersWatchTick) AppConfig.keepersWatchTick(); } catch (e) { console.warn('[js/app.js:2377] 异常(已忽略):', e); } };
       document.addEventListener('visibilitychange', () => { if (!document.hidden) fire(); });
       window.addEventListener('focus', fire);
       const once = () => { fire(); };
@@ -2492,7 +2554,11 @@ const App = {
    *   注：<input> 默认有内置 select 行为，不会被父级 user-select:none 影响，可继续编辑
    */
   initMobileDragGuard() {
-    if (window.innerWidth > 768) return; // 只在窄屏启用
+    // 🟢 v229.98（AUDIT-229-98-06②）：原实现用 `if (innerWidth > 768) return` 一次性判定，
+    //   桌面端把窗口缩窄到 ≤768px 后再也没有机会装上护栏。改为 init 与 resize 共用同一段安装逻辑，
+    //   且用 __dragGuardInstalled / __dragGuardOn 双重标记保证不重复安装。
+    if (this.__dragGuardInstalled) return;   // 幂等：无论被调用多少次，只装一次
+    this.__dragGuardInstalled = true;
     const isTextTarget = (el) => {
       if (!el || el === document.body) return false;
       // <input>/<textarea>/<select> 永远允许（让用户能选中文本/编辑光标）
@@ -2503,13 +2569,19 @@ const App = {
     };
     const guard = (e) => {
       if (isTextTarget(e.target)) {
-        try { e.preventDefault(); } catch (_) {}
-        try { e.stopPropagation(); } catch (_) {}
+        try { e.preventDefault(); } catch (_) { console.warn('[js/app.js:2536] 异常(已忽略):', _); }
+        try { e.stopPropagation(); } catch (_) { console.warn('[js/app.js:2537] 异常(已忽略):', _); }
       }
     };
-    // 用 capture 阶段拦截，确保在 iOS WebKit 派发 drag preview 之前截掉
-    document.addEventListener('dragstart', guard, true);
-    document.addEventListener('selectstart', guard, true);
+    const install = () => {
+      if (this.__dragGuardOn || window.innerWidth > 768) return;   // 已装 / 仍是宽屏 → 不动
+      this.__dragGuardOn = true;
+      // 用 capture 阶段拦截，确保在 iOS WebKit 派发 drag preview 之前截掉
+      document.addEventListener('dragstart', guard, true);
+      document.addEventListener('selectstart', guard, true);
+    };
+    install();
+    window.addEventListener('resize', install);   // 桌面端窗口缩窄到 ≤768px 后补装
     // 🟢 v139：移除 touchstart 上的 preventDefault——它会掐断滚动手势，
     //   正是「移动端表格滑不动」的根因。selection/callout 已由 CSS
     //   (user-select:none / -webkit-touch-callout:none / -webkit-user-drag:none)

@@ -13,11 +13,6 @@
 (function () {
   const svgCache = new Map(); // 编码 → 自适应 SVG 字符串
 
-  function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
   // 生成自适应 SVG（含 viewBox，实际大小由容器 CSS 控制）— 带内存缓存
   function svg(code) {
     const key = String(code == null ? '' : code).trim();
@@ -50,7 +45,7 @@
     if (!key) return '<span class="qr-thumb qr-thumb-empty">—</span>';
     const s = svg(key);
     if (!s) return '<span class="qr-thumb qr-thumb-empty">—</span>';
-    return `<span class="qr-thumb" data-qr-code="${escapeHtml(key)}" data-qr-name="${escapeHtml(name || '')}" data-qr-spec="${escapeHtml(spec || '')}" title="点击查看/下载二维码">${s}</span>`;
+    return `<span class="qr-thumb" data-qr-code="${esc(key)}" data-qr-name="${esc(name || '')}" data-qr-spec="${esc(spec || '')}" title="点击查看/下载二维码">${s}</span>`;
   }
 
   // 弹大图（A2 列表用）：放大展示 + 编码/规格文字 + 下载 PNG；按 D2 不提供跳转
@@ -66,12 +61,12 @@
     overlay.className = 'qr-modal';
     overlay.innerHTML =
       '<div class="qr-modal-box">' +
-      '<div class="qr-modal-head">' + escapeHtml(name || '存货二维码') + '</div>' +
+      '<div class="qr-modal-head">' + esc(name || '存货二维码') + '</div>' +
       '<div class="qr-modal-img">' + s + '</div>' +
-      '<div class="qr-modal-meta">编码：' + escapeHtml(key) +
-      (spec ? '　规格：' + escapeHtml(spec) : '') + '</div>' +
+      '<div class="qr-modal-meta">编码：' + esc(key) +
+      (spec ? '　规格：' + esc(spec) : '') + '</div>' +
       '<div class="qr-modal-actions">' +
-      '<button class="btn--ghost" type="button" data-qr-dl="' + escapeHtml(key) + '">⬇ 下载 PNG</button>' +
+      '<button class="btn--ghost" type="button" data-qr-dl="' + esc(key) + '">⬇ 下载 PNG</button>' +
       '<button class="btn--ghost" type="button" data-qr-close>关闭</button>' +
       '</div></div>';
     document.body.appendChild(overlay);
@@ -146,8 +141,8 @@
         '<div class="label">' +
         '<div class="code">' + s + '</div>' +
         '<div class="info">' +
-        '<div class="name">' + escapeHtml(name || '') + '</div>' +
-        (spec ? '<div class="spec">规格：' + escapeHtml(spec) + '</div>' : '') +
+        '<div class="name">' + esc(name || '') + '</div>' +
+        (spec ? '<div class="spec">规格：' + esc(spec) + '</div>' : '') +
         '</div></div>' +
         '<scr' + 'ipt>window.onload=function(){setTimeout(function(){window.print();},250);};</scr' + 'ipt>' +
         '</body></html>');
@@ -167,8 +162,8 @@
         return '<div class="card">' +
           '<div class="code">' + s + '</div>' +
           '<div class="info">' +
-            '<div class="name">' + escapeHtml(it.name || '') + '</div>' +
-            (it.spec ? '<div class="spec">规格：' + escapeHtml(it.spec) + '</div>' : '') +
+            '<div class="name">' + esc(it.name || '') + '</div>' +
+            (it.spec ? '<div class="spec">规格：' + esc(it.spec) + '</div>' : '') +
           '</div></div>';
       }).join('');
       const w = window.open('', '_blank');
@@ -206,5 +201,13 @@
     showModal(t.getAttribute('data-qr-code'), t.getAttribute('data-qr-name'), t.getAttribute('data-qr-spec'));
   });
 
-  window.QR = { svg, svgFixed, thumb, showModal, downloadPng, printWindow, printBulk, escapeHtml };
+  // 🟢 v229.91（AUDIT-229-08）：escapeHtml 局部实现与全局 esc 完全等价，收敛为 esc 的别名对外兼容。
+  // ⚠️ 必须用「延迟求值」包一层：qr-util 可能先于 config.js（定义 window.esc）加载，
+  //    此处若直接写 `escapeHtml: esc` 会在脚本加载期抛 ReferenceError，导致整个 window.QR 赋值失败。
+  window.QR = {
+    svg, svgFixed, thumb, showModal, downloadPng, printWindow, printBulk,
+    escapeHtml: (s) => (typeof window.esc === 'function'
+      ? window.esc(s)
+      : String(s == null ? '' : s)),
+  };
 })();

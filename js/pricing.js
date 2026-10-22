@@ -114,10 +114,16 @@ const PricingModule = {
       });
     }
 
-    const now = new Date();
+    // 🟢 v229.98（AUDIT-229-98-26）：合同价格「是否有效」统一按【日期】粒度判定，失效日期当天仍算有效。
+    //   原先 KPI 用 `new Date(失效日期) >= now` —— 失效日期是午夜时刻，当天零点一过这条价格就退出统计，
+    //   而表格用 `now > end` 与之并不等价（同一条记录两种口径）。改为比较 YYYY-MM-DD，
+    //   KPI 与表格完全一致，也符合"含到期日"的业务直觉。
+    const dayOf = (v) => String(v ?? '').slice(0, 10).replace(/\//g, '-');
+    const d0 = new Date();
+    const todayStr = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, '0')}-${String(d0.getDate()).padStart(2, '0')}`;
     const active = pricing.filter(p => {
       if (!p.生效日期 || !p.失效日期) return false;
-      return new Date(p.生效日期) <= now && new Date(p.失效日期) >= now;
+      return dayOf(p.生效日期) <= todayStr && dayOf(p.失效日期) >= todayStr;
     });
     const avgPrice = active.length > 0 ? active.reduce((s, p) => s + (parseFloat(p.含税单价) || 0), 0) / active.length : 0;
 
@@ -154,6 +160,9 @@ const PricingModule = {
     this.currentPage = page;
     const items = data.slice((page - 1) * pageSize, page * pageSize);
     const now = new Date();
+    // 🟢 v229.98（AUDIT-229-98-26）：本函数内也要有 todayStr —— 状态列与 KPI 走同一套「日期粒度」口径
+    const _t0 = new Date();
+    const todayStr = `${_t0.getFullYear()}-${String(_t0.getMonth() + 1).padStart(2, '0')}-${String(_t0.getDate()).padStart(2, '0')}`;
 
     const area = document.getElementById('pricingTableArea');
     if (items.length === 0) {
@@ -185,10 +194,12 @@ const PricingModule = {
             ${items.map(p => {
               let status = '<span class="tag tag-neutral">未知</span>';
               if (p.生效日期 && p.失效日期) {
-                const start = new Date(p.生效日期);
-                const end = new Date(p.失效日期);
-                if (now < start) status = '<span class="tag tag-info">未生效</span>';
-                else if (now > end) status = '<span class="tag tag-neutral">已失效</span>';
+                // 🟢 v229.98（AUDIT-229-98-26）：与 KPI 同为「日期粒度」判定（失效日期当天仍有效），
+                //   原先这里用时间戳 now > end，与上方 KPI 的口径不一致。
+                const sd = String(p.生效日期).slice(0, 10).replace(/\//g, '-');
+                const ed = String(p.失效日期).slice(0, 10).replace(/\//g, '-');
+                if (String(todayStr) < sd) status = '<span class="tag tag-info">未生效</span>';
+                else if (String(todayStr) > ed) status = '<span class="tag tag-neutral">已失效</span>';
                 else status = '<span class="tag tag-success">有效</span>';
               }
               return `
@@ -248,6 +259,10 @@ const PricingModule = {
   },
 
   async resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     const allPricing = await DataStore.getPricing();
     const dr = this.getDefaultDateRange(allPricing);
     this.currentFilter = { keyword: '', 供应商: '', 类型: '', startDate: dr.start, endDate: dr.end };

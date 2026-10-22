@@ -109,14 +109,27 @@
     let pendingPeriod = null; // 「明早/明晚/今晚」预挂的时段，供后续时间阶段使用
 
     // ── 绝对日期（最高优先级）──
+    // 🟢 v229.98（AUDIT-229-98-07）：new Date(y, m-1, d) 对越界值会静默归一（「13月45日」→ 次年某日），
+    //   用户拿到的是看似合法的错日期。构造后回读校验：年/月/日任一项与输入不符即判为非法日期，
+    //   不消费该匹配 → 上层按「未识别」处理（默认今天，原文保留在 rest），不再静默溢出。
+    const isValidYMD = (dt, y, mo, d) =>
+      !!dt && !isNaN(dt.getTime()) &&
+      dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d;
+
     let m;
     if ((m = find(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/))) {
-      base = new Date(+m[1], +m[2] - 1, +m[3]); take(m, 'date');
+      const y = +m[1], mo = +m[2], d = +m[3];
+      const dt = new Date(y, mo - 1, d);
+      if (isValidYMD(dt, y, mo, d)) { base = dt; take(m, 'date'); }
     } else if ((m = find(/(\d{2,4})年\s*(\d{1,2})月\s*(\d{1,2})[日号]?/))) {
       let y = +m[1]; if (y < 100) y += 2000;
-      base = new Date(y, +m[2] - 1, +m[3]); take(m, 'date');
+      const mo = +m[2], d = +m[3];
+      const dt = new Date(y, mo - 1, d);
+      if (isValidYMD(dt, y, mo, d)) { base = dt; take(m, 'date'); }
     } else if ((m = find(/(\d{1,2})月\s*(\d{1,2})[日号]?/))) {
-      base = new Date(now.getFullYear(), +m[1] - 1, +m[2]); take(m, 'date');
+      const y = now.getFullYear(), mo = +m[1], d = +m[2];
+      const dt = new Date(y, mo - 1, d);
+      if (isValidYMD(dt, y, mo, d)) { base = dt; take(m, 'date'); }
     }
 
     // ── 周（含前缀 下/下下/本/这，裸周X 保持滚动语义）──

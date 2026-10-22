@@ -1157,6 +1157,13 @@ body::after{
   color: var(--text-main); font-size: 12px;
   /* 🟢 v122：所有数据表单元格默认居中（无 !important，对齐按钮 inline 可覆盖） */
   text-align: center;
+  /* 🟢 v229.94：单元格内容溢出时「全部换行」而非被裁切/溢出——统一应用于全部数据表。
+     默认即 normal（会换行），此处显式声明 + word-break 防长串（如英文/编码）不折行，
+     overflow:visible 确保内容永不因父容器裁掉；vertical-align:top 让多行内容顶部对齐更整齐。 */
+  white-space: normal;
+  word-break: break-word;
+  overflow: visible;
+  vertical-align: top;
 }
 /* 🟢 v173：表格正文内的 strong / 实体链接保持与普通单元格一致的字重（400），
    避免「订单编号 / 供应商」等被加粗或着色的列看起来比普通列更大更重 */
@@ -1196,6 +1203,10 @@ body::after{
 
 /* ========== 筛选栏 ========== */
 .filter-bar{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; align-items: center; }
+
+/* 🟢 v229.88：入库列表「备注」列（表体备注）—— 超宽省略 + hover 全文 tooltip */
+.inbound-note-cell{ max-width: 220px; }
+.inbound-note-cell > span{ display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
 
 /* 两排筛选栏（入库列表 / 订单列表 共用）—— 所有间距由本规则统一控制 */
 .filter-bar-two-row{
@@ -1984,10 +1995,12 @@ body::after{
 .empty-state .empty-text{ font-size: 14px; }
 
 /* 🟢 v228.09 性能优化 P1-4：虚拟滚动表格（.vt-table 仅在行数超阈值时启用）。
-   统一行高 + 单元格不换行，保证「可视窗口」按行高计算时准确、滚动不漂移。
+   v229.94 起：单元格允许换行（white-space:normal），长文本（供应商/项目等）在列内换行完整显示，
+   不再单行溢出；行高改为「内容自适应 + 最小 2 行高度」，由 virtualTable 实测每行实际高度做变高虚拟滚动
+   （不再假设统一行高），滚动偏移始终准确。overflow:hidden 防止个别超长内容（>2 行）溢出到相邻行。
    仅影响「每页=全部」这类超多行场景，默认分页不启用、外观完全不变。 */
-.vt-table tbody tr{ height: 38px; }
-.vt-table tbody td{ white-space: nowrap; }
+.vt-table tbody tr{ height: 56px; }
+.vt-table tbody td{ white-space: normal; word-break: break-word; overflow: hidden; }
 .vt-table tbody tr.vt-spacer{ height: auto; }
 .vt-table tbody tr.vt-spacer td{ padding: 0; border: 0; }
 .empty-state .empty-hint{ font-size: 12px; margin-top: 6px; opacity: 0.7; }
@@ -2618,17 +2631,20 @@ button{
 }
 
 /* 底部选择条 */
+/* 🟢 v230.06：由底部居中改为内容区左沿——旧实现 left:50% 与各列表模块居中的翻页栏
+   完全重叠（用户反馈遮挡翻页键）。精确左边由 excel-select.js positionSelBar 按
+   容器实测 rect.left+16px 覆写（天然避开侧边栏 240px/56px 两种态），此处为兜底默认值。 */
 .sel-bar{
   position: fixed;
-  left: 50%;
+  left: 16px;
   bottom: 22px;
-  transform: translate(-50%, 16px);
+  transform: translateY(16px);
   z-index: 320;
   opacity: 0;
   pointer-events: none;
   transition: all .22s cubic-bezier(.16,1,.3,1);
 }
-.sel-bar.show{ opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.sel-bar.show{ opacity: 1; transform: translateY(0); pointer-events: auto; }
 .sel-bar-inner{
   display: flex; align-items: center; gap: 8px;
   background: var(--panel-bg, #fff);
@@ -3767,8 +3783,10 @@ body.col-resizing{ cursor: col-resize; user-select: none; }
     min-height: 44px; padding: 10px 18px; font-size: 14px;
   }
 
-  /* 🟢 v144：移动端展开态——单元格不换行，保持每列正常宽度，由外层 .table-wrapper 横向滑动查看 */
-  .data-table td{ white-space: nowrap; }
+  /* 🟢 v144→v229.94：移动端展开态——单元格内容溢出时同样「全部换行」完整显示（与桌面端统一）。
+     折叠态（_equalizeCols 注入 inline nowrap+ellipsis）仍保持紧凑，不受影响。
+     加 min-width 防止换行后列宽塌缩过窄，仍可由外层 .table-wrapper 横向滑动查看。 */
+  .data-table td{ white-space: normal; word-break: break-word; min-width: 88px; }
 
   /* ③ 出库表头信息区：4 列栅格 → 单列堆叠，字段 label 在上、控件在下 */
   .ob-header-grid{ grid-template-columns: 1fr !important; }
@@ -3868,7 +3886,7 @@ body.col-resizing{ cursor: col-resize; user-select: none; }
   /* 🟢 v139：移动端列折叠「展开剩余 N 列」按钮（插在表格上方） */
   .mobile-col-toggle{
     display: inline-flex; align-items: center; gap: 4px;
-    margin: 0 0 8px; padding: 8px 16px; min-height: 36px;   /* 🟢 v228.23 S-4：高度 29→36px，达舒适触控阈值 */
+    margin: 0 0 8px; padding: 8px 16px; min-height: 44px;   /* 🟢 v230.20（AUDIT-230-09）：高度 36→44px，达触控底线 */
     font-size: 13px; font-weight: 600; line-height: 1;
     color: #1E4A7A; cursor: pointer;
     background: linear-gradient(135deg, rgba(91, 155, 213, 0.5) 0%, rgba(91, 155, 213, 0.2) 50%, rgba(255, 255, 255, 0.08) 100%);
@@ -4073,19 +4091,24 @@ body.col-resizing{ cursor: col-resize; user-select: none; }
 .ob-field-row .ob-field-label{ flex:0 0 auto; }
 /* 🟢 v228.22 B-2：出库单信息卡片改弹性换行（原为 4 列定宽 grid，窄屏下第 4 个字段「领用人员」会越出视口）。
    改为 flex-wrap + 各字段 flex:1 1 220px，空间不足时自动折到下一行，且容器 overflow-x:auto 兜底，
-   杜绝任何字段彻底不可达。出库单号单元带 ◀/▶ 按钮需要更宽，给更大 basis。 */
+   杜绝任何字段彻底不可达。
+   🟢 v230.18：用户截图反馈「出库单号输入框右侧空白过宽，要和日期框宽度一致」——原
+   .ob-field:first-child{flex:2 1 300px} 双倍特例使该字段容器达 515px，而 ◀/▶/input 组
+   （orderno-row）固定 flex:0 0 auto 仅 221px 不伸展，右侧 ~250px 空白直达下一字段 label 前。
+   现取消双倍特例，四字段等宽分布；orderno-row 同步改为 flex:1 1 auto 伸展填满字段容器，
+   与日期框（input width:100% 伸展）行为一致，输入框区域不再留空白。 */
 .ob-header-grid > .ob-field{ flex:1 1 220px; min-width:200px; }
-.ob-header-grid > .ob-field:first-child{ flex:2 1 300px; }
 .ob-header-grid .ob-field-row > input{ width:100%; min-width:120px; }
 /* 🟢 v227.77：把 .ob-field-row 内嵌控件默认 flex 调为 1 1 auto（之前 0 1 auto 在
    出库单信息卡片里导致 ◀/▶/input 紧贴 label、剩余空间不伸展、视觉上「label 与控件上下错位」）。
-   出库单号单元内部的 .ob-orderno-row 单独 flex:0 0 auto（保持 input 160px 紧凑宽度）。 */
+   🟢 v230.18：orderno-row 由 flex:0 0 auto 改 flex:1 1 auto——用户要求出库单号输入框区域
+   与日期框等宽无空白，orderno-row 需伸展填满字段容器（内部 input flex:1 随之拉宽）。 */
 .ob-field-row > input,
 .ob-field-row > select{
   flex:1 1 auto;min-width:0;
 }
 .ob-field-row > .ob-orderno-row{
-  flex:0 0 auto;min-width:0;
+  flex:1 1 auto;min-width:0;
 }
 #stDailyBtns.ob-field-row > label{ display:none; }      /* 按钮列无 label：隐藏占位 */
 
@@ -4964,9 +4987,10 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
    置于文件末尾并以 (0,2,1) 的 .pagination-bar .page-btns button 选择器对齐 4222 行同规格规则，
    确保覆盖基础 .wb-pager-btn(4161) 与 .pagination-bar .page-btns button(4222) 的 30px 定高。 */
 @media (max-width: 768px){
+  /* 🟢 v230.20（AUDIT-230-09）：触控底线 40→44px */
   .pagination-bar .page-btns button,
-  .pagination-bar .page-btns .wb-pager-btn{ width: 40px; min-width: 40px; height: 40px; border-radius: 11px; font-size: 13px; }
-  .pagination-bar .wb-pager-btn{ width: 40px; height: 40px; }
+  .pagination-bar .page-btns .wb-pager-btn{ width: 44px; min-width: 44px; height: 44px; border-radius: 12px; font-size: 13px; }
+  .pagination-bar .wb-pager-btn{ width: 44px; height: 44px; }
   .pagination-bar .page-btns{ gap: 6px; }
 }
 
@@ -5211,9 +5235,9 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
      触发器宽度交回 ss-wrap（fit 模式 52px，与 PC 一致），并占满 wrap 全宽。 */
   .pagination-bar .ss-trigger{ width: 100% !important; }
   .pagination-bar .page-btns{ flex: 0 1 auto; justify-content: center; gap: 4px !important; }
-  /* 触控命中区保持 v228.23 规格：移动端翻页键 ≥40px（不可为塞下按钮而缩小） */
+  /* 🟢 v230.20（AUDIT-230-09）：触控底线 40→44px（不可为塞下按钮而缩小） */
   .pagination-bar .page-btns button,
-  .pagination-bar .page-btns .wb-pager-btn{ min-width: 40px !important; min-height: 40px !important; }
+  .pagination-bar .page-btns .wb-pager-btn{ min-width: 44px !important; min-height: 44px !important; }
 
   /* --- 3. 紧凑分页：隐藏数字页码按钮与「跳至」，显示「x / y」指示（彻底消除横向溢出） --- */
   .pagination-bar .page-btns button:not(.wb-pager-btn){ display: none !important; }
@@ -5287,15 +5311,17 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
   }
   .pagination-bar .pg-word{ font-style: normal; }
   .pagination-bar .page-btns{ flex: 0 0 auto; gap: 2px !important; }
+  /* 🟢 v230.20（AUDIT-230-09）：触控目标 34×40 → 44×44（实测 390px 下含指示器/每页下拉仍不溢出） */
   .pagination-bar .page-btns button,
-  .pagination-bar .page-btns .wb-pager-btn{ width: 34px !important; min-width: 34px !important; min-height: 40px !important; }
+  .pagination-bar .page-btns .wb-pager-btn{ width: 44px !important; min-width: 44px !important; min-height: 44px !important; }
   .pagination-bar .wb-pager-ind{ min-width: 40px; font-size: 12.5px; }
   .pagination-bar .ss-panel{ top: auto !important; bottom: calc(100% + 6px); }
 }
 @media (max-width: 375px){
   .pagination-bar > span{ font-size: 10px !important; }
+  /* 🟢 v230.20（AUDIT-230-09）：极窄屏折中 30→40px（44×4+指示器+下拉在 ≤375px 会溢出，高度仍保 44） */
   .pagination-bar .page-btns button,
-  .pagination-bar .page-btns .wb-pager-btn{ width: 30px !important; min-width: 30px !important; }
+  .pagination-bar .page-btns .wb-pager-btn{ width: 40px !important; min-width: 40px !important; }
   .pagination-bar .wb-pager-ind{ min-width: 36px; font-size: 12px; }
 }
 @media (max-width: 330px){
@@ -5390,7 +5416,7 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
 .wt-mp{
   border: 1px solid var(--border-color, #e5e7eb); border-radius: 12px;
   background: var(--bg-card, #fff); box-shadow: 0 8px 28px rgba(31,38,135,.12);
-  padding: 14px; max-width: 340px;
+  padding: 14px; max-width: 372px;
 }
 .wt-mp-head{
   display: flex; align-items: center; justify-content: space-between;
@@ -5407,15 +5433,20 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
   font-size: 12.5px; color: var(--text-main); position: relative; transition: background .12s;
 }
 .wt-mp-cell:hover{ background: rgba(91,155,213,.12); }
-.wt-mp-cell.wt-has{ font-weight: 600; }
+/* 🟢 v230.03：任务点强化 —— 浅底 + 6px 圆点 + 光环，不再"几乎看不见" */
+.wt-mp-cell.wt-has{ font-weight: 700; background: rgba(91,155,213,.12); }
 .wt-mp-cell.wt-has::after{
-  content: ""; position: absolute; left: 50%; bottom: 2px; transform: translateX(-50%);
-  width: 4px; height: 4px; border-radius: 50%; background: var(--primary);
+  content: ""; position: absolute; left: 50%; bottom: 3px; transform: translateX(-50%);
+  width: 6px; height: 6px; border-radius: 50%; background: var(--primary);
+  box-shadow: 0 0 0 2px rgba(91,155,213,.22);
 }
+.wt-mp-cell.wt-has.wt-mov::after{ background: var(--status-danger, #C62828); box-shadow: 0 0 0 2px rgba(198,40,40,.22); }
 .wt-mp-cell.wt-mov::after{ background: var(--status-danger, #C62828); }
 .wt-mp-cell.wt-today{
   background: var(--primary); color: #fff; font-weight: 700;
 }
+/* 今天格上的点用白色（蓝底上红点看不清）——放最后覆盖 */
+.wt-mp-cell.wt-today.wt-has::after{ background: #fff; box-shadow: 0 0 0 2px rgba(255,255,255,.38); }
 .wt-mp-cell.wt-mov{ color: var(--status-danger, #C62828); }
 .wt-mp-cell.wt-today.wt-mov{ color: #fff; }
 
@@ -5435,6 +5466,68 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
   border-radius: 9px; padding: 9px 13px; margin-bottom: 10px; font-size: 12.5px; font-weight: 600;
   line-height: 1.6;
 }
+/* 🟢 v229.87：逾期红条任务可点直达 + 跳转高亮 */
+.wt-ob-label{ font-weight:700; }
+.wt-ob-link{
+  display:inline-flex; align-items:center; gap:5px; margin:3px 6px 3px 0; padding:3px 11px;
+  background: rgba(198,40,40,.10); border:1px solid rgba(198,40,40,.30); border-radius:999px;
+  cursor:pointer; font-weight:600; transition: background .15s, transform .15s, box-shadow .15s;
+}
+.wt-ob-link:hover{ background: rgba(198,40,40,.20); transform: translateY(-1px); box-shadow: 0 3px 10px rgba(198,40,40,.18); }
+.wt-ob-link i{ font-style:normal; font-weight:500; font-size:11px; opacity:.75; }
+[data-theme="dark"] .wt-ob-link{ background: rgba(255,82,82,.14); border-color: rgba(255,82,82,.35); }
+[data-theme="dark"] .wt-ob-link:hover{ background: rgba(255,82,82,.24); }
+.wt-ob-more{ cursor:pointer; text-decoration:underline; margin-left:2px; white-space:nowrap; }
+
+/* ---- 🟢 v230.04 待办全览视图（替代 v230.03 快捷条：任务多时不再平铺杂乱） ---- */
+/* 入口徽标：「待办 N」按钮上的未完成数量 */
+.wt-mcnt{
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 17px; height: 17px; margin-left: 5px; padding: 0 4px;
+  border-radius: 999px; background: var(--status-danger, #C62828); color: #fff;
+  font-size: 10px; font-weight: 700; line-height: 1; vertical-align: 1px;
+}
+.wt-mbtn.on .wt-mcnt{ background: rgba(255,255,255,.94); color: var(--primary-deep, #3B82C4); }
+
+.wt-todo{ display: flex; flex-direction: column; }
+.wt-todo-grp{ margin-bottom: 2px; }
+.wt-todo-ghead{
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12px; font-weight: 700; color: var(--text-secondary, #5A6B7F);
+  margin: 13px 0 6px; letter-spacing: .02em;
+}
+.wt-todo-ghead::after{ content: ""; flex: 1; height: 1px; background: var(--border-color, #e5e7eb); }
+.wt-todo-ghead b{
+  font-size: 10.5px; font-weight: 700; color: var(--primary-deep, #3B82C4);
+  background: rgba(91,155,213,.12); border-radius: 999px; padding: 1px 7px;
+}
+.wt-todo-grp.is-overdue .wt-todo-ghead{ color: var(--status-danger, #C62828); }
+.wt-todo-grp.is-overdue .wt-todo-ghead b{ color: #fff; background: var(--status-danger, #C62828); }
+.wt-todo-ev{
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  border: 1px solid var(--border-color, #e5e7eb); border-left: 3px solid var(--primary);
+  border-radius: 9px; padding: 9px 12px; margin: 4px 0; background: var(--bg-card, #fff);
+  transition: box-shadow .15s, border-color .15s, background-color .15s;
+}
+.wt-todo-ev:hover{ box-shadow: 0 2px 10px rgba(31,38,135,.08); border-color: rgba(91,155,213,.45); }
+.wt-todo-grp.is-overdue .wt-todo-ev{ border-left-color: var(--status-danger, #C62828); background: var(--status-danger-bg, rgba(198,40,40,.05)); }
+.wt-todo-main{ flex: 1; min-width: 0; }
+.wt-todo-title{ font-size: 13px; font-weight: 600; line-height: 1.5; word-break: break-word; }
+.wt-todo-when{ font-size: 11.5px; color: var(--text-secondary, #5A6B7F); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.wt-todo-grp.is-overdue .wt-todo-when{ color: var(--status-danger, #C62828); font-weight: 600; }
+.wt-todo-go{ color: var(--text-secondary, #5A6B7F); font-size: 15px; flex-shrink: 0; opacity: .55; transition: color .15s, opacity .15s; }
+.wt-todo-ev:hover .wt-todo-go{ color: var(--primary-deep, #3B82C4); opacity: 1; }
+.wt-todo-empty{
+  text-align: center; padding: 44px 0; color: var(--text-secondary, #5A6B7F);
+  border: 1px dashed var(--border-color, #e5e7eb); border-radius: 12px; font-size: 13px;
+}
+.wt-todo-empty-ic{ font-size: 34px; margin-bottom: 8px; }
+.wt-todo-empty-sub{ font-size: 12px; opacity: .75; margin-top: 4px; }
+[data-theme="dark"] .wt-todo-ghead b{ background: rgba(91,155,213,.22); color: #9CC3EE; }
+[data-theme="dark"] .wt-todo-grp.is-overdue .wt-todo-ghead b{ background: rgba(255,82,82,.32); color: #FFB4B4; }
+[data-theme="dark"] .wt-todo-ev:hover{ border-color: rgba(91,155,213,.55); }
+.wt-ev.wt-flash{ animation: wtFlash 1.1s ease-in-out 2; }
+@keyframes wtFlash{ 0%,100%{ box-shadow:0 0 0 0 rgba(91,155,213,0); } 50%{ box-shadow:0 0 0 4px rgba(91,155,213,.45); } }
 
 /* ---- 日视图头部 + 进度环 ---- */
 .wt-dayhead{
@@ -5516,19 +5609,21 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
 .wt-undo{
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px);
   display: flex; align-items: center; gap: 12px;
-  background: #1f2647; color: #fff; padding: 10px 12px 10px 16px; border-radius: 12px;
-  font-size: 13px; box-shadow: 0 14px 34px rgba(15,23,42,.32); z-index: 1300;
+  background: var(--bg-card, #fff); color: var(--text-main, #1F2937);
+  padding: 8px 8px 8px 18px; border: 1px solid var(--border-color, #e5e7eb); border-radius: 999px;
+  font-size: 13px; box-shadow: 0 14px 34px rgba(15,23,42,.16); z-index: 1300;
   opacity: 0; pointer-events: none; overflow: hidden;
   transition: opacity .2s ease, transform .26s cubic-bezier(.25,1,.5,1);
 }
+[data-theme="dark"] .wt-undo{ background:#26304F; color:#E5E9F2; border-color: rgba(255,255,255,.08); }
 .wt-undo.show{ opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
 .wt-undo-txt{ font-weight: 500; }
 .wt-undo-btn{
-  border: none; background: rgba(255,255,255,.16); color: #fff; font-weight: 700;
-  padding: 7px 14px; border-radius: 9px; cursor: pointer; font-size: 13px; white-space: nowrap;
-  transition: background .15s;
+  border: none; background: var(--primary, #5B9BD5); color: #fff; font-weight: 700;
+  padding: 8px 16px; border-radius: 999px; cursor: pointer; font-size: 13px; white-space: nowrap;
+  transition: background .15s; box-shadow: 0 2px 8px rgba(91,155,213,.35);
 }
-.wt-undo-btn:hover{ background: rgba(255,255,255,.30); }
+.wt-undo-btn:hover{ background: var(--primary-deep, #3B82C4); }
 .wt-undo .bar{ position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: var(--primary, #5B9BD5); transform-origin: left; }
 @keyframes wtUndoBar { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 
@@ -5602,14 +5697,17 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
 }
 .wt-mnum{ font-size: 12.5px; font-weight: 700; position: relative; display: inline-block; min-width: 20px; text-align: center; z-index: 1; }
 .wt-mcell.wt-mov .wt-mnum{ color: var(--status-danger, #C62828); }
+/* 🟢 v230.03：逾期点放大 5→6px，配垂直微抬，月历扫一眼就能定位 */
 .wt-dot{
-  display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
   background: var(--status-danger, #C62828); margin-left: 3px; vertical-align: 2px;
+  box-shadow: 0 0 0 2px rgba(198,40,40,.18);
 }
+/* 🟢 v230.03：任务块提高对比（3px 左条 + 加深底色 + 加粗） */
 .wt-mtask{
   font-size: 11px; line-height: 1.4; margin-top: 3px; padding: 2px 6px; border-radius: 5px;
-  background: rgba(91,155,213,.10); color: var(--text-main);
-  border-left: 2px solid var(--primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: rgba(91,155,213,.14); color: var(--text-main); font-weight: 600;
+  border-left: 3px solid var(--primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .wt-mtask.wt-done{ opacity: .5; text-decoration: line-through; border-left-color: var(--border-color, #e5e7eb); }
 .wt-mmore{ font-size: 10.5px; color: var(--text-secondary, #5A6B7F); margin-top: 3px; padding-left: 6px; }
@@ -5623,12 +5721,50 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
 }
 
 /* ---- 窄屏适配 ---- */
+/* 🟢 v230.04：重写移动端排版 —— 工具条两行结构、按钮紧凑化、日期头/统计条/快速添加栏
+   全面收窄，375px 窄屏无横向溢出；待办徽标按钮替代大色块快捷条 */
 @media (max-width: 760px){
+  .wt-wrap{ font-size: 13px; }
+  /* 工具条：nav 行与 modes 行各自占满，行间距收紧 */
+  .wt-toolbar{ align-items: stretch; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+  .wt-nav{ width: 100%; flex-wrap: wrap; row-gap: 6px; }
+  .wt-navbtn, .wt-today{ padding: 7px 10px; font-size: 12.5px; }
+  .wt-navlabel{
+    flex: 1; min-width: 0; text-align: center; margin: 0 4px; font-size: 13.5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .wt-calbtn{ padding: 7px 10px; font-size: 12px; }
+  /* 模式栏四等分占满一行，「待办 N」徽标不挤压文字 */
+  .wt-modes{ width: 100%; display: flex; }
+  .wt-mbtn{ flex: 1; padding: 8px 4px; font-size: 12.5px; text-align: center; }
+  .wt-mcnt{ margin-left: 3px; }
+  /* 统计条：降字号、去外边距溢出风险 */
+  .wt-stats{ font-size: 11.5px; padding: 7px 11px; margin-bottom: 10px; }
+  .wt-stats b{ font-size: 12.5px; }
+  /* 日期头 + 进度环缩小 */
+  .wt-dayhead{ padding: 8px 0 6px; margin-bottom: 6px; gap: 10px; }
+  .wt-dh-date{ font-size: 14px; }
+  .wt-ring{ width: 38px; height: 38px; }
+  .wt-ring span{ font-size: 10px; }
+  /* 空态更紧凑 */
+  .wt-empty{ padding: 20px 0; font-size: 12px; }
+  /* 待办全览：行更紧凑，勾选热区保持 */
+  .wt-todo-ghead{ margin: 11px 0 5px; font-size: 11.5px; }
+  .wt-todo-ev{ padding: 8px 10px; gap: 8px; }
+  .wt-todo-title{ font-size: 12.5px; }
+  .wt-todo-when{ font-size: 11px; }
+  .wt-todo-empty{ padding: 34px 0; }
+  .wt-todo-empty-ic{ font-size: 28px; margin-bottom: 6px; }
+  /* 快速添加栏：按钮收窄防溢出 */
+  .wt-quick{ gap: 6px; margin-top: 12px; }
+  .wt-qinput{ padding: 9px 11px; font-size: 12.5px; min-width: 0; }
+  .wt-qbtn{ padding: 9px 14px; font-size: 12.5px; }
+  /* 视图本体 */
   .wt-week{ grid-template-columns: 1fr; }
   .wt-wcol{ min-height: auto; }
   .wt-mcell{ min-height: 56px; }
   .wt-ev-when{ display: none; }
-  .wt-toolbar{ align-items: stretch; flex-direction: column; }
+  .wt-mp{ max-width: 100%; }
 }
 
 /* ============================================================================
@@ -5727,3 +5863,36 @@ input.st-pulse{ animation: stQtyPulse 420ms cubic-bezier(0.22, 1, 0.36, 1); }
 }
 /* 仅移动端显示：桌面无 touch，不提供此交互 */
 @media (min-width: 769px){ .wb-ptr{ display: none; } }
+
+/* 🟢 v230.20（AUDIT-230-09）：移动端触控目标 44px 兜底 —— 仅 ≤768px，桌面紧凑布局不受影响。
+   实测（tools/mobile_tap_targets_v22905.mjs，390×844 视口）：34 个可点元素 31 个 <44px，
+   集中于 sidebar-item / 顶栏图标 / hamburger / 弹窗关闭键 / 分页键 / coverflow 导航。
+   min-height/min-width 的计算优先级高于 height/width（CSS 约束算法），
+   可直接兜底各处既有显式小尺寸（如 .topbar-qr-scan{width:30px}）。 */
+@media (max-width: 768px){
+  .sidebar-item{ min-height: 44px; }
+  .hamburger-btn, .sidebar-toggle-btn,
+  .topbar-qr-scan, .theme-toggle, .topbar-account-btn,
+  .panel-dialog-close, .modal-close,
+  .coverflow-nav,
+  .pagination-bar button, .pagination-bar .page-btns button,
+  .icon-btn,
+  .btn, .btn--primary, .btn--ghost, .btn--info, .btn--warning, .btn--danger{
+    min-width: 44px; min-height: 44px; box-sizing: border-box;
+  }
+  /* 注：.btn--sm（密集表格行内小操作）不纳入强制 44px —— 会撑高表格行、破坏信息密度；
+     行内小操作的触摸可点性由表格行既有专项（v228 系列）保障。 */
+  /* 表格行内实体链接（TableUtils.link 产物 .entity-link）：不改文档流、不撑高表格行，
+     用伪元素把点击热区纵向扩到 44px —— 可点性与信息密度兼得 */
+  td .entity-link{ position: relative; }
+  td .entity-link::after{
+    content: ''; position: absolute; left: -6px; right: -6px;
+    top: 50%; transform: translateY(-50%); height: 44px;
+  }
+}
+
+/* 🟢 v230.31：查询系统 / 订单列表「行关闭」订单 —— 不淡化整行；
+   「未入库订单量」数值用蓝底（复用 tag-info）红字标识，悬停显示关闭人。
+   ⚠️ 选择器必须直接命中标签本身（.tag.qb-closed-stock）：订单列表的 tr 不带
+   qb-row-closed（那是查询系统的行类名），挂在行上的写法会让订单列表里退回成蓝字。 */
+.tag.qb-closed-stock { background: var(--status-info-bg); color: var(--status-danger); }

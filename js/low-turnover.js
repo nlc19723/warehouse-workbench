@@ -138,6 +138,10 @@ const LowTurnoverModule = {
     this.loadData();
   },
   resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     this.currentFilter = { keyword: '' };
     this.currentPage = 1;
     const input = document.getElementById('ltKw');

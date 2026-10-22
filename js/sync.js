@@ -121,6 +121,10 @@ const SyncManager = {
       if (typeof AppConfig === 'undefined' || typeof AppConfig.keepersWatchTick !== 'function') return;
       try { AppConfig.keepersWatchTick(); } catch (e) { /* 已忽略 */ }
     };
+    // ⚙️ 常驻定时器③（v230.20 标记）：keepers（管理员名单）变更监视。
+    //    频率 KEEPERS_WATCH_MS（v228.84 起 60s）——常态靠数据同步心跳搭车 +
+    //    注意力拉取即可获知变更，此轮询仅为「用户长时间静置无任何同步」时的兜底，
+    //    故取低频率；单例（上方 _keepersWatchTimer 去重），进程生命周期内不 clear。
     this._keepersWatchTimer = setInterval(tick, this.KEEPERS_WATCH_MS);
   },
 
@@ -534,6 +538,12 @@ const SyncManager = {
     let ok = false;
     try {
       ok = await DataLoader.pushAllToCloud();
+    } catch (e) {
+      // 🟢 v229.92（AUDIT-229-05）：原先只有 try/finally，异常直接上抛 →
+      //   用户点「上传数据到云端」后 loading 消失却没有任何提示（静默失败，无法判断成败）。
+      //   现捕获异常并落入下方失败提示分支，同时保留日志便于排查。
+      console.error('[同步] 手动上传抛出异常:', e && e.message ? e.message : e);
+      ok = false;
     } finally {
       hideLoading();
     }
@@ -1011,6 +1021,42 @@ const SyncManager = {
     // 🟢 v228.62：补预热相关 mock —— 测试模式下不得触网（否则 _connect 成功排期的预热
     //   会真的去 list 生产桶）。本地模拟的"云端键集"就是 settings.json 的顶层键。
     this._listSettingsKeys = async () => Object.keys(readFile('settings.json') || {});
+    // 🟢 v230.14：补 getObjectMeta 的 mock —— 与 getSettingsMeta 同理，
+    //   测试模式下不得 list 生产桶；本地 mock 存储里存在即返回 {name, updated_at, size}。
+    this.getObjectMeta = async (fileName) => {
+      if (!fileName) return null;
+      const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+      if (!(fileName in s)) return null;
+      return {
+        name: fileName,
+        updated_at: new Date().toISOString(),
+        size: (s[fileName] ? s[fileName].length : null),
+      };
+    };
+    // 🟢 v230.14：补 getSettingsMeta 的 mock —— 该方法底层是真实 storage.list，
+    //   测试模式下会真的去 list 生产桶（v230.04 门禁复跑污染事故的隐患点之一）。
+    //   本地模拟的「云端键集」= settings.json 顶层键 + settings/ 前缀直写文件两种形态，
+    //   与生产 v228.51 按键分文件的布局一致；updated_at 现生成（测试模式无真实时间，
+    //   调用方（轮询廉价探测）最坏行为是多拉一次，不影响正确性且绝不触网）。
+    this.getSettingsMeta = async () => {
+      const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+      const agg = s['settings.json'] ? JSON.parse(s['settings.json']) : {};
+      const out = [];
+      Object.keys(agg).forEach((k) => {
+        if (k === '_updatedAt') return;
+        out.push({ name: k + '.json', updated_at: new Date(agg._updatedAt || Date.now()).toISOString() });
+      });
+      Object.keys(s).forEach((p) => {
+        if (p.indexOf('settings/') === 0 && p.length > 9) {
+          out.push({ name: p.slice(9), updated_at: new Date().toISOString() });
+        }
+      });
+      // 与生产路径一致：把 list 结果交给账号权限模块做零额外请求的变更探测
+      try {
+        if (typeof AppConfig !== 'undefined' && AppConfig._checkKeepersViaSettingsMeta) AppConfig._checkKeepersViaSettingsMeta(out);
+      } catch (e) { /* 探测失败不影响数据同步 */ }
+      return out;
+    };
     this._primeCloudKeySet = async () => {
       this._cloudKeySet = {};
       Object.keys(readFile('settings.json') || {}).forEach(k => { this._cloudKeySet[k] = true; });

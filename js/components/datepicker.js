@@ -255,14 +255,26 @@ const DatePicker = (() => {
     }
 
     function bindMonthYear() {
+      // 🟢 v229.98（AUDIT-229-98-04）：切年/切月后把「日」钳制到目标月的有效天数。
+      //   view 若是 1月31日，直接 setMonth(1) 会被 JS 归一成 3月2/3日 —— 用户点「二月」却看到三月。
+      //   做法：先把日归到 1 号再改年/月（中间态永不溢出），最后取 min(原日, 目标月最大天数)，
+      //   闰年 2月29 由 new Date(y, m+1, 0).getDate() 天然算对。
+      const gotoMonth = (y, m) => {
+        const day = view.getDate();
+        const maxDay = new Date(y, m + 1, 0).getDate();
+        view.setDate(1);
+        view.setFullYear(y);
+        view.setMonth(m);
+        view.setDate(Math.min(day, maxDay));
+      };
       pop.querySelectorAll('.dp-year').forEach(el => el.addEventListener('click', (e) => {
         e.stopPropagation();
-        view.setFullYear(+el.dataset.y);
+        gotoMonth(+el.dataset.y, view.getMonth());
         renderMonthYear();
       }));
       pop.querySelectorAll('.dp-month').forEach(el => el.addEventListener('click', (e) => {
         e.stopPropagation();
-        view.setMonth(+el.dataset.mi);
+        gotoMonth(view.getFullYear(), +el.dataset.mi);
         renderDay();
       }));
       pop.querySelector('[data-act="back"]')?.addEventListener('click', (e) => { e.stopPropagation(); renderDay(); });

@@ -112,7 +112,9 @@ window.OrderDetailModule = {
         { label: '入库量', field: '数量' },
         { label: '含税单价', field: '原币含税单价' },
         { label: '含税金额', field: '原币价税合计' },
-        { label: '实际到货日期', field: '实际到货日期', render: r => esc(renderDateCell(r['实际到货日期'])) }
+        { label: '实际到货日期', field: '实际到货日期', render: r => esc(renderDateCell(r['实际到货日期'])) },
+        // 🟢 v229.89：末列关联入库列表「备注」（表体备注）
+        { label: '备注', field: '表体备注' }
       ];
 
       content.innerHTML = DetailCommon.backBar() +

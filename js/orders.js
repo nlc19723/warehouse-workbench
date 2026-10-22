@@ -41,7 +41,7 @@ const OrdersModule = {
     if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
 
     content.innerHTML = `
-      <div class="filter-bar filter-bar-m" style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;padding:0;align-items:stretch;">
+      <div class="filter-bar filter-bar-two-row" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;padding:0;align-items:stretch;">
         <div class="filter-row filter-row-main" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
           <input type="text" id="orderKw" class="filter-search-short" placeholder="搜索订单编号、供应商、存货名称..." value="${escAttr(this.currentFilter.keyword || '')}" onkeydown="if(event.key==='Enter')OrdersModule.applyFilter()">
           <div class="filter-row-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:4px;">
@@ -49,25 +49,25 @@ const OrdersModule = {
             <span class="filter-sep">至</span>
             <input type="text" id="orderEndDate" value="${escAttr(this.currentFilter.endDate || '')}" class="filter-date dp-input" placeholder="结束日期" title="结束日期" onchange="OrdersModule.onDateChange()" readonly>
           </div>
-          <div class="filter-row-selects" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0;padding:0;">
-            <select id="orderSupplier" title="按供应商筛选" style="min-width:120px;flex:1 1 140px;max-width:220px;">
-              <option value="">全部供应商</option>
-              ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
-            </select>
-            <select id="orderProject" title="按项目筛选" style="min-width:120px;flex:1 1 140px;max-width:300px;">
-              <option value="">全部项目</option>
-              ${projects.map(p => `<option value="${escAttr(p)}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
-            </select>
-            <select id="orderStatus" title="按审批状态筛选" style="min-width:110px;flex:0 0 auto;">
-              <option value="">全部状态</option>
-              ${statuses.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.审批状态 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
-            </select>
-          </div>
           <div class="filter-row-buttons" style="display:flex;gap:6px;margin-left:auto;">
             <button class="btn--primary" onclick="OrdersModule.applyFilter()">筛选</button>
             <button class="btn--ghost" onclick="OrdersModule.resetFilter()">重置</button>
             <button class="btn--ghost" onclick="OrdersModule.exportData()">📥 导出</button>
           </div>
+        </div>
+        <div class="filter-row filter-row-selects" style="display:flex;gap:10px;margin:0;padding:0;">
+          <select id="orderSupplier" title="按供应商筛选" style="min-width:120px;flex:1 1 140px;max-width:220px;">
+            <option value="">全部供应商</option>
+            ${suppliers.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.供应商 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+          </select>
+          <select id="orderProject" title="按项目筛选" style="min-width:120px;flex:1 1 140px;max-width:300px;">
+            <option value="">全部项目</option>
+            ${projects.map(p => `<option value="${escAttr(p)}" ${this.currentFilter.项目名称 === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+          </select>
+          <select id="orderStatus" title="按审批状态筛选" style="min-width:110px;flex:0 0 auto;">
+            <option value="">全部状态</option>
+            ${statuses.map(s => `<option value="${escAttr(s)}" ${this.currentFilter.审批状态 === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+          </select>
         </div>
       </div>
 
@@ -157,17 +157,26 @@ const OrdersModule = {
       if (f.审批状态) result = result.filter(o => o.审批状态 === f.审批状态);
       if (f.keyword) {
         const kw = f.keyword.toLowerCase().replace(/\s+/g, '');
+        // 🟢 v229.98（AUDIT-229-98-21）：补上「项目名称」匹配。
+        //   表格/导出走 DataStore.getOrders，它比这里多匹配一个项目名称 →
+        //   搜项目名时 KPI 显示 0 而表格里有数据，同一屏两套口径。
         result = result.filter(o =>
-          (o.订单编号 && o.订单编号.toLowerCase().includes(kw)) ||
-          (o.供应商 && o.供应商.toLowerCase().includes(kw)) ||
-          (o.存货名称 && o.存货名称.toLowerCase().includes(kw))
+          (o.订单编号 && String(o.订单编号).toLowerCase().includes(kw)) ||
+          (o.供应商 && String(o.供应商).toLowerCase().includes(kw)) ||
+          (o.存货名称 && String(o.存货名称).toLowerCase().includes(kw)) ||
+          (o.项目名称 && String(o.项目名称).toLowerCase().includes(kw))
         );
       }
       if (f.startDate || f.endDate) {
+        // 🟢 v229.98（AUDIT-229-98-31）：日期比较前先归一化。
+        //   数据里混有 "2026/08/04" 斜杠写法时，直接字符串比较会失准
+        //   （'/' 0x2F > '-' 0x2D，旧日期反而被判为更大而被保留）。
+        const norm = (v) => String(v ?? '').slice(0, 10).replace(/\//g, '-');
         result = result.filter(o => {
           if (!o.日期) return false;
-          if (f.startDate && o.日期 < f.startDate) return false;
-          if (f.endDate && o.日期 > f.endDate) return false;
+          const d = norm(o.日期);
+          if (f.startDate && d < norm(f.startDate)) return false;
+          if (f.endDate && d > norm(f.endDate)) return false;
           return true;
         });
       }
@@ -217,6 +226,9 @@ const OrdersModule = {
               <th>含税金额</th>
               <th>状态</th>
             </tr>`;
+    // 🟢 v229.97（AUDIT-229-97-03）：本行模板的「订单量/未入库订单量」原为裸插值 ${o.数量} / ${o.未入库量}，
+    //   未走 esc()。数据来源是用户导入的 Excel，单元格可含任意文本或标签，构成 XSS 注入面
+    //   （同行其余字段均已 esc()）。现补上转义。
     const rowHtml = (o) => `
               <tr>
                 <td><strong>${TableUtils.link('order', o.订单编号 ?? '', o.订单编号 ?? '')}</strong></td>
@@ -226,8 +238,20 @@ const OrdersModule = {
                 <td>${TableUtils.link('stock', o._存货编码 ?? '', o._存货编码 ?? '')}</td>
                 <td><strong>${esc(o.存货名称 ?? '')}</strong></td>
                 <td>${esc(o.规格型号 ?? '')}</td>
-                <td>${o.数量}</td>
-                <td>${parseFloat(o.未入库量) > 0 ? `<span class="tag tag-warning">${o.未入库量}</span>` : '0'}</td>
+                <td>${esc(o.数量)}</td>
+                <td data-value="${escAttr(String(parseFloat(o.未入库量) > 0 ? o.未入库量 : 0))}">${(() => {
+                  // 🟢 v230.31：与查询系统订单板块同规则（用户要求「统一应用到订单列表模块」）——
+                  //   · 已关闭订单（行关闭人非空）且仍有未入库量：数值用蓝底红字「数值（已关闭）」圈出；
+                  //   · 未入库量为 0：不加标签，普通显示 0（0 无待送量，圈出来添乱）；
+                  //   · 未关闭订单：保持原有橙色 tag-warning 不变。
+                  // data-value 供表头筛选/排序取纯数值，忽略「（已关闭）」字样。
+                  const qty = parseFloat(o.未入库量);
+                  const closer = o.行关闭人 && String(o.行关闭人).trim();
+                  if (closer && qty > 0) {
+                    return `<span class="tag tag-info qb-closed-stock" title="行关闭：${escAttr(closer)}">${esc(o.未入库量)}（已关闭）</span>`;
+                  }
+                  return qty > 0 ? `<span class="tag tag-warning">${esc(o.未入库量)}</span>` : '0';
+                })()}</td>
                 <td>${TableUtils.formatMoney(o.原币含税单价)}</td>
                 <td>${TableUtils.formatMoney(o.原币价税合计)}</td>
                 <td>${o.审批状态 ? `<span class="tag ${o.审批状态 === '审批通过' ? 'tag-success' : 'tag-neutral'}">${esc(o.审批状态)}</span>` : ''}</td>
@@ -395,6 +419,10 @@ const OrdersModule = {
   },
 
   async resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     const allOrders = await DataStore.getRows('orders');
     const dr = this.getDefaultDateRange(allOrders);
     this.currentFilter = { keyword: '', 供应商: '', 项目名称: '', 审批状态: '', startDate: dr.start, endDate: dr.end };
@@ -410,6 +438,16 @@ const OrdersModule = {
 
   async exportData() {
     const result = await DataStore.getOrders(this.currentFilter, 1, 100000);
+    // 🟢 v229.98（AUDIT-229-98-22）：导出前对【全部行】补存货编码。
+    //   原先只有 renderTable 对【当前页】items 就地填充 _存货编码，没翻到过的页仍是 undefined，
+    //   导出来的「存货编码」列整片空白，用户会当成数据缺失。
+    if (result && result.items && result.items.length && typeof DataLoader !== 'undefined') {
+      let codeMap = null;
+      if (DataLoader.getStockNameSpecCodeMap) {
+        try { codeMap = await DataLoader.getStockNameSpecCodeMap(); } catch (e) { codeMap = null; }
+      }
+      result.items.forEach(o => DataLoader.fillStockCode(o, codeMap));
+    }
     // 🟢 v229.03：导出列 = 工作台表格当前 12 列（列名与表头一致）
     const cols = ['订单编号', '日期', '供应商', { key: '项目名称', title: '项目' },
       { key: '_存货编码', title: '存货编码' }, '存货名称', '规格型号', { key: '数量', title: '订单量' },

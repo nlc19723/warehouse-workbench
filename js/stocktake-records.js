@@ -17,13 +17,13 @@ const StocktakeRecordModule = {
   /** v217：从批次汇总跳转过来时调用，写入批次筛选并渲染 */
   async showBySheet(sheetId) {
     this.filter.sheetId = sheetId || '';
-    try { localStorage.setItem('wb_strec_filter_sheet', sheetId || ''); } catch (e) {}
+    try { localStorage.setItem('wb_strec_filter_sheet', sheetId || ''); } catch (e) { console.warn('[js/stocktake-records.js:20] 异常(已忽略):', e); }
     await this.render();
   },
 
   clearSheetFilter() {
     this.filter.sheetId = '';
-    try { localStorage.removeItem('wb_strec_filter_sheet'); } catch (e) {}
+    try { localStorage.removeItem('wb_strec_filter_sheet'); } catch (e) { console.warn('[js/stocktake-records.js:26] 异常(已忽略):', e); }
     this.render();
   },
 
@@ -34,7 +34,7 @@ const StocktakeRecordModule = {
 
     // v217：兼容直接通过 URL/模块切换进入时，读取上一次的批次筛选
     if (!this.filter.sheetId) {
-      try { this.filter.sheetId = localStorage.getItem('wb_strec_filter_sheet') || ''; } catch (e) {}
+      try { this.filter.sheetId = localStorage.getItem('wb_strec_filter_sheet') || ''; } catch (e) { console.warn('[js/stocktake-records.js:37] 异常(已忽略):', e); }
     }
     const sheetTip = this.filter.sheetId ? `
       <div style="padding:7px 12px;margin-bottom:8px;border-radius:8px;background:var(--status-warning-bg,#fff7e6);
@@ -359,6 +359,10 @@ const StocktakeRecordModule = {
   },
 
   resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     // v217：重置时保留 sheetId（批次跳转上下文），需清除请点「查看全部」
     const keep = this.filter.sheetId || '';
     this.filter = { 盘点人: '', 盘点类别: '', dateFrom: '', dateTo: '', keyword: '', sheetId: keep };
@@ -448,7 +452,7 @@ const StocktakeRecordModule = {
       '</div></div>';
     overlay.classList.add('show');
     const q = document.getElementById('editQty');
-    if (q) setTimeout(() => { try { q.focus(); q.select(); } catch (e) {} }, 30);
+    if (q) setTimeout(() => { try { q.focus(); q.select(); } catch (e) { console.warn('[js/stocktake-records.js:455] 异常(已忽略):', e); } }, 30);
   },
 
   async applyEdit(recId) {

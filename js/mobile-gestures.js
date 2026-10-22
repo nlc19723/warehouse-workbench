@@ -114,9 +114,29 @@
         TableUtils._hideFilterPopup();
         return true;
       }
-      if (document.querySelector('.ss-panel.open')) {                        // 搜索下拉
-        document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        return true;
+      // 🟢 v229.98（AUDIT-229-98-03）：`.ss-panel.open` 是死选择器 —— SearchSelect 全程只用
+      //   panel.style.display 控制显隐（openPanel→'block' / close→'none'），从不加 open 类，
+      //   该分支永不命中 → 移动端右滑返回时会跳过"关下拉"直接导航离开。
+      //   现按真实 DOM 可见状态定位面板（计算样式 display/visibility），命中后优先调用实例 close()。
+      var sPanel = null;
+      var panels = document.querySelectorAll('.ss-panel');
+      for (var i = 0; i < panels.length; i++) {
+        var cs = getComputedStyle(panels[i]);
+        if (cs.display !== 'none' && cs.visibility !== 'hidden') { sPanel = panels[i]; break; }
+      }
+      if (sPanel) {
+        var closed = false;
+        if (window._ssRegistry) {
+          for (var k in window._ssRegistry) {
+            var inst = window._ssRegistry[k];
+            if (inst && inst.open && inst.panel === sPanel && typeof inst.close === 'function') {
+              try { inst.close(); closed = true; } catch (e) { /* 单个实例异常 → 走兜底 */ }
+              break;
+            }
+          }
+        }
+        if (!closed) document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        return true;   // 命中下拉 → 本次右滑只关下拉，不导航
       }
     } catch (e) { /* 关闭失败不影响返回 */ }
     return false;

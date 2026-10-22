@@ -18,6 +18,11 @@ const OutboundModule = {
     const content = document.getElementById('contentArea');
     const today = new Date().toISOString().split('T')[0];
 
+    // 🟢 v229.98（AUDIT-229-98-05）：与其他模块（orders/inbound/pricing/query/stocktake）对齐，
+    //   重建 innerHTML 前先卸载旧 DatePicker 实例与监听，避免「临时出库 ↔ 中心出库列表」来回切换时泄漏。
+    // 清理可能遗留的旧日期选择器弹窗（render 会重建 input）
+    if (typeof DatePicker !== 'undefined') DatePicker.unmountAll();
+
     // 🟢 v227.25：先渲染骨架 DOM，把 projects/下一单号这类"取数重活"挪到 rIC（不阻塞首屏绘制）。
     content.innerHTML = `
       <!-- 操作栏 -->
@@ -37,7 +42,8 @@ const OutboundModule = {
         <div class="glass-card-header">
           <span class="glass-card-title"><span class="title-icon">📤</span>出库单信息</span>
         </div>
-        <div class="ob-header-grid" style="display:flex;flex-wrap:wrap;gap:12px 24px;padding:16px;overflow-x:auto;">
+        <!-- 🟢 v230.18：字段行 gap 24→16（用户要求「项目名称左移紧靠日期框」）；出库单号字段取消双倍伸展（见 style.css v230.18） -->
+        <div class="ob-header-grid" style="display:flex;flex-wrap:wrap;gap:12px 16px;padding:16px;overflow-x:auto;">
           <div class="ob-field ob-field-row">
             <label class="ob-field-label" style="font-size:14px;font-weight:700;color:var(--text-main);white-space:nowrap;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">出库单号</label>
             <div class="ob-orderno-row">
@@ -52,11 +58,13 @@ const OutboundModule = {
           </div>
           <div class="ob-field ob-field-row">
             <label class="ob-field-label" style="font-size:14px;font-weight:700;color:var(--text-main);white-space:nowrap;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">项目名称</label>
-            <input type="text" id="obProject" placeholder="输入或选择项目名称" style="width:280px" autocomplete="off">
+            <!-- 🟢 v230.18：去掉内联 width:280px——与日期框/领用人员统一走 flex 伸展（width:100%），字段等宽无空白 -->
+            <input type="text" id="obProject" placeholder="输入或选择项目名称" autocomplete="off">
           </div>
           <div class="ob-field ob-field-row">
             <label class="ob-field-label" style="font-size:14px;font-weight:700;color:var(--text-main);white-space:nowrap;font-family:'PingFang SC','Microsoft YaHei','黑体',sans-serif;">领用人员</label>
-            <input type="text" id="obReceiver" placeholder="输入领用人员" style="width:160px">
+            <!-- 🟢 v230.18：去掉内联 width:160px——与其余输入框统一 flex 伸展，四字段等宽 -->
+            <input type="text" id="obReceiver" placeholder="输入领用人员">
           </div>
         </div>
       </div>
@@ -1117,6 +1125,10 @@ const OutboundListModule = {
     }
     const orderNos = [...new Set(allFiltered.items.map(i => i.出库单号).filter(Boolean))];
     const totalQty = allFiltered.items.reduce((s, i) => s + (parseFloat(i.出库数量) || 0), 0);
+    // 🟢 v229.98（AUDIT-229-98-25）：留住「按当前筛选条件过滤后的全量行」给导出用（见 exportData）。
+    //   此前导出直接 db.outbound.toArray() 取整库，屏幕上筛了关键词/日期/项目，导出却是全部，
+    //   而且「序号」列编的是整库行号，跟屏幕上看到的对不上。
+    this._filteredRows = allFiltered.items;
 
     if (rt !== undefined && rt !== App._goToken) return;
     const _obl = document.getElementById('oblSummary');
@@ -1232,17 +1244,28 @@ const OutboundListModule = {
     this.loadData();
   },
   resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     this.currentFilter = {};
     this.currentPage = 1;
     this.pageSize = AppConfig.app.defaultPageSize;
-    document.getElementById('oblKw').value='';
-    document.getElementById('oblStartDate').value='';
-    document.getElementById('oblEndDate').value='';
-    document.getElementById('oblProject').value='';
+    // 🟢 v229.98（AUDIT-229-98-06）：DOM 可能被出库录入表单覆盖，取值前判空避免抛错中断重置
+    const kwEl = document.getElementById('oblKw');
+    const startEl = document.getElementById('oblStartDate');
+    const endEl = document.getElementById('oblEndDate');
+    const projectEl = document.getElementById('oblProject');
+    if (kwEl) kwEl.value = '';
+    if (startEl) startEl.value = '';
+    if (endEl) endEl.value = '';
+    if (projectEl) projectEl.value = '';
     this.loadData();
   },
   async exportData() {
-    const all = await db.outbound.toArray();
+    // 🟢 v229.98（AUDIT-229-98-25）：导出跟随当前筛选，序号按筛选结果重编。
+    //   优先用 loadData 存下的筛选结果；尚未加载过时退回整库（保持旧行为，不至于导不出东西）。
+    const all = Array.isArray(this._filteredRows) ? this._filteredRows : await db.outbound.toArray();
     // 🟢 v229.03：导出列 = 工作台「明细列表」当前 8 列（列序与表头一致，序号为全量行号）
     const rows = all.map((r, i) => Object.assign({ 序号: i + 1 }, r));
     const cols = ['序号', '出库单号', '项目名称', '出库时间', '存货编码', '存货名称', '规格型号', '出库数量'];

@@ -171,6 +171,17 @@ const TablePrefs = {
   },
   // 🟢 v149：仅清空全部表头筛选记忆（进入/刷新工作台时调用）。
   //   不影响列宽、对齐、录入草稿等其他偏好。
+  // 🟢 v229.98（AUDIT-229-98-11）：按【单张表】清空表头列筛选记忆。
+  //   原来的 clearFilters() 是「全量清空」，用于进入工作台时收尾；顶部「重置」按钮只需要清当前模块的表，
+  //   若全清会连其它模块用户已设好的筛选一起抹掉。
+  clearFiltersFor(tableKey) {
+    if (!tableKey) return;
+    const all = this._read();
+    if (all.filters && all.filters[tableKey]) {
+      delete all.filters[tableKey];
+      this._write(all);
+    }
+  },
   clearFilters() {
     const all = this._read();
     if (all.filters) {
@@ -384,7 +395,7 @@ const TableStickyOverlay = {
       try {
         const arr = JSON.parse(table.dataset.origThWidths);
         ths.forEach((th, i) => { th.style.width = arr[i] || ''; th.style.minWidth = ''; });
-      } catch (_) {}
+      } catch (_) { console.warn('[js/table-utils.js:398] 异常(已忽略):', _); }
       delete table.dataset.origThWidths;
     }
     // 🟢 v228.13：恢复 <colgroup> 原始列宽。
@@ -394,7 +405,7 @@ const TableStickyOverlay = {
       try {
         const arr = JSON.parse(table.dataset.origColWidths);
         table.querySelectorAll('colgroup col').forEach((c, i) => { c.style.width = arr[i] || ''; });
-      } catch (_) {}
+      } catch (_) { console.warn('[js/table-utils.js:408] 异常(已忽略):', _); }
       delete table.dataset.origColWidths;
     }
     const firstTr = table.querySelector('tbody tr');
@@ -779,6 +790,11 @@ const TableUtils = {
   // 数值列检测关键词（中文列名）
   NUMERIC_KEYWORDS: ['数量', '金额', '单价', '价格', '占比', '天数', '次数', '存量', '入库量', '订货量', '订单量', '周转', '总量', '库存', '可用量', '无法使用量', '在途', '比例', '合计', '总价', '月均', '扣款', '延迟'],
 
+  // 🟢 v230.0a（AUDIT-230-0a）：表级运行时注册表。
+  //   把每张已初始化表格的「列字段 / 排序状态 / 表头 th / 容器 / 列筛选闭包 / 表格元素」集中登记，
+  //   供筛选条件可视化 chips 的「单删/清全部/清排序」回调精确操作对应表格，而不依赖全局遍历。
+  _tableRegistry: {},
+
   /**
    * 初始化 Excel 式表头：点击排序(升/降/无) + 筛选图标弹出关键词搜索
    * 直接基于当前页渲染的 DOM 表格操作，稳健适配所有模块（不依赖 JS 数据数组）
@@ -789,11 +805,17 @@ const TableUtils = {
    * @param {object} [opts] - { tableKey: string, getColField?: (th, colIdx)=>string,
    *                            initialSort?: {col:number, dir:1|2|0},
    *                            onSortChange?: (field:string, dir:1|2|0)=>void }
+   *                            table?: HTMLTableElement —— 🟢 v229.98：指定操作哪张表（见下方 P1-9 说明）
    */
   initSortableHeaders(containerId, opts = {}) {
     const container = document.getElementById(containerId);
     if (!container) return;
-    const table = container.querySelector('.data-table');
+    // 🟢 v229.98（AUDIT-229-98-12）：原先无条件取容器内【第一张】.data-table。
+    //   当一个容器里有并列的多张表时（如订单档案「关联完整订单」+「入库明细」），
+    //   第二张表会被打上 sortableInitialized 标记却从未绑定 —— 结果是它没有筛选图标、也不能排序。
+    //   现在允许调用方用 opts.table 精确指定目标表（自动初始化链路会传）。
+    const _explicit = (opts.table && opts.table.tagName === 'TABLE' && container.contains(opts.table)) ? opts.table : null;
+    const table = _explicit || container.querySelector('.data-table');
     if (!table) return;
     const thead = table.querySelector('thead');
     if (!thead) return;
@@ -807,12 +829,22 @@ const TableUtils = {
     const ths = thead.querySelectorAll('th');
     const colFields = Array.from(ths).map(th => getColField(th));
     const columnFilters = {};
-    const sortState = { col: -1, dir: 0 };
+    // 🟢 v230.0b（AUDIT-230-0b）：排序状态升级为「有序多键」。
+    //   · keys = [{col, dir}, ...]，前一个 key 优先级最高（Excel 的多级排序语义）。
+    //   · 为向后兼容既有单列路径（_applyTableSortAndFilter / chips / onSortChange 均读 col/dir），
+    //     col/dir 始终镜像 keys[0]（主排序键）；keys 为空时 col=-1 / dir=0。
+    //   · 单列点击（无 Shift）→ 只保留一个 key；Shift+点击 → 把该列追加/切换为次级键。
+    const sortState = { col: -1, dir: 0, keys: [] };
     if (opts.initialSort && typeof opts.initialSort.col === 'number'
         && [0, 1, 2].includes(opts.initialSort.dir)) {
       sortState.col = opts.initialSort.dir === 0 ? -1 : opts.initialSort.col;
       sortState.dir = opts.initialSort.dir;
+      if (sortState.dir !== 0) sortState.keys = [{ col: sortState.col, dir: sortState.dir }];
     }
+    // 🟢 v230.0a（AUDIT-230-0a）：汇总行开关 + 登记到运行时表（供筛选 chips 回调精确操作对应表）
+    if (opts.summary !== false) table.dataset.summary = '1'; else delete table.dataset.summary;
+    table.dataset.tableKey = tableKey;
+    this._tableRegistry[tableKey] = { ths, colFields, columnFilters, sortState, table, container, opts };
 
     if (tableKey) this._applyAlignPreferences(table, ths, colFields, tableKey);
 
@@ -824,7 +856,7 @@ const TableUtils = {
     }
 
     ths.forEach((th, colIdx) => {
-      this._bindHeaderInteractions(th, colIdx, { ths, table, tableKey, colFields, columnFilters, sortState, opts });
+      this._bindHeaderInteractions(th, colIdx, { ths, table, tableKey, colFields, columnFilters, sortState, opts, container });
     });
 
     if (sortState.dir !== 0 && sortState.col >= 0) {
@@ -844,7 +876,552 @@ const TableUtils = {
       TableUtils._outsideBound = true;
     }
 
+    // 🟢 v229.98（AUDIT-229-98-13）：初始化完成时打标记。
+    //   此前只有「自动初始化」链路会标记，业务模块自己显式调用时不会 →
+    //   MutationObserver 会发现这张表没标记，于是再初始化一遍（重写一遍 th.innerHTML 冲掉刚挂好的监听）。
+    //   统一在这里标记，双绑消除，也让显式调用的模块不必各写一行。
+    try { table.dataset.sortableInitialized = '1'; } catch (e) { /* 只读 dataset 场景忽略 */ }
+
     if (window.TableStickyOverlay) TableStickyOverlay.install(container);
+
+    // 🟢 v230.0a（AUDIT-230-0a）：注入样式 + 渲染筛选 chips + 汇总行 + 非虚拟表 tbody 变更监听
+    this._injectExtrasStyle();
+    this._renderChipsFor(table, tableKey, columnFilters, sortState, colFields, container);
+    if (table.dataset.summary === '1') {
+      if (!this._isVirtualTable(table)) {
+        // 非虚拟表：监听 tbody 子节点变化（模块重渲 / 翻页），rAF 防抖刷新汇总行
+        if (table._summaryObserver) { try { table._summaryObserver.disconnect(); } catch (e) { console.warn('[js/table-utils.js:893] 异常(已忽略):', e); } }
+        const tb = table.querySelector('tbody');
+        if (tb) {
+          let scheduled = false;
+          const obs = new MutationObserver(() => {
+            if (scheduled) return; scheduled = true;
+            requestAnimationFrame(() => { scheduled = false; try { TableUtils._refreshSummary(table); } catch (e) { console.warn('[js/table-utils.js:899] 异常(已忽略):', e); } });
+          });
+          obs.observe(tb, { childList: true });
+          table._summaryObserver = obs;
+        }
+      }
+      this._refreshSummary(table);
+    }
+  },
+
+  /**
+   * 🟢 v229.98（AUDIT-229-98-11）：清空当前视图内所有表格的「表头列筛选」。
+   *   背景：模块顶部「重置」按钮只清 currentFilter / 日期 / 关键词，表头列筛选
+   *   （存在 TablePrefs 里）照旧生效 —— 用户点了重置却发现行数没变，以为功能坏了；
+   *   而且那份筛选会跨刷新存活，只能用浏览器刷新页面才能甩掉。
+   *   做法：清内存中的 columnFilters → 清该表的持久化筛选 → 复位行可见性与筛选图标激活态；
+   *   虚拟滚动表额外把数据集还原为原始全量并重渲染。调用后由模块自己 loadData/render 刷新剩余状态即可。
+   * @param {HTMLElement} [root] 默认 document
+   */
+  clearColumnFiltersInView(root) {
+    const base = root || document;
+    const tables = base.querySelectorAll('.data-table');
+    const touched = [];
+    tables.forEach((table) => {
+      const key = TableUtils._deriveTableKey(table);
+      if (key) { TablePrefs.clearFiltersFor(key); touched.push(key); }
+      // 复位当前渲染出来的行（下次重渲染会重建，这里保证「不重渲染也能立刻看到全量」）
+      const tbody = table.querySelector('tbody');
+      if (tbody) {
+        Array.from(tbody.children).forEach((tr) => {
+          if (tr.classList.contains('vt-spacer')) return;
+          tr.style.display = '';
+        });
+      }
+      table.querySelectorAll('.th-filter-icon.active').forEach((ic) => ic.classList.remove('active'));
+      // 虚拟表：把数据集还原成原始全量并重渲染窗口
+      if (Array.isArray(table._vtRawItems)) {
+        table._vtItems = table._vtRawItems.slice();
+        table._vtTextRows = undefined;
+        if (typeof table._vtRender === 'function') table._vtRender();
+      }
+      table._vtTextRows = undefined;
+    });
+    return touched;
+  },
+
+  // ==========================================================================
+  // 🟢 v230.0a（AUDIT-230-0a）：筛选条件可视化条 + 底部汇总行
+  // --------------------------------------------------------------------------
+  // 目标：对标 Excel 缺失能力，直接消解 P1-1（重置不同步让用户以为功能坏了）。
+  //   · 筛选 chips：把当前生效的列筛选 / 排序以「列名: 条件 ✕」可视化呈现，
+  //     单删 = 清该列筛选；「清除全部筛选」= 清该表全部筛选+排序，所见即所得。
+  //   · 底部汇总行：数值列显示「合计 / 均值」，随筛选/排序/翻页联动。
+  // 设计纪律：
+  //   · chips 空态 display:none（零布局占用），仅在确有生效条件时出现；
+  //   · 汇总行聚合数据源统一为「当前可见/筛选后的行」——虚拟表用 _vtItems 完整数据集，
+  //     其余表用 DOM 可见行（display!=none），两条路径都对「业务筛选+表头列筛选」一致；
+  //   · 虚拟表汇总按「数据代际(vtSummaryGen)」增量刷新，避免每帧滚动重算。
+  // ==========================================================================
+
+  // 🟢 v230.20（审查收敛）：转义实现收敛到全局唯一入口（config.js window.esc/escAttr）。
+  //   全局 esc 覆盖 & < > " ' 五种字符，比原内部实现（_escHtml 仅 4 种）多转义单引号——
+  //   文本渲染视觉一致、属性值更安全。保留方法名使既有 9 处调用点零改动。
+  _escHtml(s) { return esc(s); },
+  _escAttr(s) { return escAttr(s); },
+
+  // 把「单元格原文」清洗为可求和数值（货币/千分位/百分号兼容）
+  _parseNumeric(raw) {
+    if (raw === '' || raw === '-' || raw === '—' || raw === '/') return null;
+    const cleaned = String(raw).replace(/[¥$￥,\s，%\s]/g, '');
+    if (cleaned === '') return null;
+    const n = parseFloat(cleaned);
+    return isNaN(n) ? null : n;
+  },
+  _formatSummary(n, isMoney) {
+    if (!isFinite(n)) n = 0;
+    let s;
+    const abs = Math.abs(n);
+    if (abs >= 10000) s = n.toLocaleString('zh-CN', { maximumFractionDigits: 0 });
+    else s = (Math.round(n * 100) / 100).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+    return isMoney ? '¥' + s : s;
+  },
+
+  // —— 筛选 chips ——
+  _chipConditionText(state) {
+    const kw = (state && state.kw) || '';
+    const ex = (state && state.excluded) || [];
+    if (kw && ex.length) return '含"' + kw + '"·排除' + ex.length + '项';
+    if (kw) return '含"' + kw + '"';
+    if (ex.length) return '排除' + ex.length + '项';
+    return '';
+  },
+
+  // 找到（或创建）某 tableKey 对应的 chips 挂载点：插在表格包裹层之前；
+  // 无包裹层时退回容器顶部。已存在则复用（模块重渲后不重复建）。
+  _findChipsHost(tableKey, table, container) {
+    let host = null;
+    try { host = document.querySelector('.tb-filter-chips[data-key="' + (window.CSS && CSS.escape ? CSS.escape(tableKey) : tableKey) + '"]'); } catch (e) { /* 选择器异常兜底 */ }
+    if (host) return host;
+    host = document.createElement('div');
+    host.className = 'tb-filter-chips';
+    host.dataset.key = tableKey;
+    let inserted = false;
+    const anchor = (table && table.closest && table.closest('.table-wrapper'))
+      || (table && table.parentElement && table.parentElement !== container ? table.parentElement : null)
+      || table;
+    // 🟢 v230.24（全模块卡顿走查发现）：原先用 container.contains(anchor) 判断后直接
+    //   insertBefore(host, anchor) —— contains 是「后代关系」，insertBefore 却要求 anchor 是
+    //   container 的【直接子节点】；当表格嵌在孙层（如存货档案详情页
+    //   sectionId > 滚动层 > .table-wrapper > table）时 contains 通过但 insertBefore 抛
+    //   NotFoundError，且异常会中断 initSortableHeaders 的后续初始化（chips 不渲染）。
+    //   改为父子关系精确判断，深层 anchor 自然落到下方的容器顶部兜底。
+    if (container && anchor && anchor !== container && anchor.parentNode === container) {
+      container.insertBefore(host, anchor);
+      inserted = true;
+    }
+    if (!inserted && container) container.insertBefore(host, container.firstChild);
+    else if (!inserted) document.body.appendChild(host);
+    return host;
+  },
+
+  // 读取某表当前生效的列筛选（从 TablePrefs 持久化反查），供 chips 渲染
+  getActiveFilters(tableKey) {
+    const out = [];
+    if (!tableKey) return out;
+    const all = (TablePrefs && TablePrefs._read) ? TablePrefs._read() : {};
+    const fmap = all && all.filters && all.filters[tableKey];
+    if (!fmap) return out;
+    Object.keys(fmap).forEach((field) => {
+      const st = fmap[field];
+      if (st && (st.kw || (st.excluded && st.excluded.length))) {
+        out.push({ colField: field, label: field, state: st });
+      }
+    });
+    return out;
+  },
+  // 🟢 v230.0b：读取某表当前生效的排序（单键返回对象，多键返回 { multi: [{colField,dir}...] }）
+  getActiveSorts(tableKey) {
+    const reg = this._tableRegistry[tableKey];
+    if (!reg || !reg.sortState || !reg.colFields) return null;
+    const keys = Array.isArray(reg.sortState.keys) ? reg.sortState.keys.filter(k => k.dir !== 0 && k.col >= 0) : [];
+    if (keys.length > 1) {
+      return { multi: keys.map(k => ({ colField: reg.colFields[k.col], dir: k.dir })) };
+    }
+    const k0 = keys[0] || (reg.sortState.dir !== 0 && reg.sortState.col >= 0
+      ? { col: reg.sortState.col, dir: reg.sortState.dir } : null);
+    if (k0) return { colField: reg.colFields[k0.col], dir: k0.dir };
+    return null;
+  },
+
+  // 核心：根据某表当前的 columnFilters（内存闭包）+ 排序状态，渲染其 chips 条
+  _renderChipsFor(table, tableKey, columnFilters, sortState, colFields, container) {
+    if (!tableKey) return;
+    const host = this._findChipsHost(tableKey, table, container);
+    if (!host) return;
+    const filters = [];
+    if (colFields && columnFilters) {
+      colFields.forEach((field, ci) => {
+        if (!field) return;
+        const st = TablePrefs.getFilter(tableKey, field);
+        if (st && (st.kw || (st.excluded && st.excluded.length))) {
+          filters.push({ colField: field, label: field, state: st });
+        }
+      });
+    }
+    const sort = (sortState && sortState.dir !== 0 && sortState.col >= 0 && colFields)
+      ? { colField: colFields[sortState.col], dir: sortState.dir } : null;
+    // 🟢 v230.0b：多键排序时，附带完整多键列表供 chips 逐键展示
+    const sortKeys = (sortState && Array.isArray(sortState.keys) && sortState.keys.length > 1 && colFields)
+      ? sortState.keys.map((k, i) => ({ colField: colFields[k.col], dir: k.dir, rank: i + 1 }))
+      : null;
+    this.renderFilterChips(host, tableKey, {
+      filters,
+      sort,
+      sortKeys,
+      onRemoveFilter: (colField) => this._removeColumnFilter(tableKey, colField),
+      onRemoveSort: () => this._resetSort(tableKey),
+      onRemoveSortKey: (colField) => this._removeSortKey(tableKey, colField),
+      onClearAll: () => this._clearAllFor(tableKey),
+    });
+  },
+
+  // 纯 DOM 构建：把 filters/sort 渲染成 chips（空则隐藏整条）
+  renderFilterChips(host, tableKey, cfg) {
+    if (!host) return;
+    const filters = cfg.filters || [];
+    const sort = cfg.sort || null;
+    const sortKeys = cfg.sortKeys || null;
+    const hasActive = filters.length || sort;
+    // 🟢 v230.17：高级筛选模块已整体移除——chips 条不再常驻，仅在确有生效条件时出现。
+    if (!tableKey) { host.innerHTML = ''; host.classList.remove('active'); return; }
+    // 🔴 SPEC-230-01 修复（v230.20）：无条件 add('active') 使空 chips 条常驻占位
+    //   （4 模块实测复现：无筛选/排序时仍显示空白条）。改为按 hasActive 切换；
+    //   顺带移除死类 active-has——全仓无任何对应 CSS 规则。
+    host.classList.toggle('active', !!hasActive);
+    if (!hasActive) { host.innerHTML = ''; return; }
+    let html = '<div class="tb-chips-inner">';
+
+    filters.forEach((f) => {
+      const txt = this._chipConditionText(f.state);
+      html += '<span class="tb-chip tb-chip-filter">'
+        + '<span class="tb-chip-label">' + this._escHtml(f.label) + '</span>'
+        + '<span class="tb-chip-cond">' + this._escHtml(txt) + '</span>'
+        + '<button class="tb-chip-x" aria-label="移除该列筛选" data-field="' + this._escAttr(f.colField) + '">✕</button></span>';
+    });
+
+    // 排序 chips：多键逐键展示（带优先级序号），单键保持原样式
+    if (sortKeys && sortKeys.length) {
+      sortKeys.forEach((k) => {
+        const arrow = k.dir === 1 ? '↑' : '↓';
+        html += '<span class="tb-chip tb-chip-sort">'
+          + '<span class="tb-chip-rank">' + k.rank + '</span>'
+          + '<span class="tb-chip-label">' + this._escHtml(k.colField) + '</span>'
+          + '<span class="tb-chip-cond">' + arrow + '</span>'
+          + '<button class="tb-chip-x" aria-label="移除该排序键" data-sortfield="' + this._escAttr(k.colField) + '">✕</button></span>';
+      });
+    } else if (sort) {
+      const arrow = sort.dir === 1 ? '↑' : '↓';
+      html += '<span class="tb-chip tb-chip-sort">'
+        + '<span class="tb-chip-label">排序</span>'
+        + '<span class="tb-chip-cond">' + this._escHtml(sort.colField) + ' ' + arrow + '</span>'
+        + '<button class="tb-chip-x" aria-label="移除排序">✕</button></span>';
+    }
+    if (hasActive) html += '<button class="tb-chip-clear" data-clear="1">清除全部筛选</button>';
+    html += '</div>';
+    host.innerHTML = html;
+    host.querySelectorAll('.tb-chip-filter .tb-chip-x').forEach((b) => {
+      b.addEventListener('click', () => { try { cfg.onRemoveFilter(b.dataset.field); } catch (e) { console.warn('[js/table-utils.js:1120] 异常(已忽略):', e); } });
+    });
+    host.querySelectorAll('.tb-chip-sort .tb-chip-x').forEach((b) => {
+      if (b.dataset.sortfield && cfg.onRemoveSortKey) {
+        b.addEventListener('click', () => { try { cfg.onRemoveSortKey(b.dataset.sortfield); } catch (e) { console.warn('[js/table-utils.js:1124] 异常(已忽略):', e); } });
+      } else {
+        b.addEventListener('click', () => { try { cfg.onRemoveSort(); } catch (e) { console.warn('[js/table-utils.js:1126] 异常(已忽略):', e); } });
+      }
+    });
+    const clr = host.querySelector('.tb-chip-clear');
+    if (clr) clr.addEventListener('click', () => { try { cfg.onClearAll(); } catch (e) { console.warn('[js/table-utils.js:1130] 异常(已忽略):', e); } });
+  },
+
+  // chips「单删某列筛选」：清持久化 + 清内存闭包 + 重放其余筛选 + 重渲 chips/汇总行
+  _removeColumnFilter(tableKey, colField) {
+    const reg = this._tableRegistry[tableKey];
+    if (TablePrefs) TablePrefs.setFilter(tableKey, colField, { kw: '', excluded: [] });
+    if (!reg) return;
+    delete reg.columnFilters[colField];
+    this._applyTableSortAndFilter(reg.table, reg.sortState.col, reg.sortState.dir, reg.columnFilters, reg.sortState.keys);
+    const ci = reg.colFields ? reg.colFields.indexOf(colField) : -1;
+    if (ci >= 0 && reg.ths && reg.ths[ci]) {
+      const ic = reg.ths[ci].querySelector('.th-filter-icon');
+      if (ic) ic.classList.remove('active');
+    }
+    this._renderChipsFor(reg.table, tableKey, reg.columnFilters, reg.sortState, reg.colFields, reg.container);
+    this._refreshSummary(reg.table);
+  },
+
+  // chips「移除排序」：复位排序状态 + 重放 + 重渲
+  _resetSort(tableKey) {
+    const reg = this._tableRegistry[tableKey];
+    if (!reg) return;
+    reg.sortState.col = -1;
+    reg.sortState.dir = 0;
+    reg.sortState.keys = [];
+    this._refreshArrowState(reg.ths, -1, 0, []);
+    this._applyTableSortAndFilter(reg.table, -1, 0, reg.columnFilters, []);
+    this._renderChipsFor(reg.table, tableKey, reg.columnFilters, reg.sortState, reg.colFields, reg.container);
+    this._refreshSummary(reg.table);
+  },
+
+  // 🟢 v230.0b：chips「移除某个排序键」——多键排序里单删一键，其余键顺序不变并重排
+  _removeSortKey(tableKey, colField) {
+    const reg = this._tableRegistry[tableKey];
+    if (!reg || !reg.sortState) return;
+    const ci = reg.colFields ? reg.colFields.indexOf(colField) : -1;
+    if (ci < 0) return;
+    if (!Array.isArray(reg.sortState.keys)) reg.sortState.keys = [];
+    reg.sortState.keys = reg.sortState.keys.filter((k) => k.col !== ci);
+    this._syncSortStateFromKeys(reg.sortState);
+    this._refreshArrowState(reg.ths, reg.sortState.col, reg.sortState.dir, reg.sortState.keys);
+    this._applyTableSortAndFilter(reg.table, reg.sortState.col, reg.sortState.dir, reg.columnFilters, reg.sortState.keys);
+    this._renderChipsFor(reg.table, tableKey, reg.columnFilters, reg.sortState, reg.colFields, reg.container);
+    this._refreshSummary(reg.table);
+  },
+
+  // chips「清除全部筛选」：清该表全部列筛选 + 排序，所见即所得
+  _clearAllFor(tableKey) {
+    const reg = this._tableRegistry[tableKey];
+    if (TablePrefs) TablePrefs.clearFiltersFor(tableKey);
+    if (!reg) return;
+    Object.keys(reg.columnFilters).forEach((k) => { delete reg.columnFilters[k]; });
+    const tbody = reg.table.querySelector('tbody');
+    if (tbody) Array.from(tbody.children).forEach((tr) => { if (!tr.classList.contains('vt-spacer')) tr.style.display = ''; });
+    reg.table.querySelectorAll('.th-filter-icon.active').forEach((ic) => ic.classList.remove('active'));
+    if (Array.isArray(reg.table._vtRawItems)) {
+      reg.table._vtItems = reg.table._vtRawItems.slice();
+      reg.table._vtTextRows = undefined;
+      if (typeof reg.table._vtRender === 'function') reg.table._vtRender();
+    }
+    reg.sortState.col = -1;
+    reg.sortState.dir = 0;
+    reg.sortState.keys = [];
+    this._refreshArrowState(reg.ths, -1, 0, []);
+    this._renderChipsFor(reg.table, tableKey, reg.columnFilters, reg.sortState, reg.colFields, reg.container);
+    this._refreshSummary(reg.table);
+  },
+
+  // —— 底部汇总行 ——
+  // 聚合数据源：虚拟表=完整数据集(_vtItems)，其余=DOM 可见行(display!=none)
+  _getAggregationSource(table) {
+    if (this._isVirtualTable(table)) {
+      this._ensureVtTextRows(table);
+      return table._vtTextRows || [];
+    }
+    const tbody = table.querySelector('tbody');
+    const rows = [];
+    if (tbody) tbody.querySelectorAll('tr:not(.vt-spacer)').forEach((tr) => {
+      if (tr.style.display === 'none') return;
+      const cells = [];
+      for (const td of tr.children) cells.push(this._cellValue(td));
+      rows.push(cells);
+    });
+    return rows;
+  },
+
+  // 虚拟表用完整数据集求单元格原文（与筛选弹窗同源，懒构建并缓存）
+  _ensureVtTextRows(table) {
+    if (Array.isArray(table._vtTextRows)) return;
+    const items = table._vtItems || [];
+    const rowHtml = table._vtRowHtml;
+    const valueAt = (typeof table._vtValueAt === 'function') ? table._vtValueAt : null;
+    const thCount = table.querySelectorAll('thead th').length;
+    table._vtTextRows = items.map((it, rowIdx) => {
+      if (typeof rowHtml === 'function') {
+        const tmp = document.createElement('tbody');
+        tmp.innerHTML = rowHtml(it, rowIdx);
+        const tr = tmp.querySelector('tr');
+        if (!tr) return [];
+        return Array.from(tr.children).map((td) => this._cellValue(td));
+      }
+      if (valueAt) {
+        const row = [];
+        for (let c = 0; c < thCount; c++) { const v = valueAt(it, c); row.push(v == null ? '' : String(v)); }
+        return row;
+      }
+      return [];
+    });
+  },
+
+  // 数值列识别：表头含 NUMERIC_KEYWORDS 且数据中确有可解析数值
+  _detectNumericCols(table, ths, rows) {
+    const cols = [];
+    Array.from(ths).forEach((th, ci) => {
+      const label = (th.querySelector && th.querySelector('.th-sort-label')) ? th.querySelector('.th-sort-label').textContent : th.textContent;
+      const text = (label || '').trim();
+      if (!this.NUMERIC_KEYWORDS.some((k) => text.includes(k))) return;
+      let ok = false;
+      for (const r of rows) {
+        const n = this._parseNumeric(r[ci]);
+        if (n !== null) { ok = true; break; }
+      }
+      if (ok) cols.push(ci);
+    });
+    return cols;
+  },
+
+  _renderSummaryRow(table) {
+    const tbody = table.querySelector('tbody');
+    const thead = table.querySelector('thead');
+    if (!tbody) return;
+    const ths = thead ? thead.querySelectorAll('th') : [];
+    const rows = this._getAggregationSource(table);
+    const old = table.querySelector('tfoot.tb-summary-row');
+    if (!rows.length) { if (old) old.remove(); return; }
+    const numericCols = this._detectNumericCols(table, ths, rows);
+    if (!numericCols.length) { if (old) old.remove(); return; }
+
+    const sums = {}, counts = {};
+    numericCols.forEach((ci) => { sums[ci] = 0; counts[ci] = 0; });
+    rows.forEach((r) => {
+      numericCols.forEach((ci) => {
+        const n = this._parseNumeric(r[ci]);
+        if (n !== null) { sums[ci] += n; counts[ci] += 1; }
+      });
+    });
+
+    // 🟢 v230.10：列对齐继承 —— 汇总格与对应列的数据格保持同一 text-align。
+    //   旧实现硬编码 text-align:right，而 .data-table tbody td 默认居中（且用户可用对齐按钮
+    //   inline 覆盖成 left/right/center），导致汇总值与数据列错位——这正是「排版不正 /
+    //   汇总数据没有居中」的根因。
+    //   取值顺序：数据行 td inline（真实来源，v227.77 _applyAlignPrefs 就写在这里）
+    //             → thead th inline → center 默认。
+    //   注意不可反过来先读 th：.data-table thead th[style*="text-align"] 被 CSS 强制居中，
+    //   th 的 inline 值并不代表该列真实对齐。
+    const _colAlign = (ci) => {
+      let a = '';
+      if (tbody.rows[0] && tbody.rows[0].cells[ci]) a = tbody.rows[0].cells[ci].style.textAlign || '';
+      if (!a && ths[ci] && ths[ci].style) a = ths[ci].style.textAlign || '';
+      return (a === 'left' || a === 'right' || a === 'center') ? a : 'center';
+    };
+
+    const firstNum = numericCols[0];
+    const cells = [];
+    let labelDone = false;
+    Array.from(ths).forEach((th, ci) => {
+      // 首个数值列之前的非数值列（序号/编码/名称/规格…）由标签格一次 colspan 吸收，
+      // 不再把「合计 N 行」塞进极窄的序号列里撑破/溢出（v230.10 修「排版不正」）。
+      if (ci < firstNum) {
+        if (ci === 0) {
+          cells.push('<td class="tb-summary-label" colspan="' + Math.max(firstNum, 1) + '" style="text-align:' + _colAlign(0) + '">'
+            + '<span class="tb-summary-tag">合计</span><span class="tb-summary-count">' + rows.length + '</span> 行</td>');
+          labelDone = true;
+        }
+        return;
+      }
+      if (numericCols.indexOf(ci) >= 0) {
+        const isMoney = /(金额|单价|价格|总价|扣款|价税)/.test(th.textContent || '');
+        const avg = counts[ci] ? sums[ci] / counts[ci] : 0;
+        // 兜底：若首列本身就是数值列（firstNum===0），无处安放标签 → 内联到首个数值格前缀，
+        // 保证列数与数据行严格一致（绝不新增一列导致整体错位）。
+        const labelPrefix = (!labelDone && ci === firstNum)
+          ? '<span class="tb-summary-tag">合计</span><span class="tb-summary-count">' + rows.length + '</span> 行 '
+          : '';
+        if (labelPrefix) labelDone = true;
+        cells.push('<td class="tb-summary-num" style="text-align:' + _colAlign(ci) + '">' + labelPrefix
+          + '<b class="tb-summary-val">' + this._formatSummary(sums[ci], isMoney)
+          + '</b><span class="tb-summary-avg">均 ' + this._formatSummary(avg, isMoney) + '</span></td>');
+      } else {
+        cells.push('<td style="text-align:' + _colAlign(ci) + '"></td>');
+      }
+    });
+
+    const tfoot = document.createElement('tfoot');
+    tfoot.className = 'tb-summary-row';
+    tfoot.innerHTML = '<tr>' + cells.join('') + '</tr>';
+    if (old) table.replaceChild(tfoot, old); else table.appendChild(tfoot);
+  },
+
+  // 统一刷新入口（被排序/筛选应用、虚拟渲染、MutationObserver 调用）
+  _refreshSummary(table) {
+    if (!table || table.dataset.summary !== '1') return;
+    if (this._isVirtualTable(table)) {
+      if (table._vtSummaryGen === table._vtSummaryRenderedGen) return; // 滚动帧未变，跳过
+      table._vtSummaryRenderedGen = table._vtSummaryGen;
+    }
+    this._renderSummaryRow(table);
+  },
+
+  // 一次性注入 chips / 汇总行样式（设计令牌，带兜底色）
+  _injectExtrasStyle() {
+    if (document.getElementById('tb-extras-style')) return;
+    const css = ''
+      // 🟢 v230.15：筛选状态栏 chips 重设计——「状态标签（浅色 tint 实底 tag）」+
+      //   「行动入口（冰川蓝玻璃主按钮）」+「文字型清除」三类视觉语言分层，告别旧版
+      //   「三色描边幽灵 chip + 无底幽灵入口」的杂乱观感；暗色主题逐条适配。
+      + '.tb-filter-chips{display:none;flex-wrap:wrap;gap:8px;margin:0 0 10px;}'
+      + '.tb-filter-chips.active{display:flex;}'
+      + '.tb-chips-inner{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}'
+      // chip 通用：浅色 tint 实底 + 同色系深字 + 6px 圆角（现代 tag 语言）
+      + '.tb-chip{display:inline-flex;align-items:center;gap:6px;border-radius:6px;padding:2px 4px 2px 9px;font-size:12px;line-height:20px;border:1px solid transparent;}'
+      + '.tb-chip-label{font-weight:600;}'
+      + '.tb-chip-label::after{content:"";display:inline-block;width:4px;height:4px;border-radius:50%;background:currentColor;opacity:.5;margin-left:6px;vertical-align:2px;}'
+      + '.tb-chip-cond{font-weight:400;opacity:.78;}'
+      + '.tb-chip-x{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:none;background:transparent;color:inherit;opacity:.55;cursor:pointer;font-size:11px;line-height:1;border-radius:50%;transition:opacity .15s,background .15s;margin-right:1px;}'
+      + '.tb-chip-x:hover{opacity:1;background:rgba(15,23,42,.10);}'
+      // 列筛选 chip：冰川蓝 tint（与全站主色同源）
+      + '.tb-chip-filter{background:rgba(91,155,213,.13);border-color:rgba(91,155,213,.30);color:#1E4A7A;}'
+      // 排序 chip：紫 tint
+      + '.tb-chip-sort{background:rgba(139,92,246,.10);border-color:rgba(139,92,246,.24);color:#5B21B6;}'
+      // 暗色适配：tint 提亮 + 亮字
+      + '[data-theme="dark"] .tb-chip-filter{background:rgba(91,155,213,.18);border-color:rgba(91,155,213,.40);color:#BFDBF7;}'
+      + '[data-theme="dark"] .tb-chip-sort{background:rgba(139,92,246,.20);border-color:rgba(139,92,246,.44);color:#DDD6FE;}'
+      + '[data-theme="dark"] .tb-chip-x:hover{background:rgba(255,255,255,.14);}'
+      // 🟢 v230.0b：多列排序优先级序号 + 逻辑分隔徽标
+      + '.th-sort-rank{display:inline-flex;align-items:center;justify-content:center;min-width:14px;height:14px;padding:0 3px;margin-left:4px;border-radius:7px;background:#8b5cf6;color:#fff;font-size:9px;line-height:1;vertical-align:middle;}'
+      + '.tb-chip-sort .tb-chip-rank{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;border-radius:8px;background:#7C3AED;color:#fff;font-size:10px;font-weight:700;line-height:1;}'
+      // 「清除全部」：纯文字按钮（去掉旧虚线幽灵框），hover 转 danger 红——语义即破坏性操作
+      + '.tb-chip-clear{border:none;background:transparent;color:var(--text-secondary,#64748b);border-radius:6px;padding:3px 9px;font-size:12px;font-weight:600;cursor:pointer;line-height:20px;transition:color .15s,background .15s;margin-left:2px;}'
+      + '.tb-chip-clear:hover{color:#dc2626;background:rgba(220,38,38,.08);}'
+      + '[data-theme="dark"] .tb-chip-clear:hover{color:#f87171;background:rgba(248,113,113,.12);}'
+      // 🟢 v230.11：汇总行回归普通行（去掉上轮误加的 position:sticky;bottom:0 吸底）——
+      //   用户明确要求「汇总行应该拉到最后才显示」：它就是表格的合计行，属于数据末尾，
+      //   不是常驻工具条。tfoot 本就 append 在 tbody 之后，非 sticky 即随内容滚到底才出现。
+      //   （附带收益：各浏览器对 tfoot 上 sticky 的支持并不一致，去掉后渲染更可预期。）
+      + '.tb-summary-row{}'
+      + '.tb-summary-row td{background:rgba(91,155,213,.06);font-weight:600;'
+      + 'border-top:2px solid var(--primary,#5b9bd5);'
+      + 'border-bottom:1px solid var(--card-border,#dbe6f0);'
+      + 'border-right:1px solid rgba(94,154,208,0.18);'
+      + 'color:var(--text-main,#0f172a);padding:7px 10px;font-size:12px;'
+      + 'text-align:center;vertical-align:middle;font-variant-numeric:tabular-nums;}'
+      + '.tb-summary-row td:last-child{border-right:none;}'
+      + '[data-theme="dark"] .tb-summary-row td{background:rgba(56,189,248,.10);border-top-color:rgba(56,189,248,.55);border-right-color:rgba(94,154,208,0.22);border-bottom-color:rgba(94,154,208,0.22);}'
+      + '.tb-summary-label{font-size:12px;color:var(--text-secondary,#64748b);white-space:nowrap;}'
+      + '.tb-summary-tag{display:inline-flex;align-items:center;height:18px;padding:0 8px;margin-right:6px;border-radius:9px;background:var(--primary,#5b9bd5);color:#fff;font-size:11px;font-weight:600;letter-spacing:.5px;vertical-align:middle;}'
+      + '.tb-summary-count{font-weight:700;color:var(--primary,#5b9bd5);font-size:13px;padding:0 1px;}'
+      + '.tb-summary-num{white-space:nowrap;line-height:1.35;}'
+      + '.tb-summary-val{display:block;font-size:13px;font-weight:700;color:var(--text-main,#0f172a);}'
+      + '.tb-summary-avg{display:block;margin-top:1px;font-size:10px;font-weight:400;color:var(--text-secondary,#94a3b8);letter-spacing:.2px;}';
+    const style = document.createElement('style');
+    style.id = 'tb-extras-style';
+    style.textContent = css;
+    document.head.appendChild(style);
+  },
+
+  /**
+   * 🟢 v229.98（AUDIT-229-98-14）：给「模块自己手写 innerHTML 渲染」的表格挂载数据集。
+   *   背景：筛选弹窗的候选值有两种取法 —— 有 _vtItems 时取【全量数据集】，否则退回【当前页 DOM 行】。
+   *   走 virtualTable 的表两种分页都有 _vtItems，没问题；但自己拼 <table> 的模块（库存预警等）
+   *   只能看到当前页那几十行，导致「翻到别的页才出现的取值，筛选弹窗里根本没有」——
+   *   用户会误以为数据里没有这个值。
+   *   修法：模块在渲染完表格后调用本函数把全量数据挂上去，候选值立即覆盖所有页。
+   *   @param {HTMLTableElement|HTMLElement} tableOrHost 表格元素或其容器
+   *   @param {Array} items 该表【当前筛选后】的完整数据行（不是当前页）
+   *   @param {function} [rowHtml] (item) => '<tr>...</tr>' 行渲染器（优先，取值与画面完全一致）
+   *   @param {function} [valueAt] (item, colIdx) => string 取值器（没有行渲染器时用，次之）
+   */
+  attachDataset(tableOrHost, items, rowHtml, valueAt) {
+    if (!tableOrHost) return;
+    const table = (tableOrHost.tagName === 'TABLE') ? tableOrHost : tableOrHost.querySelector('.data-table');
+    if (!table || !Array.isArray(items)) return;
+    try {
+      table._vtItems = items;
+      if (typeof rowHtml === 'function') table._vtRowHtml = rowHtml;
+      if (typeof valueAt === 'function') table._vtValueAt = valueAt;
+      table._vtTextRows = undefined; // 取值缓存失效，下次打开弹窗重算
+    } catch (e) { /* 只读场景忽略 */ }
   },
 
   _applyAlignPreferences(table, ths, colFields, tableKey) {
@@ -881,7 +1458,7 @@ const TableUtils = {
   },
 
   _bindHeaderInteractions(th, colIdx, ctx) {
-    const { ths, table, tableKey, colFields, columnFilters, sortState, opts } = ctx;
+    const { ths, table, tableKey, colFields, columnFilters, sortState, opts, container } = ctx;
     if (th.getAttribute('data-nofilter') === '1') {
       th.style.cursor = '';
       return;
@@ -911,7 +1488,9 @@ const TableUtils = {
         );
         filterIcon.classList.toggle('active', hasActive);
         if (tableKey && colFields[colIdx]) TablePrefs.setFilter(tableKey, colFields[colIdx], filterState);
-        this._applyTableSortAndFilter(table, sortState.col, sortState.dir, columnFilters);
+        this._applyTableSortAndFilter(table, sortState.col, sortState.dir, columnFilters, sortState.keys);
+        this._renderChipsFor(table, tableKey, columnFilters, sortState, colFields, container);
+        this._refreshSummary(table);
       }, {
         tableKey,
         colField: colFields[colIdx],
@@ -935,14 +1514,24 @@ const TableUtils = {
     if (labelEl) {
       labelEl.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (sortState.col === colIdx) {
-          sortState.dir = sortState.dir === 1 ? 2 : sortState.dir === 2 ? 0 : 1;
+        // 🟢 v230.0b（AUDIT-230-0b）：Shift+点击 = 多列排序（追加/切换次级键）；普通点击 = 单列三态排序。
+        if (e.shiftKey) {
+          this._toggleMultiSortKey(ths, sortState, colIdx);
         } else {
-          sortState.dir = 1;
+          sortState.keys = [];
+          if (sortState.col === colIdx) {
+            sortState.dir = sortState.dir === 1 ? 2 : sortState.dir === 2 ? 0 : 1;
+          } else {
+            sortState.dir = 1;
+          }
+          sortState.col = sortState.dir === 0 ? -1 : colIdx;
+          if (sortState.dir !== 0) sortState.keys = [{ col: colIdx, dir: sortState.dir }];
         }
-        sortState.col = sortState.dir === 0 ? -1 : colIdx;
-        this._refreshArrowState(ths, sortState.col, sortState.dir);
-        this._applyTableSortAndFilter(table, sortState.col, sortState.dir, columnFilters);
+        this._syncSortStateFromKeys(sortState);
+        this._refreshArrowState(ths, sortState.col, sortState.dir, sortState.keys);
+        this._applyTableSortAndFilter(table, sortState.col, sortState.dir, columnFilters, sortState.keys);
+        this._renderChipsFor(table, tableKey, columnFilters, sortState, colFields, container);
+        this._refreshSummary(table);
         if (typeof opts.onSortChange === 'function') {
           const field = colFields[sortState.col] || '';
           opts.onSortChange(field, sortState.dir);
@@ -954,26 +1543,91 @@ const TableUtils = {
   },
 
 
-  _refreshArrowState(ths, col, dir) {
+  // 🟢 v230.0b（AUDIT-230-0b）：Shift+点击表头 —— 把该列追加/切换为次级排序键。
+  //   规则（对标 Excel）：
+  //     · 该列不在 keys 中 → 以升序追加到末尾；
+  //     · 该列已在 keys 中 → 升→降→移除 三态循环；
+  //     · 移除后其余键顺序不变（前一个键自动升为主键）。
+  _toggleMultiSortKey(ths, sortState, colIdx) {
+    if (!Array.isArray(sortState.keys)) sortState.keys = [];
+    const keys = sortState.keys;
+    const i = keys.findIndex((k) => k.col === colIdx);
+    if (i < 0) {
+      keys.push({ col: colIdx, dir: 1 });
+    } else if (keys[i].dir === 1) {
+      keys[i].dir = 2;
+    } else {
+      keys.splice(i, 1);
+    }
+    this._syncSortStateFromKeys(sortState);
+  },
+
+  // 把 keys[0] 镜像回 col/dir（保持既有单列路径的字段语义）；keys 空则复位为无排序。
+  _syncSortStateFromKeys(sortState) {
+    const keys = (sortState && Array.isArray(sortState.keys)) ? sortState.keys : [];
+    if (keys.length) {
+      sortState.col = keys[0].col;
+      sortState.dir = keys[0].dir;
+    } else {
+      sortState.col = -1;
+      sortState.dir = 0;
+    }
+    return sortState;
+  },
+
+  // 🟢 v230.0b：更新表头排序指示 —— 支持多列同时高亮，并给非主键显示优先级序号（1/2/3…）。
+  _refreshArrowState(ths, col, dir, keys) {
+    const multi = Array.isArray(keys) && keys.length > 1;
+    const rankMap = {};
+    if (Array.isArray(keys)) keys.forEach((k, i) => { rankMap[k.col] = i + 1; });
     ths.forEach((th, i) => {
       const label = th.querySelector('.th-sort-label');
       if (!label) return;
       // 重置所有表头样式
       label.classList.remove('sort-asc', 'sort-desc');
-      // 🟢 v195：排序激活时不再改 label 颜色（v185 表头底色已是冰川蓝渐变，白字改蓝后反差变小、看起来像列颜色变了）。
-      //   排序状态由 sort-asc/sort-desc 类的箭头(↑/↓)指示；label 文字色始终跟随 th 的 #ffffff。
       label.style.color = '';
-      // 当前排序列高亮
-      if (i === col) {
-        if (dir === 1) { label.classList.add('sort-asc'); }
-        else if (dir === 2) { label.classList.add('sort-desc'); }
+      // 清掉上一轮可能残留的优先级序号
+      const oldRank = th.querySelector('.th-sort-rank');
+      if (oldRank) oldRank.remove();
+      // 当前排序列高亮（多列时全部高亮）
+      const active = Array.isArray(keys) && keys.length
+        ? keys.some((k) => k.col === i)
+        : (i === col);
+      let thisDir = dir;
+      if (Array.isArray(keys) && keys.length) {
+        const hit = keys.find((k) => k.col === i);
+        if (hit) thisDir = hit.dir;
+      }
+      if (active) {
+        if (thisDir === 1) { label.classList.add('sort-asc'); }
+        else if (thisDir === 2) { label.classList.add('sort-desc'); }
+        // 多列排序时给每列标注优先级序号（第 1 序号也不额外标，靠箭头识别即可；这里序号从 1 起全标更直观）
+        if (multi && rankMap[i]) {
+          const badge = document.createElement('span');
+          badge.className = 'th-sort-rank';
+          badge.textContent = String(rankMap[i]);
+          label.appendChild(badge);
+        }
       }
     });
   },
 
-  _applyTableSortAndFilter(table, sortCol, sortDir, filters) {
+  _applyTableSortAndFilter(table, sortCol, sortDir, filters, sortKeys) {
     const tbody = table.querySelector('tbody');
     if (!tbody) return;
+
+    // 🟢 v229.97（AUDIT-229-97-01）：虚拟滚动表改走「数据集路径」。
+    //   虚拟表 tbody 里混着 <tr class="vt-spacer"> 占位行（只有 1 个 colspan 单元格、值为空）：
+    //   ① 参与排序 → 占位行被 appendChild 重排逻辑挤到数据行之前（实测从第 17 位跳到第 0 位）→ 布局破损；
+    //   ② 参与筛选 → 空值不含关键词 → 被 display:none → 虚拟总高度塌陷；
+    //   ③ 更根本的问题：DOM 里只渲染了视口附近十几行，在 DOM 层排序/筛选等于「只处理了可见的十几行」，
+    //      下一次滚动仍按原始 items 重画 → 排序结果被还原。
+    //   故虚拟模式下把排序与筛选下沉到完整数据集，再触发窗口重渲染，彻底根除三类冲突。
+    if (this._isVirtualTable(table)) {
+      this._applyVirtualSortAndFilter(table, sortCol, sortDir, filters, sortKeys);
+      return;
+    }
+
     const rows = Array.from(tbody.querySelectorAll('tr'));
 
     // 1) 重置可见性
@@ -991,7 +1645,9 @@ const TableUtils = {
         const excludedSet = new Set(excluded.map(v => String(v).toLowerCase()));
         rows.forEach(tr => {
           const td = tr.children[col];
-          const raw = td ? td.textContent.trim().toLowerCase() : '';
+          // 🟢 v229.91（AUDIT-229-01）：改用 _cellValue —— 录入型单元格（<input>）的值在 value 里，
+          //   textContent 读不到、还会混入 🔍 图标，导致「勾选筛选后表格毫无变化」。
+          const raw = this._cellValue(td).toLowerCase();
           // 🟢 v229.48：空单元格按弹窗展示名「(空)」参与匹配 —— 修复未勾选 (空) 后空值行仍被带出的漏排
           const val = raw === '' ? '(空)' : raw;
           if (excludedSet.has(val)) tr.style.display = 'none';
@@ -1005,31 +1661,127 @@ const TableUtils = {
         rows.forEach(tr => {
           if (tr.style.display === 'none') return;
           const td = tr.children[col];
-          const val = td ? td.textContent.toLowerCase() : '';
+          // 🟢 v229.91（AUDIT-229-01）：同上，改用 _cellValue
+          const val = this._cellValue(td).toLowerCase();
           if (!val.includes(k)) tr.style.display = 'none';
         });
       }
     });
 
-    // 3) 排序（仅对可见行原地重排）
+    // 3) 排序（仅对可见行原地重排）—— 🟢 v230.0b：支持多键稳定排序
     if (sortDir !== 0 && sortCol >= 0) {
+      const keys = this._normalizeSortKeys(sortKeys, sortCol, sortDir);
       const visible = rows.filter(tr => tr.style.display !== 'none');
-      visible.sort((a, b) => {
-        const va = this._cellToComparable(a.children[sortCol]);
-        const vb = this._cellToComparable(b.children[sortCol]);
-        if (typeof va === 'number' && typeof vb === 'number') {
-          return sortDir === 1 ? va - vb : vb - va;
-        }
-        const sa = String(va), sb = String(vb);
-        return sortDir === 1 ? sa.localeCompare(sb, 'zh') : sb.localeCompare(sa, 'zh');
-      });
+      visible.sort((a, b) => this._compareRowsByKeys(a, b, keys, (td) => this._cellToComparable(td)));
       visible.forEach(tr => tbody.appendChild(tr));
+    }
+    // 🟢 v230.0a（AUDIT-230-0a）：排序/筛选后刷新底部汇总行（数据源=DOM 可见行）
+    this._refreshSummary(table);
+  },
+
+  // 🟢 v230.0b：把调用方传入的 sortKeys（可能为空）规整为 [{col,dir}, ...] 有序数组。
+  //   兼容只传 sortCol/sortDir 的旧路径（构造单键数组）。
+  _normalizeSortKeys(sortKeys, sortCol, sortDir) {
+    let keys = Array.isArray(sortKeys) ? sortKeys.filter(k => k && k.dir !== 0 && k.col >= 0) : [];
+    if (!keys.length && sortDir !== 0 && sortCol >= 0) keys = [{ col: sortCol, dir: sortDir }];
+    return keys;
+  },
+
+  // 🟢 v230.0b：按有序多键逐级比较。getCmp(td) 返回该单元格的可比较值（DOM 路径传 _cellToComparable）。
+  _compareRowsByKeys(ra, rb, keys, getCmp) {
+    for (const k of keys) {
+      const va = getCmp(ra.children[k.col]);
+      const vb = getCmp(rb.children[k.col]);
+      let r = 0;
+      if (typeof va === 'number' && typeof vb === 'number') {
+        r = va - vb;
+      } else {
+        const sa = String(va), sb = String(vb);
+        r = sa.localeCompare(sb, 'zh');
+      }
+      if (r !== 0) return k.dir === 1 ? r : -r;
+    }
+    return 0;
+  },
+
+  // 🟢 v229.97（AUDIT-229-97-01）：判断表格是否处于虚拟滚动模式。
+  //   virtualTable 挂 `_vtItems`（数据集）+ `_vtRender`（窗口重渲染入口）两者齐全才算，
+  //   避免把「小表走整表渲染但也挂了 _vtItems」的情况误判成虚拟模式（那条路径必须继续走 DOM 重排，
+  //   否则 _vtRender 不存在会导致筛选/排序静默失效）。
+  _isVirtualTable(table) {
+    return !!(table && Array.isArray(table._vtItems) && typeof table._vtRender === 'function');
+  },
+
+  // 把一行 rowHtml(item) 解析成各单元格取值数组（虚拟模式没有真实 <tr>，只能从模板串求值）。
+  // 取值语义与 DOM 路径的 _cellValue 保持一致（录入型单元格取 input 的 value）。
+  _vtRowValues(item, rowHtml) {
+    try {
+      const tmp = document.createElement('table');
+      tmp.innerHTML = '<tbody>' + rowHtml(item) + '</tbody>';
+      const tr = tmp.querySelector('tr');
+      if (!tr) return [];
+      return Array.from(tr.children).map(td => this._cellValue(td));
+    } catch (e) {
+      return [];
     }
   },
 
+  // 🟢 v229.97（AUDIT-229-97-01）：虚拟表专用的排序/筛选 —— 作用于完整数据集而非 DOM。
+  //   - 始终从 `_vtRawItems`（首次进入时保存的原始全量）重新计算，避免筛选结果叠加丢失数据；
+  //   - 每行按 rowHtml 求值一次并缓存（200 行量级可接受，且仅在排序/筛选变更时触发）；
+  //   - 过滤语义复用 _valuePassesFilter，排序语义复用 _cellToComparableRaw，保证与 DOM 路径完全一致；
+  //   - 结束后写回 `_vtItems` 并触发窗口重渲染，占位行高度由 virtualTable 自行按新总数重算。
+  _applyVirtualSortAndFilter(table, sortCol, sortDir, filters, sortKeys) {
+    if (!table._vtRawItems) table._vtRawItems = table._vtItems.slice();
+    const raw = table._vtRawItems;
+    const rowHtml = table._vtRowHtml;
+    if (typeof rowHtml !== 'function') return;
+
+    const cache = new Map();
+    const valuesOf = (item) => {
+      let v = cache.get(item);
+      if (!v) { v = this._vtRowValues(item, rowHtml); cache.set(item, v); }
+      return v;
+    };
+
+    let list = raw.filter(item => {
+      const vals = valuesOf(item);
+      if (!this._rowPassesOtherFilters((c) => vals[c] ?? '', filters, -1)) return false;
+      return true;
+    });
+
+    if (sortDir !== 0 && sortCol >= 0) {
+      const keys = this._normalizeSortKeys(sortKeys, sortCol, sortDir);
+      list = list.slice().sort((a, b) => {
+        for (const k of keys) {
+          const va = this._cellToComparableRaw(String(valuesOf(a)[k.col] ?? ''));
+          const vb = this._cellToComparableRaw(String(valuesOf(b)[k.col] ?? ''));
+          let r = 0;
+          if (typeof va === 'number' && typeof vb === 'number') r = va - vb;
+          else r = String(va).localeCompare(String(vb), 'zh');
+          if (r !== 0) return k.dir === 1 ? r : -r;
+        }
+        return 0;
+      });
+    }
+
+    table._vtItems = list;
+    table._vtTextRows = undefined; // 🟢 v230.0a：数据集已变，失效取值缓存以便汇总行重算
+    table._vtSummaryGen = (table._vtSummaryGen || 0) + 1; // 🟢 v230.0a：数据代际+1，触发汇总行重算
+    table._vtRender();
+    this._refreshSummary(table);
+  },
   _cellToComparable(td) {
     if (!td) return '';
-    const raw = (td.textContent || '').trim();
+    // 🟢 v229.91（AUDIT-229-02）：改用 _cellValue —— 原用 textContent 时，录入型列各行都读到相同的 🔍，
+    //   比较恒等 → 出现「点了排序但顺序不变」。
+    return this._cellToComparableRaw(this._cellValue(td));
+  },
+
+  // 🟢 v229.97（AUDIT-229-97-01）：把「单元格原文 → 可比较值」抽成纯值版本。
+  //   虚拟滚动路径没有真实 td 元素（只有 rowHtml 字符串解析出的单元格值），
+  //   需要与 DOM 路径共用同一套比较语义，避免两条路径排序结果漂移。
+  _cellToComparableRaw(raw) {
     if (raw === '' || raw === '-' || raw === '—' || raw === '/') return raw;
     // 去掉货币符号/千分位/百分号后尝试数值比较
     const cleaned = raw.replace(/[¥$￥,\s，%]/g, '');
@@ -1043,9 +1795,21 @@ const TableUtils = {
     this._hideFilterPopup();
     const table = th.closest('.data-table');
     const tbody = table ? table.querySelector('tbody') : null;
-    const rows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
 
-    const { sortedValues } = this._collectColumnValues(rows, colIdx);
+    // 🟢 v229.90：virtualTable 模式优先用完整数据集（table._vtItems）取列值；
+    //   否则降级到当前 tbody DOM 行（小表全量行已在 DOM 中）。
+    // 🟢 v229.95：两种路径都改为「分面」取值 —— 候选值只从通过其它列当前筛选的行里取，
+    //   使弹窗随当前筛选结果收窄（修：筛了 月均入库=0 后，分类弹窗仍列全部分类的问题）。
+    let sortedValues;
+    if (table && Array.isArray(table._vtItems)) {
+      sortedValues = this._collectColumnValuesFromItems(table, colIdx, currentFilters);
+    } else {
+      const rows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
+      const facetedRows = rows.filter(tr => this._rowPassesOtherFilters(
+        (c) => this._cellValue(tr.children[c]), currentFilters, colIdx));
+      sortedValues = this._collectColumnValues(facetedRows, colIdx).sortedValues;
+    }
+
     const { currentKw, excludedSet } = this._parseFilterState(currentFilters, colIdx);
     const tableKey = alignOpts.tableKey;
     const colField = alignOpts.colField;
@@ -1069,11 +1833,72 @@ const TableUtils = {
     TableUtils._filterPopup = popup;
   },
 
+  // 🟢 v229.90：统一单元格取值 —— 录入型单元格（<input>/<select>/<textarea>）的值在
+  //   value 属性里，textContent 拿不到，反而会把旁边的图标按钮（如 🔍）误当作值；
+  //   非表单单元格仍回退 textContent。修复订单核对等录入表筛选弹窗「只显示图标不显示编码」。
+  _cellValue(td) {
+    if (!td) return '';
+    // 🟢 v230.29：单元格可用 data-value 声明「参与筛选/排序的纯值」。
+    //   背景：单元格里除数值外还有装饰文本（如查询系统未入库量的「（已关闭）」），
+    //   textContent 会把字样一起读进去，导致表头筛选的分面候选值/排除匹配失真。
+    //   有 data-value 时一律以它为准，无则回退原逻辑（向后兼容，零副作用）。
+    try {
+      const dv = td.getAttribute('data-value');
+      if (dv !== null && dv !== '') return dv.trim();
+      const holder = td.querySelector('[data-value]');
+      if (holder) {
+        const hv = holder.getAttribute('data-value');
+        if (hv !== null && hv !== '') return hv.trim();
+      }
+    } catch (e) { /* 取值失败回退原逻辑 */ }
+    const ctrl = td.querySelector('input, select, textarea');
+    if (ctrl && ctrl.value !== undefined) return (ctrl.value ?? '').trim();
+    return (td.textContent || '').trim();
+  },
+
+  // 🟢 v229.95：判断「单个单元格值(小写原文)」是否通过某列筛选条件 —— 与 _applyTableSortAndFilter 完全同语义：
+  //   · excluded：空值按展示名「(空)」参与匹配，命中即不通过；
+  //   · kw：小写原文 includes 命中才算通过。
+  //   供筛选弹窗做「分面候选值」复用，避免两处语义漂移。
+  _valuePassesFilter(rawLower, fs) {
+    if (!fs) return true;
+    const excluded = Array.isArray(fs.excluded) ? fs.excluded
+                    : (Array.isArray(fs.unchecked) ? fs.unchecked : []); // 旧格式兼容
+    if (excluded.length > 0) {
+      const set = new Set(excluded.map(v => String(v).toLowerCase()));
+      const val = rawLower === '' ? '(空)' : rawLower;
+      if (set.has(val)) return false;
+    }
+    const kw = (typeof fs === 'string') ? fs : (fs && fs.kw) || '';
+    if (kw) {
+      const k = String(kw).toLowerCase();
+      if (!rawLower.includes(k)) return false;
+    }
+    return true;
+  },
+
+  // 🟢 v229.95：分面筛选 —— 打开某列(colIdx)筛选弹窗时，候选值只从「通过其它所有列当前筛选」的行里取，
+  //   使弹窗随当前筛选结果收窄（如：筛了 月均入库=0 后，分类弹窗只剩「未使用类」这一项）。
+  //   getCell(col) 返回该行第 col 列单元格原文（DOM 路径用 _cellValue，虚拟路径用 _vtTextRows 缓存值）。
+  //   当前列自身(colIdx)的筛选不参与，保证用户仍能在「已筛集合」内切换该列取值、以及能看到全部可选值。
+  _rowPassesOtherFilters(getCell, filters, selfCol) {
+    if (!filters) return true;
+    for (const ci of Object.keys(filters)) {
+      const col = parseInt(ci, 10);
+      if (col === selfCol) continue;
+      const fs = filters[ci];
+      if (!fs) continue;
+      const raw = String(getCell(col) ?? '').toLowerCase();
+      if (!this._valuePassesFilter(raw, fs)) return false;
+    }
+    return true;
+  },
+
   _collectColumnValues(rows, colIdx) {
     const valueMap = new Map();
     rows.forEach(tr => {
       const td = tr.children[colIdx];
-      const rawVal = td ? (td.textContent || '').trim() : '';
+      const rawVal = this._cellValue(td);
       const displayVal = rawVal === '' ? '(空)' : rawVal;
       valueMap.set(displayVal, (valueMap.get(displayVal) || 0) + 1);
     });
@@ -1085,6 +1910,54 @@ const TableUtils = {
       return a[0].localeCompare(b[0], 'zh');
     });
     return { valueMap, sortedValues };
+  },
+
+  // 🟢 v229.90：virtualTable 模式下 tbody 仅渲染视口附近的行（含 vt-spacer 撑开行），
+  //   直接读 DOM 会漏掉绝大多数数据。改为从完整数据集 table._vtItems 提取列值，
+  //   保证「选择每页全部」后筛选弹窗能列出该列全部数据。懒构建并缓存，仅首次打开弹窗时计算。
+  // 🟢 v229.95：候选值改为「分面」——只取通过其它列当前筛选的行（currentFilters，排除当前列 colIdx），
+  //   使弹窗随当前筛选结果收窄（修：筛了 月均入库=0 后，分类弹窗仍列全部分类）。
+  _collectColumnValuesFromItems(table, colIdx, currentFilters) {
+    if (!Array.isArray(table._vtTextRows)) {
+      const items = table._vtItems || [];
+      const rowHtml = table._vtRowHtml;
+      // 🟢 v229.98（AUDIT-229-98-14）：模块手写 innerHTML 的表格没有行渲染器，
+      //   退化用它提供的取值器 _vtValueAt(item, colIdx) 直接取数据，候选值同样能覆盖全部分页。
+      const valueAt = typeof table._vtValueAt === 'function' ? table._vtValueAt : null;
+      table._vtTextRows = items.map((it, rowIdx) => {
+        if (typeof rowHtml === 'function') {
+          const tmp = document.createElement('tbody');
+          tmp.innerHTML = rowHtml(it, rowIdx);
+          const tr = tmp.querySelector('tr');
+          if (!tr) return [];
+          return Array.from(tr.children).map((td) => this._cellValue(td));
+        }
+        if (valueAt) {
+          const ths = Math.max(table.querySelectorAll('thead th').length, 0);
+          const row = [];
+          for (let c = 0; c < ths; c++) {
+            const v = valueAt(it, c);
+            row.push(v === undefined || v === null ? '' : String(v));
+          }
+          return row;
+        }
+        return [];
+      });
+    }
+    const valueMap = new Map();
+    (table._vtTextRows || []).forEach((row) => {
+      if (!this._rowPassesOtherFilters((c) => row[c], currentFilters, colIdx)) return;
+      const rawVal = (row[colIdx] !== undefined) ? String(row[colIdx]).trim() : '';
+      const displayVal = rawVal === '' ? '(空)' : rawVal;
+      valueMap.set(displayVal, (valueMap.get(displayVal) || 0) + 1);
+    });
+    return Array.from(valueMap.entries()).sort((a, b) => {
+      const na = parseFloat(a[0]), nb = parseFloat(b[0]);
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
+      if (!isNaN(na)) return -1;
+      if (!isNaN(nb)) return 1;
+      return a[0].localeCompare(b[0], 'zh');
+    });
   },
 
   _parseFilterState(currentFilters, colIdx) {
@@ -1364,7 +2237,9 @@ const TableUtils = {
           const td = row.children[c];
           if (!td) return;
           td.classList.add('cell-selected');
-          const val = parseFloat(td.textContent.replace(/[¥,，%]/g, '').trim());
+          // 🟢 v229.91（AUDIT-229-03）：改用取值助手 —— 录入型单元格取 input 的 value，
+          //   否则框选求和会把 🔍 图标当成值、数值恒为 NaN。
+          const val = parseFloat(TableUtils._cellValue(td).replace(/[¥,，%]/g, '').trim());
           if (!isNaN(val)) {
             totalSum += val;
             cells.push({ td, rowIdx: r, colIdx: c, value: val });
@@ -2069,6 +2944,32 @@ const TableUtils = {
   },
 
   /**
+   * 🟢 v230.23（用户报障：切模块/切 tab 时表格列宽「先按内容排一版、再跳成最终宽度」）：
+   * 同步应用列宽到 root 内所有 .data-table —— 在模块 render 的 innerHTML 之后、同一任务内
+   * （浏览器 paint 之前）调用，让首帧即最终列宽，从根上消除二段跳。
+   * 与 initColumnResizers 的区别：只做「列宽应用 + 拖拽手柄」，不做移动端折叠补挂等重活
+   * （那些仍由 app.js 的 MutationObserver rAF 回调兜底，异步到货的表单数据也靠它）。
+   * 幂等：已锁宽的表按当前容器宽度重算（flex 表重分配 / 旧表重施 PC 约束），结果稳定。
+   * @param {HTMLElement} [root] 默认 document
+   */
+  applyColumnWidthsNow(root) {
+    const scope = root || document;
+    if (!scope || typeof scope.querySelectorAll !== 'function') return;
+    const colField = (th) => { const l = th.querySelector('.th-sort-label'); return (l ? l.textContent : th.textContent).trim(); };
+    scope.querySelectorAll('.data-table').forEach(t => {
+      if (!t.querySelector('thead')) return;
+      const key = this._deriveTableKey(t) || null;
+      if (t.dataset.colResize === '1') {
+        // 已初始化过：仅按当前容器宽度重算（不重复锁基线/写偏好）
+        if (this._useFlex(t, key)) this._applyFlexWidths(t, key, colField);
+        else this._applyPcConstraints(t, key);
+        return;
+      }
+      this.initColumnResize(t, { tableKey: key, getColField: colField });
+    });
+  },
+
+  /**
    * 🟢 v113：推导表格的 tableKey（用于列宽/对齐记忆）
    * 优先级：表格自身 data-table-key → 最近的 [data-table-key] 祖先 → 最近带 id 容器（去后缀）
    * @param {HTMLElement} table
@@ -2110,7 +3011,9 @@ const TableUtils = {
       const containerId = (p && p.id) ? p.id : null;
       if (!containerId) return; // 没容器 id 就跳过（避免误初始化 body 内任何 .data-table）
       try {
-        this.initSortableHeaders(containerId, { tableKey });
+        // 🟢 v229.98（AUDIT-229-98-12）：把【这张表】本身传进去。此前只传容器 id，
+        //   initSortableHeaders 恒取容器内第一张表 → 多表容器里第二张及以后从未被真正绑定。
+        this.initSortableHeaders(containerId, { tableKey, table });
         table.dataset.sortableInitialized = '1';
       } catch (e) { /* 容器内可能没有 .data-table */ }
     });
@@ -2224,6 +3127,31 @@ const TableUtils = {
     `;
     // 🟢 v228.73：渲染后调度移动端表格高度实测适配（含一次性 resize/orientation 监听）
     this._ensureMobileFit();
+    // 🟢 v230.24（全模块卡顿走查发现）：翻页 / 改每页条数走「模块 renderTable 重建表格 DOM」路径，
+    //   此前列宽只靠 MutationObserver 的 rAF 回调兜底（晚一帧）→ 用户看到「先按内容宽渲染、
+    //   再跳成最终宽」的二段跳（实测 stock/inbound/pricing/lowTurnover/orderTrack 跳 30-120px，
+    //   与用户报障的查询/库存预警同类）。所有模块均为「先写表格 DOM、再调本方法」时序，
+    //   故在此统一收口：render 已同步完成、paint 尚未发生，此刻把列宽应用到位，首帧即最终宽。
+    //   与 App.go 的 applyColumnWidthsNow 收口同思路；query/inventoryAlert 模块内双保险保留。
+    if (typeof this.applyColumnWidthsNow === 'function') {
+      try {
+        const pgEl = document.getElementById(containerId);
+        let scope = pgEl && pgEl.parentElement ? pgEl.parentElement : null;
+        if (!scope || !scope.querySelector('.data-table')) scope = document.getElementById('contentArea');
+        this.applyColumnWidthsNow(scope);
+      } catch (e) { /* 列宽应用失败不影响分页渲染 */ }
+    }
+    // 🟢 v230.26（用户报障：下拉框文字「抖一下再居中」）：分页栏的「每页条数」select 也是
+    //   原生 → SearchSelect 异步增强（MutationObserver + 120ms），翻页重建分页栏时同样抖动。
+    //   此处同步增强，与列宽收口同址；App.go 收口覆盖模块切换首屏，本处覆盖翻页/改条数路径。
+    //   注意 scope 要取分页栏容器自身（renderPagination 把 select 写进 containerId 的
+    //   innerHTML），而非其 parentElement——后者不含分页栏 select，会扫空。
+    if (typeof window.autoEnhanceSelects === 'function') {
+      try {
+        const pgEl2 = document.getElementById(containerId);
+        window.autoEnhanceSelects(pgEl2 || document.getElementById('contentArea') || document);
+      } catch (e) { /* 增强失败不影响分页渲染 */ }
+    }
   },
 
   // ==========================================================================
@@ -2275,7 +3203,7 @@ const TableUtils = {
     try {
       document.querySelectorAll(sel).forEach(w => {
         let flag = '';
-        try { if (w.scrollWidth - w.clientWidth > 4) flag = '1'; } catch (e) {}
+        try { if (w.scrollWidth - w.clientWidth > 4) flag = '1'; } catch (e) { console.warn('[js/table-utils.js:3136] 异常(已忽略):', e); }
         if ((w.dataset.hscroll || '') !== flag) w.dataset.hscroll = flag;
       });
     } catch (e) { /* 防御：检测失败不影响其它逻辑 */ }
@@ -2440,7 +3368,32 @@ const TableUtils = {
     return (rows || []).filter(r => {
       const v = r && r[dateField];
       if (!v) return false;
-      return String(v).slice(0, 10) >= cutoff;
+      // 🟢 v229.98（AUDIT-229-98-31）：日期比较前统一归一化。
+      //   数据里混着 "2026/08/04" 这种斜杠写法时，直接字符串比较会失准 ——
+      //   '/' (0x2F) > '-' (0x2D)，于是很旧的斜杠日期反而被判成"大于 cutoff"而保留下来。
+      //   取前 10 位并把 "/" 换成 "-"，与 filterByDateRange 同口径。
+      const day = String(v).slice(0, 10).replace(/\//g, '-');
+      return day >= cutoff;
+    });
+  },
+
+  /**
+   * 🟢 v229.96：按日期区间过滤（含两端端点；from / to 为空表示该端不限制）
+   *  - 与 filterRecent3M 同源语义：无日期值的行不通过
+   *  - 日期取前 10 位参与比较，并把 "/" 归一化为 "-"，
+   *    兼容 "2026-08-04" / "2026-08-04 00:00:00" / "2026/08/04" 三种写法
+   *  - 供存货档案详情页「日期区间」控件复用（控制入库记录/关联订单/出库记录三表）
+   */
+  filterByDateRange(rows, dateField, from, to) {
+    const f = (from || '').slice(0, 10);
+    const t = (to || '').slice(0, 10);
+    return (rows || []).filter(r => {
+      const v = r && r[dateField];
+      if (!v) return false;
+      const d = String(v).slice(0, 10).replace(/\//g, '-');
+      if (f && d < f) return false;
+      if (t && d > t) return false;
+      return true;
     });
   },
 
@@ -2517,6 +3470,9 @@ const TableUtils = {
       area.innerHTML =
         `<div class="${wrapperClass}"><table class="${tableClass}" ${tableAttrs}>${colgroup}` +
         `<thead>${thead}</thead><tbody>${items.map(rowHtml).join('')}</tbody></table></div>`;
+      // 🟢 v229.90：挂完整数据集，供筛选弹窗取列值（小表 DOM 已全量，二者结果一致）
+      const _t = area.querySelector('.data-table');
+      if (_t) { _t._vtItems = items; _t._vtRowHtml = rowHtml; _t._vtTextRows = undefined; }
       return false;
     }
 
@@ -2527,8 +3483,16 @@ const TableUtils = {
     const wrap = document.getElementById(wrapId);
     if (!wrap) return false;
     const body = wrap.querySelector('.vt-body');
+    // 🟢 v229.90：挂完整数据集，供筛选弹窗取列值（虚拟模式 tbody 仅渲染视口行）
+    const _vtTable = wrap.querySelector('table');
+    if (_vtTable) { _vtTable._vtItems = items; _vtTable._vtRowHtml = rowHtml; _vtTable._vtTextRows = undefined; }
 
-    let rowH = 0, raf = null, destroyed = false;
+    // 🟢 v229.94：变高虚拟滚动——单元格换行后各行高度可能 1~2 行不等，
+    //   不再假设「统一行高」，改为逐行实测高度（heights[]），未测得行用 estRowH 估算。
+    const heights = new Array(total).fill(0); // 实测行高，0=尚未测得
+    let estRowH = 0, raf = null, destroyed = false;
+    const hAt = (i) => heights[i] || estRowH || 38;
+    const sumH = (from, to) => { let s = 0; for (let i = from; i < to; i++) s += hAt(i); return s; };
     // 查找真正滚动的容器：从 wrap 自身开始（.table-wrapper 常常就是它），再逐级向上
     function findScroller(el) {
       let n = el;
@@ -2544,11 +3508,21 @@ const TableUtils = {
     const render = () => {
       // 区域已被移除（切换模块等）→ 自动解绑，避免监听泄漏与无效渲染
       if (destroyed || !document.body.contains(wrap)) { cleanup(); return; }
-      if (!rowH) {
+      // 🟢 v229.97（AUDIT-229-97-01）：每帧都读取最新的数据集。
+      //   表头排序/筛选会把结果写回 table._vtItems（行数与顺序都可能变），
+      //   窗口起止行、占位高度必须跟着新总数算，否则会渲染出越界区间或高度不匹配的占位行。
+      const its = (_vtTable && Array.isArray(_vtTable._vtItems)) ? _vtTable._vtItems : items;
+      const tot = its.length;
+      // 筛选后可能一条不剩 —— 明确给空态，避免用户面对一片空白以为功能坏了
+      if (tot === 0) {
+        body.innerHTML = `<tr class="vt-empty"><td colspan="99" style="padding:22px;text-align:center;color:var(--text-secondary,#64748B);">无符合筛选条件的数据</td></tr>`;
+        return;
+      }
+      if (!estRowH) {
         // 首帧先渲染几行，实测真实行高（避免硬编码与实际样式不符导致滚动漂移）
-        body.innerHTML = items.slice(0, 5).map(rowHtml).join('');
+        body.innerHTML = its.slice(0, 5).map(rowHtml).join('');
         const first = body.querySelector('tr');
-        rowH = (first && first.offsetHeight) || 38;
+        estRowH = (first && first.offsetHeight) || 38;
       }
       // ⚠️ 滚动容器通常是 .table-wrapper 自身（max-height:640px; overflow-y:auto）。
       //    此时容器位置不动、是内部表格在动，所以必须用「表格相对容器视口」的偏移来算起始行，
@@ -2558,15 +3532,28 @@ const TableUtils = {
       const scTop = sc ? sc.getBoundingClientRect().top : 0;
       const vh = sc ? sc.clientHeight : (window.innerHeight || document.documentElement.clientHeight || 800);
       const buffer = 5;
-      let s = Math.floor((-(table.getBoundingClientRect().top - scTop)) / rowH) - buffer;
-      if (s < 0) s = 0;
-      const visible = Math.ceil(vh / rowH) + buffer * 2;
-      if (s > total - visible) s = Math.max(0, total - visible);
-      const e = Math.min(total, s + visible);
+      // 由滚动偏移 y 累加「逐行实测/估算高度」定位首个可见行（支持变高）
+      const y = -(table.getBoundingClientRect().top - scTop);
+      let s = 0, acc = 0;
+      while (s < tot && acc + hAt(s) <= y) { acc += hAt(s); s++; }
+      if (s > buffer) s -= buffer; else s = 0;
+      const visible = Math.ceil(vh / (estRowH || 38)) + buffer * 2;
+      if (s > tot - visible) s = Math.max(0, tot - visible);
+      const e = Math.min(tot, s + visible);
+      const topH = sumH(0, s);
+      const botH = sumH(e, tot);
       body.innerHTML =
-        (s > 0 ? `<tr class="vt-spacer" style="height:${s * rowH}px">${cell}</tr>` : '') +
-        items.slice(s, e).map(rowHtml).join('') +
-        (e < total ? `<tr class="vt-spacer" style="height:${(total - e) * rowH}px">${cell}</tr>` : '');
+        (s > 0 ? `<tr class="vt-spacer" style="height:${topH}px">${cell}</tr>` : '') +
+        its.slice(s, e).map(rowHtml).join('') +
+        (e < tot ? `<tr class="vt-spacer" style="height:${botH}px">${cell}</tr>` : '');
+      // 渲染后回填本窗口实际行高，供后续滚动（上方未测行仍用 estRowH 估算，测得后自动校正）
+      const rowsEls = body.querySelectorAll('tr:not(.vt-spacer)');
+      for (let k = 0; k < rowsEls.length; k++) {
+        const idx = s + k;
+        if (idx < tot) heights[idx] = rowsEls[k].offsetHeight;
+      }
+      // 🟢 v230.0a（AUDIT-230-0a）：滚动/筛选/排序后按数据代际刷新底部汇总行（仅代际变化才重算）
+      try { TableUtils._refreshSummary(_vtTable); } catch (e) { console.warn('[js/table-utils.js:3486] 异常(已忽略):', e); }
     };
 
     function cleanup() {
@@ -2584,6 +3571,11 @@ const TableUtils = {
     // ⚠️ 本应用 html,body 为 overflow:hidden，页面本身不滚动，真正滚动的是内层容器。
     //    scroll 事件不冒泡，但在【捕获阶段】可被祖先收到 —— 因此在 document 上以 capture 监听，
     //    任何内层容器（无论初始化时是否已可滚动）的滚动都能捕获到，避免窗口停在前几行不重算。
+    // 🟢 v229.97（AUDIT-229-97-01）：把「窗口重渲染」与「原始全量数据」挂到表格上，
+    //   供 TableUtils._applyVirtualSortAndFilter 在表头排序/筛选时下沉处理并刷新视图。
+    //   _vtRawItems 是未经排序/筛选的原始顺序副本，每次 virtualTable 重建都会重置，
+    //   保证"取消筛选/恢复无排序"能回到原始数据集，不会出现筛选结果叠加后数据越筛越少。
+    if (_vtTable) { _vtTable._vtRender = render; _vtTable._vtRawItems = items.slice(); _vtTable._vtSummaryGen = (_vtTable._vtSummaryGen || 0) + 1; _vtTable._vtTextRows = undefined; }
     render();
     document.addEventListener('scroll', onScroll, true);
     window.addEventListener('scroll', onScroll, { passive: true }); // 兜底：整页滚动场景
@@ -2627,7 +3619,7 @@ const TableUtils = {
         WBModal.alert('导出失败：' + (err && err.message ? err.message : '组件加载失败，请检查网络后重试'));
       } catch (e) { /* 弹窗不可用则仅记日志 */ }
     } finally {
-      if (needHide) { try { if (typeof hideLoading === 'function') hideLoading(); } catch (e) {} }
+      if (needHide) { try { if (typeof hideLoading === 'function') hideLoading(); } catch (e) { console.warn('[js/table-utils.js:3552] 异常(已忽略):', e); } }
     }
   }
 };

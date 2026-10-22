@@ -315,7 +315,7 @@
     drawNumber(displayed);
 
     self.postMessage({ type: 'disp', value: displayed });
-    if (dbgChan) { try { dbgChan.postMessage({ t: now, disp: displayed }); } catch (e) {} }
+    if (dbgChan) { try { dbgChan.postMessage({ t: now, disp: displayed }); } catch (e) { console.warn('[js/boot-canvas-worker.js:318] 异常(已忽略):', e); } }
 
     } catch (e) {
       // 单帧绘制异常（偶发几何/字体问题）不中断动画循环，下一帧继续
@@ -363,7 +363,7 @@
       tick(performance.now());
     } catch (err) {
       // 初始化失败（极少见：OffscreenCanvas 2d 上下文不可用等）：回传 error，主线程直接淡出，避免空盘卡死
-      try { self.postMessage({ type: 'error' }); } catch (e2) {}
+      try { self.postMessage({ type: 'error' }); } catch (e2) { console.warn('[js/boot-canvas-worker.js:366] 异常(已忽略):', e2); }
     }
   }
 

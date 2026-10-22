@@ -152,7 +152,11 @@
         tableEl.querySelectorAll('tbody tr').forEach(tr => {
           const td = tr.children[idx];
           if (!td) return;
-          const txt = (td.textContent || '').trim();
+          // 🟢 v229.91（AUDIT-229-04）：统一走取值助手 —— 录入型单元格取 input 的 value。
+          //   本文件可能先于 table-utils 加载，故加可用性防御，不可用时回退原行为。
+          const txt = (typeof TableUtils !== 'undefined' && TableUtils._cellValue)
+            ? TableUtils._cellValue(td)
+            : (td.textContent || '').trim();
           const hit = rule.op === 'equals' ? txt === rule.value : txt.includes(rule.value);
           if (hit) tintCell(td, colors, dark);
         });

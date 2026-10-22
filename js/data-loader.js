@@ -72,9 +72,17 @@ const DataLoader = {
     if (!Array.isArray(rows)) return 'null';
     const n = rows.length;
     if (n === 0) return '0';
+    // 🟢 v229.98（AUDIT-229-98-36）：由「只采首/中/尾 3 行」改为【等距多点采样】（上限 32 点）。
+    //   原实现下，改动 2.4 万行表里除首/中/尾以外的任意一行（例如第 5000 行）指纹完全不变 →
+    //   该表被判为「未脏」而不上传，且成功后还会把当前指纹记为已推送，导致云端长期陈旧。
+    //   现在仍是 O(1) 采样（不遍历全表），但中部改动能被捕捉到；末行始终采样。
     const sample = (i) => { try { return JSON.stringify(rows[i]); } catch (e) { return String(rows[i]); } };
-    const mid = Math.floor(n / 2);
-    return n + '|' + sample(0) + '|' + sample(mid) + '|' + sample(n - 1);
+    const MAX_PTS = 32;
+    const step = Math.max(1, Math.ceil(n / MAX_PTS));
+    let fp = String(n);
+    for (let i = 0; i < n; i += step) fp += '|' + sample(i);
+    if ((n - 1) % step !== 0) fp += '|' + sample(n - 1);
+    return fp;
   },
   // 🟢 v229.06（Phase 3）：逐表「上次成功推送指纹」读写（判断哪些表相对云端已变化，仅传脏表）
   _lastPushedFp(name) {
@@ -284,7 +292,7 @@ const DataLoader = {
         }
         if (!_cloudUsable) {
           console.warn('[data-loader] 云端桶不可用，跳过整个云端阶段，直接本地兜底（快速启动）');
-          try { SyncManager._bucketMissing = true; } catch (e) {}
+          try { SyncManager._bucketMissing = true; } catch (e) { console.warn('[js/data-loader.js:295] 异常(已忽略):', e); }
         }
       } catch (e) { _cloudUsable = true; /* 探测本身异常按可用处理，走原有超时兜底 */ }
     }
@@ -598,6 +606,39 @@ const DataLoader = {
     }
   },
 
+  // 🟢 v230.20（AUDIT-230-01）：云端还原数值规整白名单。
+  //   背景：bundle 经 JSON 序列化后数值列可能以字符串形态回落（"1,234.5"/"12"），
+  //   直接 bulkAdd 写入会让排序、formatNum、汇总(sumMoney/sumQty) 拿到非数字。
+  //   语义：仅规整「已知数值字段」且「当前为非空字符串」的值；number/缺失/纯文本
+  //   一律保持原状——避免把 "0001" 这类前导零编码或文本列误转成数字。
+  NUMERIC_FIELDS_BY_TABLE: {
+    suppliers: ['签订次数','合同年限','年度合同剩余时间','年度合同金额','年度已供入库金额','年度已供入库金额占比','未入库金额'],
+    orders: ['序号','数量','未入库量','累计入库数量','原币含税单价','原币价税合计','未入总金额'],
+    inbound: ['序号','数量','累计出库数量','原币含税单价','原币价税合计','原币金额','原币税额','税率'],
+    stock: ['现存数量'],
+    pricing: ['序号','含税单价','税率','单价'],
+    lowTurnover: ['现存数量','暂无法使用量'],
+    breach: ['单价','数量','延迟天数','扣款金额','扣款比例','违约次数'],
+  },
+  _normalizeBundleRows(table, rows) {
+    const fields = this.NUMERIC_FIELDS_BY_TABLE[table];
+    if (!fields || !Array.isArray(rows)) return rows;
+    return rows.map((r) => {
+      if (!r || typeof r !== 'object') return r;
+      for (const f of fields) {
+        const v = r[f];
+        if (typeof v === 'string') {
+          const s = v.replace(/,/g, '').trim();
+          if (s !== '') {
+            const n = parseFloat(s);
+            if (!isNaN(n)) r[f] = n;
+          }
+        }
+      }
+      return r;
+    });
+  },
+
   // 从云端 bundle 还原数据（清空后批量写入），使分享链接自动拿到最新数据
   async loadBundleFromCloud(bundle) {
     if (!bundle || !bundle.tables) return false;
@@ -624,7 +665,9 @@ const DataLoader = {
       for (const name of incomingNames) { if (db[name]) await db[name].clear(); }
       await db.meta.delete('dataImported');
       for (const name of incomingNames) {
-        const rows = tables[name];
+        // 🟢 v230.20（AUDIT-230-01）：写入前对已知数值字段做 parseNum 规整，
+        //    与 Excel 导入路径（loadInbound 等）的清洗口径对齐。
+        const rows = this._normalizeBundleRows(name, tables[name]);
         if (rows.length) {
           try {
             await this.bulkAddSafe(db[name], rows);
@@ -636,6 +679,13 @@ const DataLoader = {
         }
       }
       await DataStore.markDataImported();
+
+    // 🟢 v229.98（AUDIT-229-98-34）：全部表导入完成后再补供应商「已入库金额」（此时入库表已有数据）
+    if (this._pendingSupplierBackfill) {
+      this._pendingSupplierBackfill = false;
+      try { await this._backfillSupplierInboundAmount(); }
+      catch (e) { console.warn('[data-loader] 供应商已入库金额补全失败:', e); }
+    }
     });
     // 🟢 v229.05：库存预警(inventoryAlerts)已不进云端，接收端需本地用源表重算，
     //    否则订货核对 autoFill 会读到旧/空的派生表。重建为幂等操作，失败仅告警不阻断同步。
@@ -968,6 +1018,19 @@ const DataLoader = {
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) return false;
     try {
       const rows = await db.tempOutbound.toArray();
+      // 🟢 v229.98（AUDIT-229-98-35）：临时出库改走 settings 包（与还原路径同源，见 db.js temp_outbound_list）。
+      //   旧实现先 pullData() 把全部表（≈15MB）下载下来，再把整包推回去：既绕过乐观锁，
+      //   又写了一份「还原路径永远不读」的 data/tempOutbound.json（WORK_TABLES 不含它）。
+      //   settings 通道成功就直接返回；失败才回退到原来的整包推送，保证不比原来更差。
+      if (typeof DataStore !== 'undefined' && typeof DataStore.syncTemporaryOutboundToSettings === 'function') {
+        try {
+          const okSettings = await DataStore.syncTemporaryOutboundToSettings();
+          if (okSettings) {
+            console.log(`✅ [临时出库] 已同步到云端 settings 包（${rows.length} 条）`);
+            return true;
+          }
+        } catch (e) { console.warn('[临时出库] settings 通道同步失败，回退整包推送:', e && e.message); }
+      }
       const existing = await SyncManager.pullData().catch(() => null);
       if (existing && existing.tables) {
         const bundle = {
@@ -1033,7 +1096,7 @@ const DataLoader = {
       if (bundle && bundle.tables && this._isBundleComplete(bundle)) {
         await this.loadBundleFromCloud(bundle);
         await DataStore.markDataImported();
-        try { await db.meta.delete('builtinSeeded'); } catch (e) {}  // 🟢 v228.22 B-3：用户显式同步云端 → 非示例数据
+        try { await db.meta.delete('builtinSeeded'); } catch (e) { console.warn('[js/data-loader.js:1099] 异常(已忽略):', e); }  // 🟢 v228.22 B-3：用户显式同步云端 → 非示例数据
         hideLoading();
         console.log('[data-loader] 已从云端同步工作数据');
         return true;
@@ -1044,7 +1107,7 @@ const DataLoader = {
           await db.transaction('rw', this.TABLES.concat(['meta']), async () => {
             await DataStore.clearWorkTables();   // 🔵 v227.97：仅清工作表，保留设置包(outbound)
             await this.seedFromBase(baseBundle);
-            try { await db.meta.delete('builtinSeeded'); } catch (e) {}  // 🟢 v228.22 B-3
+            try { await db.meta.delete('builtinSeeded'); } catch (e) { console.warn('[js/data-loader.js:1110] 异常(已忽略):', e); }  // 🟢 v228.22 B-3
           });
         hideLoading();
         console.log('[data-loader] 已用云端基准数据垫底');
@@ -1067,7 +1130,7 @@ const DataLoader = {
     if (this._importing) { console.warn('[data-loader] 已有导入进行中，忽略重复调用'); return false; }
     this._importing = true;
     DataStore.invalidateAll();   // 🟢 v227.52 P0：导入前清空会话表缓存，杜绝"导入中读取到旧/半截快照"的边缘情况
-    try { await db.meta.delete('builtinSeeded'); } catch (e) {}  // 🟢 v228.22 B-3：真实导入即清除示例标记
+    try { await db.meta.delete('builtinSeeded'); } catch (e) { console.warn('[js/data-loader.js:1133] 异常(已忽略):', e); }  // 🟢 v228.22 B-3：真实导入即清除示例标记
     try {
       // 🔴 失效存货编码缓存（M3）：重新导入后，旧映射已失效，否则新数据下编码错乱
       this._stockNameSpecCodeMap = null;
@@ -1201,7 +1264,7 @@ const DataLoader = {
       const finish = (fn) => {
         if (settled) return;
         settled = true;
-        try { worker.terminate(); } catch (_) {}
+        try { worker.terminate(); } catch (_) { console.warn('[js/data-loader.js:1267] 异常(已忽略):', _); }
         fn();
       };
       worker.onmessage = (e) => {
@@ -1837,6 +1900,56 @@ const DataLoader = {
   },
 
   // 1. 供应商管理 (headerRow=1) — 已入库金额多源匹配
+  /**
+   * 🟢 v229.98（AUDIT-229-98-34）：供应商「年度已供入库金额」事后补全。
+   *   必须在【入库表导入完成之后】执行（loadSuppliers 跑在入库表 clear() 之后、数据尚未写入，
+   *   在那里读 db.inbound 只能拿到空数组）。按供应商汇总入库金额，并按合同年度过滤避免跨年计入。
+   */
+  async _backfillSupplierInboundAmount() {
+    if (typeof db === 'undefined' || !db.suppliers || !db.inbound) return 0;
+    const suppliers = await db.suppliers.toArray();
+    const need = suppliers.filter(s => !s.年度已供入库金额 || s.年度已供入库金额 === 0);
+    if (need.length === 0) return 0;
+    const inboundRows = await db.inbound.toArray();
+    if (inboundRows.length === 0) return 0;
+    const yearBySup = new Map();
+    suppliers.forEach(s => {
+      if (!s.供应商) return;
+      const y = s.年度合同到期时间 ? new Date(String(s.年度合同到期时间).slice(0, 10) + 'T00:00:00').getFullYear() : NaN;
+      if (!isNaN(y)) yearBySup.set(s.供应商, y);
+    });
+    // 🟢 v230.20（AUDIT-230-03）：分组收集后走 TableUtils.sumMoney 定点汇总
+    //   （以「分」为整数单位累加），替代 (map.get||0)+parseFloat 逐行浮点累加，
+    //   规避 0.1+0.2 类尾差在金额列/占比列的累积漂移。
+    const rowsBySup = new Map();
+    inboundRows.forEach(row => {
+      const sup = row.供应商;
+      if (!sup) return;
+      const yr = row.入库日期 ? new Date(String(row.入库日期).slice(0, 10) + 'T00:00:00').getFullYear() : NaN;
+      const targetYr = yearBySup.get(sup);
+      if (targetYr && !isNaN(yr) && yr !== targetYr) return;
+      if (!rowsBySup.has(sup)) rowsBySup.set(sup, []);
+      rowsBySup.get(sup).push(row);
+    });
+    const map = new Map();
+    rowsBySup.forEach((rowsOfSup, sup) => {
+      map.set(sup, TableUtils.sumMoney(rowsOfSup, r => r.原币价税合计));
+    });
+    let fixed = 0;
+    const updated = suppliers.map(s => {
+      if (map.has(s.供应商) && (!s.年度已供入库金额 || s.年度已供入库金额 === 0)) {
+        s.年度已供入库金额 = map.get(s.供应商);
+        // 🟢 v230.20（AUDIT-230-03）：占比同样定点规整（6 位），杜绝除法的浮点尾巴
+        if (s.年度合同金额 > 0) s.年度已供入库金额占比 = TableUtils.roundQty(s.年度已供入库金额 / s.年度合同金额, 6);
+        fixed++;
+      }
+      return s;
+    });
+    if (fixed > 0) await db.suppliers.bulkPut(updated);
+    console.log(`[data-loader] 导入后从入库表补全 ${fixed}/${suppliers.length} 条供应商已入库金额`);
+    return fixed;
+  },
+
   async loadSuppliers(workbook) {
     showLoading('正在导入供应商数据...', { variant:'fluid' });
     const rows = this.parseSheet(workbook, '供应商管理', 1);
@@ -1875,9 +1988,14 @@ const DataLoader = {
     })).filter(r => r.供应商).map(r => this._cleanRecord(r));
 
     // 若已入库金额全为0，从入库表按供应商汇总补全
+    // 🟢 v229.98（AUDIT-229-98-34）：这里不再立刻补全，改为置标记、等全部表导入完再补（见 _backfillSupplierInboundAmount）。
+    //   原因：本函数是导入 tasks 的【第一项】，而事务开头已把入库表 clear()，此时读 db.inbound 必然是空数组，
+    //   补全恒为 0 条（日志里永远显示"补全 0/N"）——该功能实际从未生效过。
     const allZeroInbound = clean.length > 0 && clean.every(s => !s.年度已供入库金额 || s.年度已供入库金额 === 0);
     if (allZeroInbound) {
-      console.log('[data-loader] 供应商已入库金额全0，尝试从入库表汇总补全...');
+      this._pendingSupplierBackfill = true;
+    }
+    if (false) {
       try {
         const inboundRows = await db.inbound.toArray();
         const supplierInboundMap = new Map();
@@ -1961,7 +2079,8 @@ const DataLoader = {
       原币金额: this.parseNum(r['原币金额']),
       原币税额: this.parseNum(r['原币税额']),
       税率: this.parseNum(r['税率']),
-      实际到货日期: this.recoverExcelDate(r['实际到货日期'])
+      实际到货日期: this.recoverExcelDate(r['实际到货日期']),
+      表体备注: (r['表体备注'] ?? '').toString().trim()
     })).filter(r => r.入库单号 || r.存货名称).map(r => this._cleanRecord(r));
 
     await this.bulkAddSafe(db.inbound, clean);

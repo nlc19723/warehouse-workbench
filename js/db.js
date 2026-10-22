@@ -452,6 +452,9 @@ const DataStore = {
 
   // ===== 订单列表 =====
   // 🟢 v227.52 P0：走 getRows() 缓存 + 内存分页（slice），消除每页两次全表扫描
+  // 🟢 v229.98（AUDIT-229-98-33）：关键词搜索一律先 String() 再取子串。
+  //   导入侧这些字段未强制转字符串（Excel 里纯数字供应商名/存货名称会以 number 入库），
+  //   直接调 .replace()/.toLowerCase() 会抛 TypeError，整个查询 reject → 列表空白、用户不知所以。
   async getOrders(filter = {}, page = 1, pageSize = 50) {
     let list = await this.getRows('orders');
     if (filter.供应商) list = list.filter(o => o.供应商 === filter.供应商);
@@ -460,9 +463,9 @@ const DataStore = {
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
       list = list.filter(o => (o.订单编号 && String(o.订单编号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                              (o.供应商 && o.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                              (o.存货名称 && o.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                              (o.项目名称 && o.项目名称.replace(/\s+/g, '').toLowerCase().includes(kw)));
+                              (o.供应商 && String(o.供应商).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                              (o.存货名称 && String(o.存货名称).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                              (o.项目名称 && String(o.项目名称).replace(/\s+/g, '').toLowerCase().includes(kw)));
     }
     if (filter.startDate || filter.endDate) {
       list = list.filter(o => {
@@ -499,8 +502,8 @@ const DataStore = {
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
       list = list.filter(i => (i.入库单号 && String(i.入库单号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                              (i.供应商 && i.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                              (i.存货名称 && i.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw)));
+                              (i.供应商 && String(i.供应商).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                              (i.存货名称 && String(i.存货名称).replace(/\s+/g, '').toLowerCase().includes(kw)));
     }
     if (filter.startDate || filter.endDate) {
       list = list.filter(i => {
@@ -604,10 +607,10 @@ const DataStore = {
     if (filter.项目名称) list = list.filter(o => o.项目名称 === filter.项目名称);
     if (filter.keyword) {
       const kw = filter.keyword.toLowerCase();
-      list = list.filter(o => (o.出库单号 && o.出库单号.toLowerCase().includes(kw)) ||
-                              (o.存货编码 && o.存货编码.toLowerCase().includes(kw)) ||
-                              (o.存货名称 && o.存货名称.toLowerCase().includes(kw)) ||
-                              (o.项目名称 && o.项目名称.toLowerCase().includes(kw)));
+      list = list.filter(o => (o.出库单号 && String(o.出库单号).toLowerCase().includes(kw)) ||
+                              (o.存货编码 && String(o.存货编码).toLowerCase().includes(kw)) ||
+                              (o.存货名称 && String(o.存货名称).toLowerCase().includes(kw)) ||
+                              (o.项目名称 && String(o.项目名称).toLowerCase().includes(kw)));
     }
     if (filter.startDate || filter.endDate) {
       list = list.filter(o => {
@@ -783,6 +786,9 @@ const DataStore = {
     const normCode = (codeMap && nameKey) ? codeMap.get(nameKey) : null;
     const codes = new Set([code, normCode].filter(Boolean).map(String));
     try {
+      // 🟢 v230.32：主路（编码/名称+规格 精确命中）取消 .limit(31)+slice(30) 截断——
+      //   旧写法按表内 id 序截断，不保证最新：某存货 44 条订单中最新一批会落在被截掉的
+      //   14 条里，档案页无论怎么调日期区间都看不到。filter 本就全表扫描，去 limit 零额外成本。
       const rows = await db.orders.filter(o => {
         const on = o.存货编号 != null ? String(o.存货编号).trim() : '';
         if (on && codes.has(on)) return true;
@@ -792,15 +798,18 @@ const DataStore = {
           if (oname && (oname + '|' + ospec).replace(/\s+/g, '') === nameKey) return true;
         }
         return false;
-      }).limit(31).toArray();
+      }).toArray();
       // 🟢 v201 + O8：编码/规格双路均未命中时，按「存货名称」精确兜底（编码或规格缺失场景仍能关联）
       //   🐛 修复：兜底**必须要求订单的「存货编号」为空**——否则会把"有编号 + 名称相同但规格不同"
       //         的不同物料（如同名不同规格的"三通 100" / "三通 80"）误关到本档案。
       //   修复后兜底仅在"订单完全缺编号"场景生效，主路已经覆盖了"有编号+有名称有规格"的关联。
+      //   兜底为名称软匹配、量不可控，保留 30 条上限。
       let matched = rows;
+      let fallback = false;
       if (matched.length === 0 && name) {
         const n = name.replace(/\s+/g, '');
         if (n) {
+          fallback = true;
           matched = await db.orders.filter(o => {
             const oname = String(o.存货名称 || '').replace(/\s+/g, '');
             const onum  = o.存货编号 == null ? '' : String(o.存货编号).trim();
@@ -809,7 +818,14 @@ const DataStore = {
           }).limit(31).toArray();
         }
       }
-      return matched.slice(0, 30);
+      // 🟢 v230.32：按订单日期倒序返回（无日期排最后），保证最新订单在前且不被 id 序截断；
+      //   兜底路径（软匹配）仍截前 30 条
+      matched.sort((a, b) => {
+        const da = String((a && a.日期) || '').slice(0, 10).replace(/\//g, '-');
+        const db_ = String((b && b.日期) || '').slice(0, 10).replace(/\//g, '-');
+        return db_.localeCompare(da);
+      });
+      return fallback ? matched.slice(0, 30) : matched;
     } catch (e) {
       console.warn('[getOrdersForStock]', e.message);
       return [];
@@ -822,16 +838,16 @@ const DataStore = {
     const kw = keyword.trim().replace(/\s+/g, '').toLowerCase();
 
     const [suppliers, orders, inbound, stock] = await Promise.all([
-      db.suppliers.filter(s => (s.供应商 && s.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                               (s.类型 && s.类型.replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray(),
+      db.suppliers.filter(s => (s.供应商 && String(s.供应商).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                               (s.类型 && String(s.类型).replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray(),
       db.orders.filter(o => (o.订单编号 && String(o.订单编号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                            (o.供应商 && o.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                            (o.存货名称 && o.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray(),
+                            (o.供应商 && String(o.供应商).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                            (o.存货名称 && String(o.存货名称).replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray(),
       db.inbound.filter(i => (i.入库单号 && String(i.入库单号).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                             (i.供应商 && i.供应商.replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                             (i.存货名称 && i.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray(),
+                             (i.供应商 && String(i.供应商).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
+                             (i.存货名称 && String(i.存货名称).replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray(),
       db.stock.filter(s => (s.存货编码 && String(s.存货编码).replace(/\s+/g, '').toLowerCase().includes(kw)) ||
-                           (s.存货名称 && s.存货名称.replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray()
+                           (s.存货名称 && String(s.存货名称).replace(/\s+/g, '').toLowerCase().includes(kw))).limit(10).toArray()
     ]);
 
     return { suppliers, orders, inbound, stock };
@@ -946,7 +962,7 @@ const DataStore = {
 
   // ===== v217 盘点任务分派 / 批次汇总（localStorage 封装，绝不碰 Dexie/DB_VERSION）=====
   _lsGet(key, def) { try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(def)); } catch (e) { return def; } },
-  _lsSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {} },
+  _lsSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) { console.warn('[js/db.js:952] 异常(已忽略):', e); } },
 
   // —— 任务分派 ——
   // 🟢 v225.2 墓碑机制：任务由「管理员设备」产生，靠云端 settings 通道同步到「盘点人设备」。
@@ -1004,7 +1020,7 @@ const DataStore = {
     this._notifyTasksChanged();
     if (typeof SyncManager === 'undefined' || !SyncManager.isOnline) {
       // 🟢 v227.16：离线时入队，联网后由 StocktakeModule._flushCloudQueue 补推（仓库弱网常态）
-      try { this._enqueueCloud('stocktakeTasks', this._tasksRaw()); } catch (e) {}
+      try { this._enqueueCloud('stocktakeTasks', this._tasksRaw()); } catch (e) { console.warn('[js/db.js:1010] 异常(已忽略):', e); }
       return false;
     }
     if (typeof SyncManager.setSetting !== 'function') return false;
@@ -1012,9 +1028,9 @@ const DataStore = {
     //   其他设备刚写入的任务整包抹掉 —— 「这边分派那边却看不到」的相悖状态根源之一。
     //   故先拉一次云端合并到本地，再整包推「并集」，写上去的一定是全量而非本机子集。
     //   pull 不调 push（无递归）；合并以 updatedAt 较新者胜，本机刚写的墓碑不会被云端旧活任务误复活。
-    try { await this.pullStocktakeTasksFromCloud(); } catch (e) {}
+    try { await this.pullStocktakeTasksFromCloud(); } catch (e) { console.warn('[js/db.js:1018] 异常(已忽略):', e); }
     try { await SyncManager.setSetting('stocktakeTasks', this._tasksRaw()); return true; }
-    catch (e) { try { this._enqueueCloud('stocktakeTasks', this._tasksRaw()); } catch (_) {} return false; }
+    catch (e) { try { this._enqueueCloud('stocktakeTasks', this._tasksRaw()); } catch (_) { console.warn('[js/db.js:1020] 异常(已忽略):', _); } return false; }
   },
   // 🟢 v227.16：仓库离线容错 —— 跨设备 key-value 推送本地待推队列（与 StocktakeModule 共用 key）
   _enqueueCloud(key, value) {
@@ -1081,7 +1097,7 @@ const DataStore = {
         if (isNaN(d) || (now - d > TTL)) { delete all[id]; changed = true; }
       });
       if (changed) this._lsSet('wb_stocktake_tasks', all);
-    } catch (e) {}
+    } catch (e) { console.warn('[js/db.js:1087] 异常(已忽略):', e); }
   },
 
   // 🟢 v228.60：移除批次汇总快照的本地存取（getStocktakeBatches / getStocktakeBatch /

@@ -21,8 +21,9 @@ const ClipboardUtils = {
     } catch (e) { /* 落到回退路径 */ }
 
     // 2) 回退：临时 textarea + execCommand('copy')（兼容 PWA 非安全上下文 / 旧 WebView）
+    let ta = null;   // 🟢 v229.98（AUDIT-229-98-07①）：提到 try 外，finally 才能清理它
     try {
-      const ta = document.createElement('textarea');
+      ta = document.createElement('textarea');
       ta.value = str;
       ta.setAttribute('readonly', '');
       ta.style.position = 'fixed';
@@ -34,10 +35,13 @@ const ClipboardUtils = {
       ta.select();
       ta.setSelectionRange(0, ta.value.length);
       const ok = document.execCommand('copy');
-      document.body.removeChild(ta);
       return ok;
     } catch (e) {
       return false;
+    } finally {
+      // 🟢 v229.98（AUDIT-229-98-07①）：execCommand 抛异常时 try 内的 removeChild 不会执行，
+      //   临时 textarea 永久残留在 body 里（不可见但会参与 DOM/选区）。移入 finally 保证一定清理。
+      try { if (ta.parentNode) ta.parentNode.removeChild(ta); } catch (_) { /* 已移除则忽略 */ }
     }
   },
 

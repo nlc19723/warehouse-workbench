@@ -100,7 +100,7 @@ const StocktakeModule = {
     // 🟢 v228.74：进入盘点模块时立即检查管理员的「远程结算」指令（延迟兜底）。
     //   轮询循环已常驻处理；此处额外挂一个非阻塞延迟回调，确保「刚切回就收到指令」也能即时响应。
     //   用 setTimeout 等 _pullRoundClosed（异步、未 await）落地后再读，避免读到旧 roundClosed。
-    setTimeout(() => { try { this._handleRemoteSettleAll(); } catch (e) {} }, 1200);
+    setTimeout(() => { try { this._handleRemoteSettleAll(); } catch (e) { console.warn('[js/stocktake.js:103] 异常(已忽略):', e); } }, 1200);
 
     // 🟢 v228.64（P0-2 修复同步黑洞）：常驻守护提前到「进入模块」即启动。
     //   旧版 _startGlobalSync() 全库唯一启动点在 startQuarter() 末尾（用户点了「🗓️ 季度盘点」之后），
@@ -704,7 +704,7 @@ const StocktakeModule = {
     try { return JSON.parse(localStorage.getItem(this.ACTIVE_QUARTER_KEY) || 'null') || null; } catch (e) { return null; }
   },
   _saveActiveQuarter(aq) {
-    try { localStorage.setItem(this.ACTIVE_QUARTER_KEY, JSON.stringify(aq || {})); } catch (e) {}
+    try { localStorage.setItem(this.ACTIVE_QUARTER_KEY, JSON.stringify(aq || {})); } catch (e) { console.warn('[js/stocktake.js:707] 异常(已忽略):', e); }
     // storage 事件靠同键名广播，供同浏览器跨标签兜底刷新
   },
 
@@ -810,7 +810,7 @@ const StocktakeModule = {
         return this._getActiveQuarter();
       }
       try { await this._setCloud(this.ACTIVE_QUARTER_KEY, entry); }
-      catch (e) { try { this._enqueueCloud(this.ACTIVE_QUARTER_KEY, entry); } catch (e2) {} }
+      catch (e) { try { this._enqueueCloud(this.ACTIVE_QUARTER_KEY, entry); } catch (e2) { console.warn('[js/stocktake.js:813] 异常(已忽略):', e2); } }
     } else {
       // 离线：只写本机，**绝不推云端** —— 否则联网后会把本端批次盖到别人头上
       console.log('[stocktake] 离线开盘 ' + sheetId + '（仅本机，联网后以云端为准）');
@@ -908,7 +908,7 @@ const StocktakeModule = {
     try {
       await this._setCloud(this.ACTIVE_QUARTER_KEY, entry);
     } catch (e) {
-      try { this._enqueueCloud(this.ACTIVE_QUARTER_KEY, entry); } catch (e2) {}
+      try { this._enqueueCloud(this.ACTIVE_QUARTER_KEY, entry); } catch (e2) { console.warn('[js/stocktake.js:911] 异常(已忽略):', e2); }
     }
     return entry;
   },
@@ -1051,7 +1051,7 @@ const StocktakeModule = {
           await SyncManager.setSetting(k, null);
         }
         // 离线时也入队，联网后补推置空，保证最终一致
-        try { this._enqueueCloud(k, null); } catch (e) {}
+        try { this._enqueueCloud(k, null); } catch (e) { console.warn('[js/stocktake.js:1054] 异常(已忽略):', e); }
       } catch (e) { report.errors.push('清云端 ' + k + ' 失败：' + (e && e.message)); }
     }
 
@@ -1067,9 +1067,9 @@ const StocktakeModule = {
           await SyncManager.setSetting(this.QUARTER_RESET_EPOCH_KEY, epoch);
         } else {
           // 离线：入队，联网后 _flushCloudQueue 补广播纪元，保证最终两端都收敛
-          try { this._enqueueCloud(this.QUARTER_RESET_EPOCH_KEY, epoch); } catch (e) {}
+          try { this._enqueueCloud(this.QUARTER_RESET_EPOCH_KEY, epoch); } catch (e) { console.warn('[js/stocktake.js:1070] 异常(已忽略):', e); }
         }
-        try { localStorage.setItem(this.QUARTER_RESET_SEEN_KEY, String(epoch)); } catch (e) {}
+        try { localStorage.setItem(this.QUARTER_RESET_SEEN_KEY, String(epoch)); } catch (e) { console.warn('[js/stocktake.js:1072] 异常(已忽略):', e); }
         report.resetEpoch = epoch;
       }
     } catch (e) { report.errors.push('写 reset 纪元失败：' + (e && e.message)); }
@@ -1142,7 +1142,7 @@ const StocktakeModule = {
       const epoch = await SyncManager.getSetting(this.QUARTER_RESET_EPOCH_KEY);
       if (epoch == null) return;
       let seen = 0;
-      try { seen = parseInt(localStorage.getItem(this.QUARTER_RESET_SEEN_KEY) || '0', 10) || 0; } catch (e) {}
+      try { seen = parseInt(localStorage.getItem(this.QUARTER_RESET_SEEN_KEY) || '0', 10) || 0; } catch (e) { console.warn('[js/stocktake.js:1145] 异常(已忽略):', e); }
       if (epoch <= seen) return;   // 已应用过，不重复清
       // 检测到更新纪元 → 清本端共享元数据（不含业务数据、不含正在盘的 OPEN 会话）
       const sess = this._getOpenSession();
@@ -1150,14 +1150,14 @@ const StocktakeModule = {
       this.QUARTER_SYNC_KEYS_CLEARABLE.forEach(n => {
         if (counting && n === 'OPEN_KEY') return;   // 保护正在盘的现场
         const k = this[n];
-        if (k) { try { localStorage.removeItem(k); } catch (e) {} }
+        if (k) { try { localStorage.removeItem(k); } catch (e) { console.warn('[js/stocktake.js:1153] 异常(已忽略):', e); } }
       });
       // 重置内存态（与 resetQuarterSyncState ⑤ 对齐）
       this.query = { startDate: '', endDate: '' };
       this.sheet = null; this.allRows = []; this.allRowsFull = [];
       this._sheetTouched = null; this._viewSnapshot = null; this._pendingBatchFollow = false;
       this.batchNo = ''; this._pickerCtx = null;
-      try { localStorage.setItem(this.QUARTER_RESET_SEEN_KEY, String(epoch)); } catch (e) {}
+      try { localStorage.setItem(this.QUARTER_RESET_SEEN_KEY, String(epoch)); } catch (e) { console.warn('[js/stocktake.js:1160] 异常(已忽略):', e); }
     } catch (e) { /* 忽略：纪元收敛失败不应阻断轮询 */ }
   },
 
@@ -1275,10 +1275,10 @@ const StocktakeModule = {
         }
       });
       if (changed) {
-        try { DataStore._lsSet('wb_stocktake_tasks', raw); } catch (e) {}
-        try { if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) DataStore._pushStocktakeTasksToCloud(); } catch (e) {}
+        try { DataStore._lsSet('wb_stocktake_tasks', raw); } catch (e) { console.warn('[js/stocktake.js:1278] 异常(已忽略):', e); }
+        try { if (typeof SyncManager !== 'undefined' && SyncManager.isOnline) DataStore._pushStocktakeTasksToCloud(); } catch (e) { console.warn('[js/stocktake.js:1279] 异常(已忽略):', e); }
       }
-    } catch (e) {}
+    } catch (e) { console.warn('[js/stocktake.js:1281] 异常(已忽略):', e); }
   },
 
   /**
@@ -1744,7 +1744,7 @@ const StocktakeModule = {
     // 🟢 v227.24：行模板 —— 把历史记录中的「盘点数量/差异量/入库量/出库量/备注」原样塞回 rows；表头现存量/入库量/出库量
     //   一律从 stock 现算保持一致，避免与最新账面值脱钩。
     let stock = [];
-    try { stock = await DataStore.getRows('stock'); } catch (e) {}
+    try { stock = await DataStore.getRows('stock'); } catch (e) { console.warn('[js/stocktake.js:1747] 异常(已忽略):', e); }
     const codeMap = new Map((stock || []).map(s => [String(s.存货编码 || ''), s]));
     this.allRowsFull = recs.map(r => {
       const s = codeMap.get(String(r.存货编码 || '')) || {};
@@ -2052,7 +2052,7 @@ const StocktakeModule = {
   async startQuarter() {
     this._hideUnfinishedBanner();
     // 🟢 v228.68：进入季度盘点即清理无法锚定批次的幽灵任务（结束/开下一轮仍清不掉的残留）
-    try { this._gcGhostTasks(); } catch (e) {}
+    try { this._gcGhostTasks(); } catch (e) { console.warn('[js/stocktake.js:2055] 异常(已忽略):', e); }
     // 🟢 v228.48：开局流程 —— **批次身份优先，日期退居显示**。
     //
     //   新顺序（旧版那套「解析器→云端→本机锚定」的三段纠葛已随批次身份重构一并消失）：
@@ -3444,7 +3444,7 @@ const StocktakeModule = {
     try {
       let cloud = {};
       if (typeof SyncManager !== 'undefined' && typeof SyncManager.getSetting === 'function') {
-        try { const o = await SyncManager.getSetting(this.BASELINE_KEY); if (o && typeof o === 'object') cloud = o; } catch (e) {}
+        try { const o = await SyncManager.getSetting(this.BASELINE_KEY); if (o && typeof o === 'object') cloud = o; } catch (e) { console.warn('[js/stocktake.js:3447] 异常(已忽略):', e); }
       }
       cloud[key] = shard;
       await this._setCloud(this.BASELINE_KEY, cloud);
@@ -4223,7 +4223,7 @@ const StocktakeModule = {
       console.error(msg);
       if (opt.toast) {
         const t = typeof opt.toast === 'string' ? opt.toast : '本地存储写入失败，数据可能无法自动补推到云端';
-        try { this.toast('⚠️ ' + t); } catch (_) {}
+        try { this.toast('⚠️ ' + t); } catch (_) { console.warn('[js/stocktake.js:4226] 异常(已忽略):', _); }
       }
       return false;
     }
@@ -4238,7 +4238,7 @@ const StocktakeModule = {
     try { return JSON.parse(localStorage.getItem(this.BATCH_INDEX_KEY) || '{}') || {}; } catch (e) { return {}; }
   },
   _saveBatchIndex(idx) {
-    try { localStorage.setItem(this.BATCH_INDEX_KEY, JSON.stringify(idx || {})); } catch (e) {}
+    try { localStorage.setItem(this.BATCH_INDEX_KEY, JSON.stringify(idx || {})); } catch (e) { console.warn('[js/stocktake.js:4241] 异常(已忽略):', e); }
   },
   _upsertBatchIndex(sheetId, patch) {
     const idx = this._getBatchIndex();
@@ -4288,10 +4288,10 @@ const StocktakeModule = {
         return t && !t.deleted && t.sheetType === 'quarter' && (t.sheetId === sheetId || t.batchKey === sheetId);
       });
       for (const k of toKill) {
-        try { await DataStore.deleteStocktakeTask(k, { skipPush: true }); n++; } catch (e) {}
+        try { await DataStore.deleteStocktakeTask(k, { skipPush: true }); n++; } catch (e) { console.warn('[js/stocktake.js:4291] 异常(已忽略):', e); }
       }
       if (toKill.length && typeof DataStore._pushStocktakeTasksToCloud === 'function') {
-        try { await DataStore._pushStocktakeTasksToCloud(); } catch (e) {}
+        try { await DataStore._pushStocktakeTasksToCloud(); } catch (e) { console.warn('[js/stocktake.js:4294] 异常(已忽略):', e); }
       }
 
       // ⑥ 活跃锚点若指向本批 → 清空，让下次开盘生成新批次（云端由 _ensureActiveQuarter 让位/重开）
@@ -4299,7 +4299,7 @@ const StocktakeModule = {
       if (aq && aq.sheetId === sheetId) this._saveActiveQuarter({});
 
       // ⑥b 云端残留同步清空（避免他端重新拉回污染，否则本批仍出现在其他端视图）
-      try { await this._deleteCloudSheetEntries(sheetId); } catch (e) {}
+      try { await this._deleteCloudSheetEntries(sheetId); } catch (e) { console.warn('[js/stocktake.js:4302] 异常(已忽略):', e); }
 
       // ⑦ 批次索引进 closed+empty
       this._upsertBatchIndex(sheetId, { closedAt: new Date().toISOString(), empty: true });
@@ -4324,9 +4324,9 @@ const StocktakeModule = {
           if (hit) { delete u[k]; changed = true; }
         });
         if (changed) await this._setCloud(cloudKey, u);
-      } catch (e) {}
+      } catch (e) { console.warn('[js/stocktake.js:4327] 异常(已忽略):', e); }
     };
-    try { await this._clearRoundClosedCloud(sheetId); } catch (e) {}   // 自带云端删 + 本机删
+    try { await this._clearRoundClosedCloud(sheetId); } catch (e) { console.warn('[js/stocktake.js:4329] 异常(已忽略):', e); }   // 自带云端删 + 本机删
     await delKeys(this.OVERVIEW_KEY, true);
     await delKeys(this.NO_MAP_KEY, false);
     await delKeys(this.ROUND_NO_KEY, false);
@@ -4337,7 +4337,7 @@ const StocktakeModule = {
         const aq = await SyncManager.getSetting(this.ACTIVE_QUARTER_KEY);
         if (aq && aq.sheetId === sheetId) await this._setCloud(this.ACTIVE_QUARTER_KEY, {});
       }
-    } catch (e) {}
+    } catch (e) { console.warn('[js/stocktake.js:4340] 异常(已忽略):', e); }
   },
 
   // ===== v227.16：仓库离线容错 —— 跨设备 key-value 推送（批次状态/概览/轮次）本地待推队列 =====
@@ -4632,7 +4632,7 @@ const StocktakeModule = {
         document.addEventListener('mousedown', (e) => { if (e && e.target && e.target.closest && e.target.closest('#stArea')) mark(); });
         document.addEventListener('keydown', (e) => { if (e && e.target && e.target.closest && e.target.closest('#stArea')) mark(); }, true);
         // 🟢 v227.16：联网后自动补推离线队列（批次状态/概览/任务）与盘点记录
-        window.addEventListener('online', () => { try { this._flushCloudQueue(); this.retryPendingSync(); } catch (e) {} });
+        window.addEventListener('online', () => { try { this._flushCloudQueue(); this.retryPendingSync(); } catch (e) { console.warn('[js/stocktake.js:4635] 异常(已忽略):', e); } });
         this._pickerInputBound = true;
       }
       if (this._overviewChannel) return;
@@ -4642,17 +4642,17 @@ const StocktakeModule = {
         const data = ev && ev.data;
         // 🟢 v228.39（P4）：冻结协议 —— 管理员结束本轮前广播 freeze，
         //   打开中的盘点表收到后 flush 草稿 + 锁输入，避免「正在输入未失焦」的最后一条草稿丢失。
-        if (data && data.type === 'freeze') { try { await this._onRemoteFreeze(data); } catch (e) {} return; }
+        if (data && data.type === 'freeze') { try { await this._onRemoteFreeze(data); } catch (e) { console.warn('[js/stocktake.js:4645] 异常(已忽略):', e); } return; }
         // 🟢 v228.39（P4）：本端已被冻结且管理员已结束本轮 → 锁定横幅切换为「已结束」
         if (data && data.type === 'overviewUpdated' && data.forceClosed && this._frozen) {
-          try { this._onRoundForceClosed(data); } catch (e) {}
+          try { this._onRoundForceClosed(data); } catch (e) { console.warn('[js/stocktake.js:4648] 异常(已忽略):', e); }
           return;
         }
         // 🟢 v228.45：任务变更广播 —— 同浏览器另一标签分派/认领/放弃/结束任务后，
         //   本标签立即重渲（无需等 3s 轮询）。任务数据在 localStorage，两标签共享同一份，
         //   故先拉云端合并（在线时）再重渲。
         if (data && data.type === 'tasksUpdated') {
-          try { if (typeof DataStore !== 'undefined' && DataStore.pullStocktakeTasksFromCloud) await DataStore.pullStocktakeTasksFromCloud(); } catch (e) {}
+          try { if (typeof DataStore !== 'undefined' && DataStore.pullStocktakeTasksFromCloud) await DataStore.pullStocktakeTasksFromCloud(); } catch (e) { console.warn('[js/stocktake.js:4655] 异常(已忽略):', e); }
           this._schedulePickerRefresh();
           return;
         }
@@ -4665,7 +4665,7 @@ const StocktakeModule = {
       if (!this._overviewStorageBound) {
         window.addEventListener('storage', (ev) => {
           if (ev && (ev.key === this.OVERVIEW_KEY || ev.key === this.ROUND_CLOSED_KEY)) {
-            try { this._refreshQuarterPickerIfShown(); } catch (e) {}
+            try { this._refreshQuarterPickerIfShown(); } catch (e) { console.warn('[js/stocktake.js:4668] 异常(已忽略):', e); }
           }
           // 🟢 v228.45：任务表 / 当前批次区间变更也要触发重渲 ——
           //   否则同浏览器另一标签分派了任务、切换了批次，本标签完全无感（只能等 3s 轮询）。
@@ -4681,7 +4681,7 @@ const StocktakeModule = {
           // 🟢 v228.39（P4）：freeze 的 storage 兜底（BroadcastChannel 不支持时的跨标签触发）
           if (ev && ev.key && ev.key.indexOf('wb_stocktake_freeze_') === 0) {
             const sid = ev.key.replace('wb_stocktake_freeze_', '');
-            try { this._onRemoteFreeze({ sheetId: sid }); } catch (e) {}
+            try { this._onRemoteFreeze({ sheetId: sid }); } catch (e) { console.warn('[js/stocktake.js:4684] 异常(已忽略):', e); }
           }
         });
         this._overviewStorageBound = true;
@@ -4714,7 +4714,7 @@ const StocktakeModule = {
     try {
       if (this._overviewChannel) this._overviewChannel.postMessage({ type: 'freeze', sheetId: sheetId, startDate: sd, endDate: ed, at: Date.now() });
     } catch (e) { /* 忽略 */ }
-    try { localStorage.setItem('wb_stocktake_freeze_' + sheetId, JSON.stringify({ at: Date.now() })); } catch (e) {}
+    try { localStorage.setItem('wb_stocktake_freeze_' + sheetId, JSON.stringify({ at: Date.now() })); } catch (e) { console.warn('[js/stocktake.js:4717] 异常(已忽略):', e); }
   },
 
   // 🟢 v228.39（P4）：接收管理员的冻结广播 —— flush 草稿 + 锁输入 + 横幅，防末条草稿丢失
@@ -4897,7 +4897,7 @@ const StocktakeModule = {
       this._globalSyncVisBound = true;
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) return;              // 进后台不动
-        try { self._pollOnce(); } catch (e) {}    // 回前台立即补拉对齐
+        try { self._pollOnce(); } catch (e) { console.warn('[js/stocktake.js:4900] 异常(已忽略):', e); }    // 回前台立即补拉对齐
         // 重新排一期，让间隔立即按「可见」重算（无论之前是隐藏还是空闲）
         if (this._globalSyncTimer) {
           clearTimeout(this._globalSyncTimer);
@@ -4974,7 +4974,7 @@ const StocktakeModule = {
               taskChanged = 0;
               try { taskChanged = await DataStore.pullStocktakeTasksFromCloud(); } catch (e) { /* 忽略 */ }
             }
-            if (changed || commonChanged || taskChanged > 0) { try { await this._pullRoundClosed(); } catch (e) {} }
+            if (changed || commonChanged || taskChanged > 0) { try { await this._pullRoundClosed(); } catch (e) { console.warn('[js/stocktake.js:4977] 异常(已忽略):', e); } }
           } catch (e) { /* 忽略 */ }
         } else {
           // 跳过本轮重下载：把「变更哨兵」置为「无需补拉」，避免下方 if 误触发 _pullRoundClosed
@@ -5184,7 +5184,7 @@ const StocktakeModule = {
       if (!rc || !rc.settleReq) return false;
       const ackKey = 'wb_stocktake_settle_ack_' + sheetId;
       let acked = '';
-      try { acked = localStorage.getItem(ackKey) || ''; } catch (e) {}
+      try { acked = localStorage.getItem(ackKey) || ''; } catch (e) { console.warn('[js/stocktake.js:5187] 异常(已忽略):', e); }
       if (acked && acked === String(rc.settleAt || '')) return false;
 
       const me = String(((typeof AppConfig !== 'undefined' && AppConfig.getCurrentUser)
@@ -5194,7 +5194,7 @@ const StocktakeModule = {
       if (this.sheet && this.sheet.sheetType === 'quarter' && this.sheet.sheetId === sheetId) {
         try { this.saveDraft(); } catch (e) { /* 忽略 */ }
         await this.finishStocktake({ auto: true });
-        try { localStorage.setItem(ackKey, String(rc.settleAt || '1')); } catch (e) {}
+        try { localStorage.setItem(ackKey, String(rc.settleAt || '1')); } catch (e) { console.warn('[js/stocktake.js:5197] 异常(已忽略):', e); }
         return true;
       }
 
@@ -5259,7 +5259,7 @@ const StocktakeModule = {
         } catch (e) { console.warn('[stocktake] 远程结算落库失败(下一轮重试):', e && e.message); return false; }
       }
       // ③ 无现场无草稿：什么都不做（已点过「结束本次盘点」的数据早已在云端）
-      try { localStorage.setItem(ackKey, String(rc.settleAt || '1')); } catch (e) {}
+      try { localStorage.setItem(ackKey, String(rc.settleAt || '1')); } catch (e) { console.warn('[js/stocktake.js:5262] 异常(已忽略):', e); }
       return true;
     } catch (e) { console.warn('[stocktake] 远程结算处理异常(已忽略):', e && e.message); return false; }
   },
@@ -5756,8 +5756,8 @@ const StocktakeModule = {
     const now = new Date().toISOString();
     for (const t of batchTasks) {
       // 🟢 v227.15（G9）：清掉该盘点人本批次的分区草稿 —— 避免旧草稿被新一轮认领带进新表
-      try { localStorage.removeItem(this._draftKey(t.counter, t.batchKey || t.sheetId)); } catch (e) {}
-      try { localStorage.removeItem(this.DRAFT_KEY); } catch (e) {}
+      try { localStorage.removeItem(this._draftKey(t.counter, t.batchKey || t.sheetId)); } catch (e) { console.warn('[js/stocktake.js:5759] 异常(已忽略):', e); }
+      try { localStorage.removeItem(this.DRAFT_KEY); } catch (e) { console.warn('[js/stocktake.js:5760] 异常(已忽略):', e); }
       // 墓碑删除任务（不保留为待领取，避免复活）；skipPush 后统一推一次
       try { await DataStore.deleteStocktakeTask(t.taskId, { skipPush: true }); } catch (e) { /* 忽略 */ }
     }
@@ -5953,9 +5953,9 @@ const StocktakeModule = {
     t.counter = null;   // 退出本人任务池（getMyOpenTasks 按 counter 过滤）；编码保留供补派
     await DataStore.saveStocktakeTask(t);   // 自动推云端（settings 通道，跨设备同步）
     // 清本人会话 / 草稿，避免重进时续盘到已退回任务
-    try { const sess = this._getOpenSession(); if (sess && sess.taskId === taskId) this._clearOpenSession(); } catch (e) {}
-    try { localStorage.removeItem(this._draftKey(oldCounter, t.sheetId)); } catch (e) {}
-    try { localStorage.removeItem(this.DRAFT_KEY); } catch (e) {}
+    try { const sess = this._getOpenSession(); if (sess && sess.taskId === taskId) this._clearOpenSession(); } catch (e) { console.warn('[js/stocktake.js:5956] 异常(已忽略):', e); }
+    try { localStorage.removeItem(this._draftKey(oldCounter, t.sheetId)); } catch (e) { console.warn('[js/stocktake.js:5957] 异常(已忽略):', e); }
+    try { localStorage.removeItem(this.DRAFT_KEY); } catch (e) { console.warn('[js/stocktake.js:5958] 异常(已忽略):', e); }
     this.toast('已放弃任务，回退管理员处可重新分派');
     this._refreshTaskBar();   // 实时刷新当前视图（管理员跨设备靠云端任务通道同步）
   },
@@ -6157,7 +6157,7 @@ const StocktakeModule = {
             hint.style.padding = '8px';
             hint.style.borderRadius = '6px';
           }
-        } catch (e) {}
+        } catch (e) { console.warn('[js/stocktake.js:6160] 异常(已忽略):', e); }
         const allCodes = await self._allStockCodesSorted('quarter');
         const sInp = document.getElementById('asNoStart');
         const eInp = document.getElementById('asNoEnd');
@@ -6168,7 +6168,7 @@ const StocktakeModule = {
           if (multiEl && multiEl.value && multiEl.value.trim()) {
             ranges = self._parseAssignRanges(multiEl.value) || [];
           }
-        } catch (e) {}
+        } catch (e) { console.warn('[js/stocktake.js:6171] 异常(已忽略):', e); }
         if (!ranges.length) {
           const s = parseInt(sInp && sInp.value, 10);
           const e = parseInt(eInp && eInp.value, 10);
@@ -6202,7 +6202,7 @@ const StocktakeModule = {
             //   管理员在分派前根本看不到区间端点对应哪件货（v227.26 的预览功能形同失效）。
             stopInfos.push({ no, code, row, ok: true });
           }
-        } catch (e) {}
+        } catch (e) { console.warn('[js/stocktake.js:6205] 异常(已忽略):', e); }
         const segCount = ranges.length;
         const segLabel = segCount > 1 ? ('共 ' + segCount + ' 段') : ('单段');
         const lines = [];
@@ -6432,7 +6432,7 @@ const StocktakeModule = {
         const baseline = pool.codeOf || new Map();     // serial -> code（本轮基线）
         if (!baseline.size) { infoEl.textContent = '当前没有可补派的退回项。'; return; }
         let ranges = [];
-        try { if (multi && multi.value && multi.value.trim()) ranges = self._parseAssignRanges(multi.value) || []; } catch (e) {}
+        try { if (multi && multi.value && multi.value.trim()) ranges = self._parseAssignRanges(multi.value) || []; } catch (e) { console.warn('[js/stocktake.js:6435] 异常(已忽略):', e); }
         if (!ranges.length) {
           const s = parseInt(sInp && sInp.value, 10), e = parseInt(eInp && eInp.value, 10);
           if (!isNaN(s) && !isNaN(e) && e >= s && s >= 1) ranges = [[s, e]];
@@ -6449,7 +6449,7 @@ const StocktakeModule = {
           ? [ranges[0][0], lastSeg[1]]
           : [ranges[0][0], ranges[0][1], lastSeg[0], lastSeg[1]];
         let stock = [];
-        try { stock = (await DataStore.getRows('stock')) || []; } catch (e) {}
+        try { stock = (await DataStore.getRows('stock')) || []; } catch (e) { console.warn('[js/stocktake.js:6452] 异常(已忽略):', e); }
         const serialSet = pool.serialList ? new Set(pool.serialList) : new Set();
         const lines = [];
         stopNos.forEach((no, idx) => {
@@ -6533,7 +6533,7 @@ const StocktakeModule = {
       cs.forEach(c => merged.add(c));
       st.replenishedCodes = Array.from(merged);
       st.updatedAt = new Date().toISOString();
-      try { await DataStore.saveStocktakeTask(st); } catch (e) {}
+      try { await DataStore.saveStocktakeTask(st); } catch (e) { console.warn('[js/stocktake.js:6536] 异常(已忽略):', e); }
     }
     // 新建补派任务（counter 锁定、codes 固化，概览/监控自动生效）
     const sd = this.query.startDate, ed = this.query.endDate;
@@ -6867,7 +6867,7 @@ const StocktakeModule = {
           mo.observe(document.getElementById('contentArea') || document.body, { childList: true, subtree: true });
           stArea._stCollapseMO = mo;
           // 5 秒后自动断开（防止长期监听）
-          setTimeout(() => { try { mo.disconnect(); stArea._stCollapseMO = null; } catch (e) {} }, 5000);
+          setTimeout(() => { try { mo.disconnect(); stArea._stCollapseMO = null; } catch (e) { console.warn('[js/stocktake.js:6870] 异常(已忽略):', e); } }, 5000);
         }
       }
     } catch (e) { /* 静默失败，避免阻断主流程 */ }
@@ -6894,11 +6894,11 @@ const StocktakeModule = {
         if (target) {
           e.preventDefault();
           target.focus();
-          if (target.select) try { target.select(); } catch (e) {}
+          if (target.select) try { target.select(); } catch (e) { console.warn('[js/stocktake.js:6897] 异常(已忽略):', e); }
         }
       });
     });
-    if (inputs.length) { try { inputs[0].focus(); } catch (e) {} }
+    if (inputs.length) { try { inputs[0].focus(); } catch (e) { console.warn('[js/stocktake.js:6901] 异常(已忽略):', e); } }
   },
 
   // 🟢 v228.96（清单三#3）：「只看差异」开关 —— 提交前快速复盘账实不符项。
@@ -7215,7 +7215,7 @@ const StocktakeModule = {
     try {
       const allRecs = (DataStore._tableCache && DataStore._tableCache['stocktake_records']) || [];
       (allRecs || []).forEach(r => { if (r && !r.voided) bump(r.batchNo); });
-    } catch (e) {}
+    } catch (e) { console.warn('[js/stocktake.js:7218] 异常(已忽略):', e); }
     // (b) no_map：仅「当前批次（sheetId）且未结束」占号；其余未结束条目若无记录撑着则视为孤儿，
     //     在 persist 时物理删除、释放其号（避免 jd…-N 只增不减）。finished 条目不占号（记录有则已占）。
     let mapChanged = false;
@@ -7232,8 +7232,8 @@ const StocktakeModule = {
         }
         // finished 的其他条目：不占号（记录若有数据已由 (a) 占）
       });
-      if (mapChanged) try { localStorage.setItem(MAP_KEY, JSON.stringify(map)); } catch (e) {}
-    } catch (e) {}
+      if (mapChanged) try { localStorage.setItem(MAP_KEY, JSON.stringify(map)); } catch (e) { console.warn('[js/stocktake.js:7235] 异常(已忽略):', e); }
+    } catch (e) { console.warn('[js/stocktake.js:7236] 异常(已忽略):', e); }
     // (c) 旧版计数器（v226 之前写过 wb_stocktake_no_*）已废弃：在「记录表为权威依据」的新方案下
     //     它只会把号一路顶高（如把 base 顶成 -2），且记录表已完整覆盖其语义，故不再纳入占用计算。
     // 取最小未占用序号：1, 2, 3…直到找到第一个不在 used 里的
@@ -7247,9 +7247,9 @@ const StocktakeModule = {
     if (sheetId && persist) {
       // 🟢 v228.40（一-1/一-2）：写入 updatedAt —— 云端按「较新者胜」合并批次号映射，缺它无法判定。
       map[sheetId] = { no: finalNo, type: type, finished: false, date: today, updatedAt: new Date().toISOString() };
-      try { localStorage.setItem(MAP_KEY, JSON.stringify(map)); } catch (e) {}
+      try { localStorage.setItem(MAP_KEY, JSON.stringify(map)); } catch (e) { console.warn('[js/stocktake.js:7250] 异常(已忽略):', e); }
       // 旧版计数器（v226 之前）同步推进，仅真正落库时推进，保证与历史实现不冲突
-      try { localStorage.setItem('wb_stocktake_no_' + type + '_' + today, String(next <= 1 ? 1 : next)); } catch (e) {}
+      try { localStorage.setItem('wb_stocktake_no_' + type + '_' + today, String(next <= 1 ? 1 : next)); } catch (e) { console.warn('[js/stocktake.js:7252] 异常(已忽略):', e); }
     }
     return finalNo;
   },
@@ -7261,7 +7261,7 @@ const StocktakeModule = {
     try {
       const map = JSON.parse(localStorage.getItem(MAP_KEY) || '{}') || {};
       if (map[sheetId]) { map[sheetId].finished = true; localStorage.setItem(MAP_KEY, JSON.stringify(map)); }
-    } catch (e) {}
+    } catch (e) { console.warn('[js/stocktake.js:7264] 异常(已忽略):', e); }
   },
 
   _uuid() {
@@ -7521,7 +7521,7 @@ const StocktakeModule = {
           closedAt: new Date().toISOString(), deviceId: this._deviceId()
         });
         if (res && res.ok) syncTip = '，已同步云端';
-        else { this._markPending(recs.map(r => r.recId)); try { await this.retryPendingSync(); } catch (e) {} syncTip = '（云端同步失败，将在后台自动重试）'; }
+        else { this._markPending(recs.map(r => r.recId)); try { await this.retryPendingSync(); } catch (e) { console.warn('[js/stocktake.js:7524] 异常(已忽略):', e); } syncTip = '（云端同步失败，将在后台自动重试）'; }
       } else {
         this._markPending(recs.map(r => r.recId));
         syncTip = '（未连接云端，已存本地待补推）';
@@ -7573,7 +7573,7 @@ const StocktakeModule = {
     });
     if (res.skipped) return 0;
     // 已落库 → 清该盘点人的分区草稿，避免下次续盘重复收口
-    try { localStorage.removeItem(this._draftKey(task.counter, task.sheetId)); } catch (e) {}
+    try { localStorage.removeItem(this._draftKey(task.counter, task.sheetId)); } catch (e) { console.warn('[js/stocktake.js:7576] 异常(已忽略):', e); }
     return res.inserted + res.updated;
   },
 

@@ -226,7 +226,7 @@ const DashboardModule = {
         this._dropBriefWhenIdle(el, 0);
         return;
       }
-    } catch (e) {}
+    } catch (e) { console.warn('[js/dashboard.js:229] 异常(已忽略):', e); }
 
     let overdue = 0, tasks = [];
     try { if (typeof WorkTasksModule !== 'undefined' && WorkTasksModule._debug) {
@@ -240,10 +240,10 @@ const DashboardModule = {
         if (allDay) return d.getTime() < today.getTime();
         return d.getTime() < now.getTime();
       }).length;
-    } } catch (e) {}
+    } } catch (e) { console.warn('[js/dashboard.js:243] 异常(已忽略):', e); }
 
     let sups = [];
-    try { sups = await DataStore.getRows('suppliers'); } catch (e) {}
+    try { sups = await DataStore.getRows('suppliers'); } catch (e) { console.warn('[js/dashboard.js:246] 异常(已忽略):', e); }
     const addDaysLocal = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
     const near = [];
     (sups || []).filter(s => s.供应商 && (s.年度合同到期时间 || s.最终到期时间)).forEach(s => {
@@ -263,15 +263,18 @@ const DashboardModule = {
     //     保证简报与 KPI 卡、待办卡数字永远一致；字段缺失时回退本地推导。
     let pending = (stats && typeof stats.pendingApproval === 'number') ? stats.pendingApproval : 0;
     if (!(stats && typeof stats.pendingApproval === 'number')) {
-      try { const os = await DataStore.getRows('orders'); pending = (os || []).filter(o => o.审批状态 && o.审批状态 !== '审批通过').length; } catch (e) {}
+      try { const os = await DataStore.getRows('orders'); pending = (os || []).filter(o => o.审批状态 && o.审批状态 !== '审批通过').length; } catch (e) { console.warn('[js/dashboard.js:266] 异常(已忽略):', e); }
     }
     let alerts = (stats && typeof stats.needRestockCount === 'number') ? stats.needRestockCount : 0;
     if (!(stats && typeof stats.needRestockCount === 'number')) {
-      try { const al = await DataStore.getRows('inventoryAlerts'); alerts = (al || []).filter(a => { const rv = parseFloat(a.补货值); return !isNaN(rv) && rv > 0; }).length; } catch (e) {}
+      try { const al = await DataStore.getRows('inventoryAlerts'); alerts = (al || []).filter(a => { const rv = parseFloat(a.补货值); return !isNaN(rv) && rv > 0; }).length; } catch (e) { console.warn('[js/dashboard.js:270] 异常(已忽略):', e); }
     }
 
     const wk = ['日', '一', '二', '三', '四', '五', '六'][today.getDay()];
     const dateStr = `${today.getFullYear()}年${today.getMonth() + 1}月${today.getDate()}日 周${wk}`;
+    // 🟢 v230.03：问候语按真实进入时段动态生成（修复"无论何时进入都显示早上好"）
+    const h = now.getHours();
+    const greet = (h < 5 || h >= 18) ? '晚上好' : h < 12 ? '早上好' : h < 14 ? '中午好' : '下午好';
     const acts = [];
     if (overdue > 0) acts.push({ t: `处理 ${overdue} 项逾期任务`, r: '别让它们沉下去', go: 'workTasks' });
     if (pending > 0) acts.push({ t: `催批 ${pending} 张待审订单`, r: '卡住下游收货', go: 'orderTrack' });
@@ -287,7 +290,7 @@ const DashboardModule = {
       <div class="brief-head">
         <div class="brief-glyph">✨</div>
         <div class="brief-headtext">
-          <div class="brief-date">早上好 · ${dateStr}</div>
+          <div class="brief-date">${greet} · ${dateStr}</div>
           <div class="brief-summary">${esc(head)}。最该先处理这几件：</div>
         </div>
         <div class="brief-badge">今日简报</div>
@@ -311,7 +314,7 @@ const DashboardModule = {
       if (el.dataset.briefHidden === '1') return;
       el.dataset.briefHidden = '1';
       el.classList.add('is-hiding');
-      if (persist) { try { localStorage.setItem(BRIEF_LS, todayKey); } catch (e) {} }
+      if (persist) { try { localStorage.setItem(BRIEF_LS, todayKey); } catch (e) { console.warn('[js/dashboard.js:317] 异常(已忽略):', e); } }
       this._dropBriefWhenIdle(el, 360);
     };
     const closeBtn = document.getElementById('briefCloseBtn');
@@ -408,33 +411,43 @@ const DashboardModule = {
     const bodyEl = document.getElementById('modalBody');
     if (!overlay || !bodyEl) return;
 
-    let title = '', headers = [], rows = [];
+    let title = '', headers = [], rows = [], totalCount = 0;
+    // 🟢 v229.98（AUDIT-229-98-02）：下钻行统一「原始值 + 渲染时转义」，杜绝未转义插值破坏结构/注入。
+    //   rows 元素：字符串（渲染前 esc）或 { html }（TableUtils.link 产出的可信 HTML，原样输出）。
+    const asCell = (c) => (c && typeof c === 'object' && typeof c.html === 'string') ? c.html : esc(c ?? '');
+    const cellLink = (type, label, key) => ({ html: TableUtils.link(type, label, key) });
     if (kind === 'stockNoInbound' || kind === 'stockNoOrder') {
       const codes = kind === 'stockNoInbound' ? c.stockNoInbound : c.stockNoOrder;
       title = kind === 'stockNoInbound' ? '存货无入库记录' : '存货无订单记录';
       headers = ['存货编码', '存货名称', '规格型号'];
       const byCode = new Map((c._stockRows || []).map(r => [String(r.存货编码), r]));
+      totalCount = codes.length;
       rows = codes.slice(0, 300).map(code => {
         const r = byCode.get(code) || {};
-        const name = r.存货名称 || code;
-        return [`<strong>${esc(name ?? '')}</strong>`, esc(r.存货名称 || ''), esc(r.规格型号 || '')];
+        // 🟢 v229.98（AUDIT-229-98-02）：三列与表头一一对应（此前首列误填存货名称，存货编码从未展示）
+        return [String(code ?? ''), r.存货名称 || '', r.规格型号 || ''];
       });
     } else if (kind === 'supNoPrice' || kind === 'supNoInbound') {
       const names = kind === 'supNoPrice' ? c.supNoPrice : c.supNoInbound;
       title = kind === 'supNoPrice' ? '供应商无合同价' : '供应商无入库记录';
       headers = ['供应商'];
-      rows = names.slice(0, 300).map(n => [TableUtils.link('supplier', n, n)]);
+      totalCount = names.length;
+      rows = names.slice(0, 300).map(n => [cellLink('supplier', n, n)]);
     } else if (kind === 'ordersNoInbound') {
       title = '未入库订单（仍有未入库量）';
       headers = ['订单编号', '供应商', '存货名称', '未入库量'];
+      totalCount = c.ordersNoInbound.length;
       rows = c.ordersNoInbound.slice(0, 300).map(o => [
-        TableUtils.link('order', o.订单编号, o.订单编号), esc(o.供应商 || ''), esc(o.存货名称 || ''), this.fmt(o.未入库量)
+        cellLink('order', o.订单编号, o.订单编号), o.供应商 || '', o.存货名称 || '', this.fmt(o.未入库量)
       ]);
     }
 
-    titleEl.textContent = title + (rows.length ? `（${rows.length} 条）` : '');
+    // 🟢 v229.98（AUDIT-229-98-03）：标题显示真实总数（此前用 rows.length，被 300 条截断后恒为 300 属误导），
+    //   实际截断时追加「仅展示前 N 条」提示，性能截断行为不变。
+    const truncated = totalCount > rows.length;
+    titleEl.textContent = title + (totalCount ? `（${totalCount} 条${truncated ? ` · 仅展示前 ${rows.length} 条` : ''}）` : '');
     bodyEl.innerHTML = rows.length
-      ? `<div class="todo-detail-table"><table class="data-table"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c2 => `<td>${c2}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
+      ? `<div class="todo-detail-table"><table class="data-table"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c2 => `<td>${asCell(c2)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
       : '<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-text">暂无缺失记录</div></div>';
     overlay.classList.add('show');
     // 🟢 v229.65：下钻明细浮层表启用 Excel 式框选 + 复制

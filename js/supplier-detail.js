@@ -104,16 +104,19 @@ window.SupplierDetailModule = {
         { label: '备注', field: '备注' }
       ];
 
-      // 🟢 v190：采购订单 / 入库记录 仅显示最近 3 个月数据（避免历史全量导致档案页过长）
-      const recentOrders = TableUtils.filterRecent3M(rel.orders, '日期');
-      const recentInbound = TableUtils.filterRecent3M(rel.inbound, '入库日期');
+      // 🟢 v190：采购订单 / 入库记录 只显示最近一段时间（避免历史全量导致档案页过长）
+      // 🟢 v229.98（AUDIT-229-98-32）：窗口由 3 个月改为【1 个月】，与「存货档案」页口径统一。
+      //   此前存货档案默认近 1 个月、供应商档案默认近 3 个月，同类页面两套窗口，
+      //   用户跨页对比时会以为数据对不上。统一为近 1 个月（与存货档案日期框默认值一致）。
+      const recentOrders = TableUtils.filterRecent3M(rel.orders, '日期', 1);
+      const recentInbound = TableUtils.filterRecent3M(rel.inbound, '入库日期', 1);
 
       // 🟢 v192：初始化 4 个 section 各自的分页/排序状态。重置 currentPage=1，
       //   保证从别的实体返回此供应商时不会保留上一次的页码。
       this._sections = {
         'sd-pricing': { title: '合同价格', rows: rel.pricing || [], columns: priceCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
-        'sd-orders':  { title: `采购订单（近3个月 · ${recentOrders.length}/${(rel.orders || []).length}）`, rows: recentOrders, columns: orderCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
-        'sd-inbound': { title: `入库记录（近3个月 · ${recentInbound.length}/${(rel.inbound || []).length}）`, rows: recentInbound, columns: inboundCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
+        'sd-orders':  { title: `采购订单（近1个月 · ${recentOrders.length}/${(rel.orders || []).length}）`, rows: recentOrders, columns: orderCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
+        'sd-inbound': { title: `入库记录（近1个月 · ${recentInbound.length}/${(rel.inbound || []).length}）`, rows: recentInbound, columns: inboundCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null },
         'sd-breach':  { title: '违约台账', rows: rel.breach || [], columns: breachCols, currentPage: 1, pageSize: AppConfig.app.defaultPageSize, sort: null }
       };
 
@@ -218,6 +221,11 @@ window.SupplierDetailModule = {
     if (items.length > 0) {
       TableUtils.initExcelSelection(sectionId);
       TableUtils.initSortableHeaders(sectionId, {
+        // 🟢 v229.97（AUDIT-229-97-02）：显式传 getColField 返回【数据字段】而非表头文案。
+        //   本页多列 label ≠ field（订单量→数量、未入库订单量→未入库量、含税金额→原币价税合计、
+        //   状态→审批状态 等），默认用 <th> 文本当字段名会导致 findIndex(field===label) 恒为 -1、
+        //   排序对这些列完全无效。按列位置映射回真实 field。
+        getColField: (th) => (s.columns[th.cellIndex] && s.columns[th.cellIndex].field) || (th.textContent || '').trim(),
         initialSort: s.sort ? { col: s.columns.findIndex(c => c.field === s.sort.field), dir: s.sort.dir } : null,
         onSortChange: (field, dir) => {
           s.sort = dir === 0 ? null : { field, dir };

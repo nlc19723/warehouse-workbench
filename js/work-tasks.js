@@ -13,6 +13,9 @@
  *      并集合并（按 id + updatedAt 新者胜），独立不污染工作数据、自动进云端同步。
  *      🟢 v229.39：补 localStorage 镜像兜底 —— 云端未连时不丢；isOverdue 改为全天比日/定时比时刻；
  *      完成=墨水沉入+进度环即时、删除=直接删+6 秒可撤销（替 confirm）。
+ *      🟢 v230.08（P0 数据安全）：删除改为「墓碑」（_del 标记 + updatedAt，跨端合并时较新者胜，
+ *      撤销删除=清墓碑+刷新 updatedAt）；同步层 load=云镜并集互救、save=读-合并-写、
+ *      远端读不到时挂起重试而非覆盖云端（详见 worktasks-sync.js 头注）。
  *
  * 字段（极简，用户只填标题/备注/截止日，状态自动）：
  *   id / title / note / dueAt(YYYY-MM-DDTHH:mm:ss 本地) / allDay(bool)
@@ -181,13 +184,15 @@ const WorkTasksModule = (function () {
     return arr[i];
   }
   async function removeTask(id) {
-    let arr = await WorkTasksSync.load();
+    const arr = await WorkTasksSync.load();
     // 删父则连带删 children
     const t = arr.find((x) => x.id === id);
     const toDel = new Set([id]);
     if (t && t.children) t.children.forEach((c) => toDel.add(c));
-    arr = arr.filter((x) => !toDel.has(x.id));
-    await WorkTasksSync.save(arr);
+    // 🟢 v230.08：打墓碑而非直接移除 —— 删除意图随云端合并跨端传播，
+    //   且防止「本地删了 → 读-合并-写时被远端旧值合并复活」。
+    WorkTasksSync.markDeleted(Array.from(toDel));
+    await WorkTasksSync.save(arr.filter((x) => !toDel.has(x.id)));
   }
   async function toggleDone(id) {
     const arr = await WorkTasksSync.load();
@@ -248,6 +253,8 @@ const WorkTasksModule = (function () {
   let _cursor = startOfDay(now());   // 当前视图定位日
   let _mode = 'day';                 // day | week | month
   let _monthOpen = false;            // 月历弹层
+  let _obExpand = false;             // 🟢 v229.87：逾期红条是否已展开全部
+  let _pendingJumpId = null;         // 🟢 v229.87：待高亮的跳转目标任务
 
   // 🟢 v229.39（P0 修复）：全天任务存的是当天 T00:00:00，用「时刻」比较会恒判逾期。
   //   改为：全天比「日」，定时比「时刻」。getStats / 渲染 / 铃铛 / 月历统一走这里。
@@ -297,9 +304,16 @@ const WorkTasksModule = (function () {
     const ring = `<div class="wt-ring" style="--p:${pct}"><span>${doneCnt}/${total}</span></div>`;
 
     let html = '';
-    // 逾期红条
+    // 逾期红条（🟢 v229.87：任务名可点直达对应日期，不再手动翻找）
     if (overdueAll.length) {
-      html += `<div class="wt-overbar">⚠ ${overdueAll.length} 项逾期（不在今日）：${overdueAll.slice(0, 4).map((t) => esc(t.title)).join('、')}${overdueAll.length > 4 ? '…' : ''}</div>`;
+      const shown = _obExpand ? overdueAll : overdueAll.slice(0, 4);
+      html += `<div class="wt-overbar"><span class="wt-ob-label">⚠ ${overdueAll.length} 项逾期（不在今日），点击直达：</span>`
+        + shown.map((t) => {
+            const d = parseLocal(t.dueAt);
+            return `<span class="wt-ob-link" onclick="WorkTasksModule.jumpToTask('${esc(t.id)}')" title="跳转到该任务">${esc(t.title)}${d ? `<i>${ymd(d).slice(5)}</i>` : ''}</span>`;
+          }).join('')
+        + (!_obExpand && overdueAll.length > 4 ? `<span class="wt-ob-more" onclick="WorkTasksModule.expandOverdue()">+${overdueAll.length - 4} 项</span>` : '')
+        + `</div>`;
     }
     html += `<div class="wt-dayhead"><div class="wt-dh-date">${ymd(_cursor)} 周${WEEK[_cursor.getDay()]}</div>${ring}</div>`;
     // 时间轴
@@ -389,6 +403,71 @@ const WorkTasksModule = (function () {
     return html;
   }
 
+  // ---------- 🟢 v230.04：待办全览视图 ----------
+  // v230.03 的「后续任务快捷条」在任务多时会全部平铺、杂乱无章。
+  // 改为独立入口（模式栏「待办 N」按钮）→ 本视图按分组展示全部未完成任务，
+  // 点行直达对应日期；也可直接勾选了结。
+  function todoGroups() {
+    return [
+      { key: 'overdue', label: '逾期' },
+      { key: 'today', label: '今天' },
+      { key: 'tomorrow', label: '明天' },
+      { key: 'week', label: '本周内' },
+      { key: 'later', label: '更晚' },
+      { key: 'none', label: '未设置日期' },
+    ];
+  }
+  function bucketOf(t, n) {
+    const d = parseLocal(t.dueAt);
+    if (!d) return 'none';
+    if (isOverdueAt(t, n)) return 'overdue';
+    const days = Math.round((startOfDay(d) - startOfDay(n)) / 86400000);
+    if (days <= 0) return 'today';
+    if (days === 1) return 'tomorrow';
+    if (days < 7) return 'week';
+    return 'later';
+  }
+  function todoWhenLabel(t) {
+    const d = parseLocal(t.dueAt);
+    if (!d) return '未设置日期';
+    const days = Math.round((startOfDay(d) - startOfDay(now())) / 86400000);
+    const rel = days < 0 ? `逾期${-days === 1 ? '1 天' : -days + ' 天'}` : days === 0 ? '今天' : days === 1 ? '明天' : days < 7 ? `${days} 天后` : '';
+    return `${ymd(d).slice(5)} 周${WEEK[d.getDay()]}${t.allDay ? '' : ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())}${rel ? ` · ${rel}` : ''}`;
+  }
+  function renderTodo(arr) {
+    const n = now();
+    const items = arr.filter((t) => !t.done)
+      .sort((a, b) => {
+        const da = parseLocal(a.dueAt), db = parseLocal(b.dueAt);
+        if (!da && !db) return 0;
+        if (!da) return 1;            // 无日期排最后
+        if (!db) return -1;
+        return da - db;
+      });
+    if (!items.length) {
+      return `<div class="wt-todo-empty"><div class="wt-todo-empty-ic">🎉</div><div>暂无未完成任务</div><div class="wt-todo-empty-sub">所有任务都已了结</div></div>`;
+    }
+    let html = `<div class="wt-todo">`;
+    todoGroups().forEach((g) => {
+      const list = items.filter((t) => bucketOf(t, n) === g.key);
+      if (!list.length) return;
+      html += `<div class="wt-todo-grp ${g.key === 'overdue' ? 'is-overdue' : ''}">
+          <div class="wt-todo-ghead">${g.label}<b>${list.length}</b></div>
+          ${list.map((t) => `
+            <div class="wt-todo-ev" data-id="${esc(t.id)}" onclick="WorkTasksModule.jumpToTask('${esc(t.id)}')">
+              <label class="wt-chk" onclick="event.stopPropagation()"><input type="checkbox" onchange="WorkTasksModule.onToggle('${esc(t.id)}')"></label>
+              <div class="wt-todo-main">
+                <div class="wt-todo-title">${esc(t.title)}${t.type === 'flow-step' ? '<span class="wt-badge">新招·步' + t.stepOrder + '</span>' : t.type === 'flow' ? '<span class="wt-badge wt-badge-flow">新招</span>' : t.type === 'business' ? '<span class="wt-badge wt-badge-biz">业务</span>' : ''}</div>
+                <div class="wt-todo-when">${todoWhenLabel(t)}</div>
+              </div>
+              <span class="wt-todo-go" title="跳到该任务日期">›</span>
+            </div>`).join('')}
+        </div>`;
+    });
+    html += `</div>`;
+    return html;
+  }
+
   async function render() {
     startSync(); // 进入模块即启动同步分包（进入即拉 + 轻轮询）
     hideUndo(); // 视图重绘 → 之前的撤销浮条作废（避免残留过期提示）
@@ -402,33 +481,40 @@ const WorkTasksModule = (function () {
     arr.forEach((t) => { const d = parseLocal(t.dueAt); if (!d) return; const k = ymd(d); mMap[k] = (mMap[k] || 0) + 1; if (isOverdue(t)) mOver[k] = true; });
     window.__wtMonthMap = mMap; window.__wtMonthOver = mOver;
 
-    const modeBtn = (k, label) => `<button class="wt-mbtn ${_mode === k ? 'on' : ''}" onclick="WorkTasksModule.setMode('${k}')">${label}</button>`;
+    // 🟢 v230.04：「待办」入口带未完成数量徽标（替代 v230.03 会溢出的快捷条）
+    const pendingCnt = arr.filter((t) => !t.done).length;
+    const modeBtn = (k, label, cnt) => `<button class="wt-mbtn ${_mode === k ? 'on' : ''}" onclick="WorkTasksModule.setMode('${k}')">${label}${cnt ? `<b class="wt-mcnt">${cnt}</b>` : ''}</button>`;
 
     let body;
     if (_mode === 'day') body = renderDay(arr);
     else if (_mode === 'week') body = renderWeek(arr);
+    else if (_mode === 'todo') body = renderTodo(arr);
     else body = renderMonth(arr);
 
-    const navLabel = _mode === 'month' ? `${_cursor.getFullYear()}年${_cursor.getMonth() + 1}月` : `${ymd(_cursor)} 周${WEEK[_cursor.getDay()]}`;
+    const navLabel = _mode === 'month' ? `${_cursor.getFullYear()}年${_cursor.getMonth() + 1}月`
+      : _mode === 'todo' ? `未完成任务 ${pendingCnt} 项`
+      : `${ymd(_cursor)} 周${WEEK[_cursor.getDay()]}`;
 
     content.innerHTML = `
       <div class="wt-wrap">
         <div class="wt-toolbar">
           <div class="wt-nav">
-            <button class="wt-navbtn" onclick="WorkTasksModule.shiftCursor(-1)">‹</button>
+            <button class="wt-navbtn" onclick="WorkTasksModule.shiftCursor(-1)" aria-label="上一页">‹</button>
             <button class="wt-today" onclick="WorkTasksModule.goToday()">今天</button>
-            <button class="wt-navbtn" onclick="WorkTasksModule.shiftCursor(1)">›</button>
+            <button class="wt-navbtn" onclick="WorkTasksModule.shiftCursor(1)" aria-label="下一页">›</button>
             <span class="wt-navlabel">${navLabel}</span>
-            <button class="wt-calbtn" onclick="WorkTasksModule.toggleMonth()">📅 月历</button>
+            <button class="wt-calbtn" onclick="WorkTasksModule.toggleMonth()" title="打开月历">📅 月历</button>
           </div>
           <div class="wt-modes">
-            ${modeBtn('day', '日')}${modeBtn('week', '周')}${modeBtn('month', '月')}
+            ${modeBtn('day', '日')}${modeBtn('week', '周')}${modeBtn('month', '月')}${modeBtn('todo', '待办', pendingCnt)}
           </div>
         </div>
         ${_monthOpen ? `<div class="wt-mp-wrap">${renderMonthPicker()}</div>` : ''}
         <div class="wt-stats">逾期 <b class="wt-red">${stats.overdue}</b> · 今日 <b>${stats.today}</b> · 本周 <b>${stats.upcoming}</b> · 已完成 <b>${stats.done}</b> / ${stats.total}</div>
         <div class="wt-body">${body}</div>
       </div>`;
+    // 🟢 v229.87：跳转落地 —— 渲染完成后滚动定位 + 高亮目标任务
+    if (_pendingJumpId) { const pid = _pendingJumpId; _pendingJumpId = null; flashRow(pid); }
   }
 
   // ---------- 外部入口（首页卡 / 铃铛） ----------
@@ -445,8 +531,8 @@ const WorkTasksModule = (function () {
         <span class="glass-card-action" onclick="App.go('workTasks')">查看全部 ›</span>
       </div>
       <div class="todo-list">
-        ${stats.overdue ? `<div class="todo-item"><div class="todo-dot urgent"></div><span class="todo-text">${stats.overdue} 项任务已逾期</span><span class="todo-meta">立即处理 ›</span></div>` : ''}
-        ${items.length ? items.map((t) => `<div class="todo-item ${isOverdue(t) ? 'todo-warn' : ''}" onclick="App.go('workTasks')">
+        ${stats.overdue ? `<div class="todo-item" onclick="WorkTasksModule.jumpToEarliestOverdue()"><div class="todo-dot urgent"></div><span class="todo-text">${stats.overdue} 项任务已逾期</span><span class="todo-meta">立即处理 ›</span></div>` : ''}
+        ${items.length ? items.map((t) => `<div class="todo-item ${isOverdue(t) ? 'todo-warn' : ''}" onclick="WorkTasksModule.jumpToTask('${esc(t.id)}')">
             <div class="todo-dot ${isOverdue(t) ? 'urgent' : 'normal'}"></div>
             <span class="todo-text">${esc(t.title)}</span>
             <span class="todo-meta">${esc(dueLabel(t))}</span>
@@ -477,6 +563,35 @@ const WorkTasksModule = (function () {
   function goToday() { _cursor = startOfDay(now()); _monthOpen = false; render(); }
   function shiftCursor(d) { _cursor = addDays(startOfDay(_cursor), d); render(); }
   function goDate(s) { const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/); if (m) _cursor = new Date(+m[1], +m[2] - 1, +m[3]); _mode = 'day'; _monthOpen = false; render(); }
+
+  // 🟢 v229.87：提醒直达 —— 逾期红条 / 首页摘要卡一键跳到任务所在日期并高亮，不再逐页翻找
+  function flashRow(id) {
+    requestAnimationFrame(() => {
+      const row = document.querySelector('.wt-ev[data-id="' + id + '"]');
+      if (!row) return;
+      try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { row.scrollIntoView(); }
+      row.classList.add('wt-flash');
+      setTimeout(() => row.classList.remove('wt-flash'), 2400);
+    });
+  }
+  async function jumpToTask(id) {
+    const arr = await WorkTasksSync.load();
+    const t = arr.find((x) => x.id === id);
+    if (!t) return;
+    const d = parseLocal(t.dueAt);
+    if (d) _cursor = startOfDay(d);
+    _mode = 'day'; _monthOpen = false;
+    _pendingJumpId = id;
+    if (typeof App !== 'undefined' && App.currentModule === 'workTasks') { await render(); return; }
+    App.go('workTasks'); // 进入模块后由 render() 消费 _pendingJumpId
+  }
+  async function jumpToEarliestOverdue() {
+    const arr = await WorkTasksSync.load();
+    const ovs = arr.filter((t) => isOverdue(t)).sort((a, b) => parseLocal(a.dueAt) - parseLocal(b.dueAt));
+    if (!ovs.length) { App.go('workTasks'); return; }
+    jumpToTask(ovs[0].id);
+  }
+  function expandOverdue() { _obExpand = true; render(); }
   function shiftMonth(d) { _cursor = new Date(_cursor.getFullYear(), _cursor.getMonth() + d, 1); _mode = 'month'; render(); }
   function toggleMonth(v) { _monthOpen = (v === undefined) ? !_monthOpen : v; render(); }
 
@@ -526,6 +641,8 @@ const WorkTasksModule = (function () {
     }
     updateRingLive();                 // M3：进度环即时同步（不靠整页重绘）
     refreshBell();
+    // 🟢 v230.04：待办全览视图里直接勾选了结 → 动画后重渲（行移出列表 + 「待办 N」徽标即时更新）
+    if (_mode === 'todo') { setTimeout(() => { if (_mode === 'todo') render(); }, 460); }
     if (typeof DashboardModule !== 'undefined' && DashboardModule.renderMyTasksCard) DashboardModule.renderMyTasksCard();
     if (nowDone) showUndo('已了结', () => onToggle(id)); // 撤销 = 反勾选（回原位）
     else hideUndo();
@@ -550,9 +667,16 @@ const WorkTasksModule = (function () {
   }
 
   // 🟢 v229.39（M2 撤销）：把记录按原样插回（保 id / 顺序），再整页重绘一次
+  // 🟢 v230.08：撤销删除 = 清墓碑 + 以最新 updatedAt 写回（压过别处设备可能已见的墓碑）
   async function restoreTasks(recs) {
     let arr = await WorkTasksSync.load();
-    recs.forEach((r) => { if (!arr.find((x) => x.id === r.id)) arr.push(r); });
+    WorkTasksSync.clearDeleted(recs.map((r) => r.id));
+    const ts = Date.now();
+    recs.forEach((r) => {
+      r.updatedAt = ts;
+      const i = arr.findIndex((x) => x.id === r.id);
+      if (i < 0) arr.push(r); else arr[i] = r;
+    });
     await WorkTasksSync.save(arr);
     render(); refreshBell();
     if (typeof DashboardModule !== 'undefined' && DashboardModule.renderMyTasksCard) DashboardModule.renderMyTasksCard();
@@ -624,10 +748,11 @@ const WorkTasksModule = (function () {
   return {
     render, renderSummaryInto, refreshBell, bellInfo, bootstrap,
     setMode, goToday, shiftCursor, goDate, shiftMonth, toggleMonth,
+    jumpToTask, jumpToEarliestOverdue, expandOverdue,
     onQuickAdd, onQuickInput, onToggle, onRemove,
     addFromBusiness, ensureOrderApproveTasks,
     startSync, stopSync, onLeave,
-    _debug: { _load: WorkTasksSync.load, getStats, addTask, removeTask, toggleDone },
+    _debug: { _load: (...a) => WorkTasksSync.load(...a), getStats, addTask, removeTask, toggleDone, restoreTasks },
   };
 })();
 if (typeof window !== 'undefined') window.WorkTasksModule = WorkTasksModule;

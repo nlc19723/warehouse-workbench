@@ -264,7 +264,7 @@ window.AppConfig = {
     // 🟢 v207：P0 安全与数据一致性修复（AUDIT-201 XSS / AUDIT-101 缓存 / AUDIT-302 事务）
     // 🟢 v228.48：真实走查修复 —— 启动兜底「空状态」不再覆盖用户已打开的界面
     // 🟢 v228.45：季度盘点跨端一致性 —— 同一账号 PC/移动端任务、进度、批次区间完全统一
-    version: 'v229.84',
+    version: 'v230.31',
     beaconAppkey: '0WEB06U85YBSLJNL',          // 腾讯 beacon 分析 SDK appkey（原硬编码于 index.html，外提至此）
     dataPath: '',                           // 无内置数据文件；需经「导入 Excel」上传或 Supabase 云端同步
     kpiAllLimit: 1000000,        // 🟢 O7：出库 KPI 统计时一次性取出的全量上限（M6 修复用）
@@ -339,8 +339,11 @@ window.AppConfig = {
     return k.entries.indexOf(entryKey) !== -1;
   },
 
-  // ===== v217 模块权限清单（共 18 项，顺序即侧边栏顺序）=====
+  // ===== v217 模块权限清单（共 17 项业务模块，顺序即侧边栏顺序）=====
   // 落地页"第一个有权限模块"按此数组顺序取；分组仅用于设置界面展示。
+  // 🟢 v230.19（审查修复）：「我的任务」(workTasks) 是个人模块（自己的任务簿），
+  //   不纳入本授权体系 —— 所有已登录账号均可访问，判定见 app.js _canAccessModule 特判。
+  //   （v229.23 上线时漏登 MODULES 曾致库管员点击顶栏 📌 铃铛弹「无权限」。）
   MODULES: [
     { key: 'dashboard',         label: '首页仪表盘',     icon: '📊', group: '总览' },
     { key: 'query',             label: '查询系统',       icon: '🔍', group: '总览' },
@@ -374,7 +377,8 @@ window.AppConfig = {
     stocktake: ['stocktake', 'stocktakeAssign', 'stocktakeRecord', 'query', 'outboundList'],
     // 全业务（管理员 / 自己）：含全部模块 + 子权限 + 4 个系统入口
     admin: [
-      // 17 业务模块（🟢 v228.60：移除 stocktakeBatch —— 盘点批次汇总模块已下线）
+      // 17 业务模块（🟢 v228.60：移除 stocktakeBatch —— 盘点批次汇总模块已下线；
+      // 🟢 v230.19：workTasks 为个人模块不纳入授权，见 _canAccessModule 特判）
       'dashboard','query','inventoryAlert','orderCheck','orderTrack','stock','stocktake','stocktakeAssign','stocktakeRecord','orders','inbound','pricing','reconciliation','supplier','lowTurnover','breach','outbound','outboundList',
       // 🟢 v227.39：4 个系统入口（云端/导入/设置/源码）
       'cloud','import','settings','source'
@@ -421,7 +425,7 @@ window.AppConfig = {
     if (opts.pushCloud === false) return;   // 🟢 v228.84：接收端合并结果只落本地，不回写云端
     let synced = false;
     try { await this.syncKeepers(); synced = true; } catch (e) { /* 离线/失败：本端已落本地，仅不通知其他设备 */ }
-    if (synced && opts.bumpMeta !== false) { try { await this._bumpKeepersMeta(); } catch (e) {} }
+    if (synced && opts.bumpMeta !== false) { try { await this._bumpKeepersMeta(); } catch (e) { console.warn('[js/config.js:428] 异常(已忽略):', e); } }
   },
 
   // 🟢 v228.81：账号/权限哨兵 —— 轻量时间戳键。
@@ -444,7 +448,7 @@ window.AppConfig = {
       }
     } catch (e) { /* 忽略：哨兵键写入失败不阻断账号保存 */ }
     const ch = this._getKeepersChannel();
-    if (ch) { try { ch.postMessage({ type: 'keepersChanged', ts }); } catch (e) {} }
+    if (ch) { try { ch.postMessage({ type: 'keepersChanged', ts }); } catch (e) { console.warn('[js/config.js:451] 异常(已忽略):', e); } }
   },
   _getKeepersChannel() {
     if (this._keepersChannel === undefined) {
@@ -478,9 +482,9 @@ window.AppConfig = {
       this._keepersLastMetaTs = ts;
       const st = await this.pullKeepersFromCloud();
       if (st === 'ok' || st === 'empty') {
-        if (typeof App !== 'undefined' && App._onKeepersChanged) { try { App._onKeepersChanged(); } catch (e) {} }
+        if (typeof App !== 'undefined' && App._onKeepersChanged) { try { App._onKeepersChanged(); } catch (e) { console.warn('[js/config.js:485] 异常(已忽略):', e); } }
         // 🟢 v228.94：权限变更与桶切换常由同一管理员动作触发；顺带检查新桶下发，复用本 60s 看门狗
-        try { if (typeof this.pullCloudConfigFromCloud === 'function') this.pullCloudConfigFromCloud(); } catch (e) {}
+        try { if (typeof this.pullCloudConfigFromCloud === 'function') this.pullCloudConfigFromCloud(); } catch (e) { console.warn('[js/config.js:487] 异常(已忽略):', e); }
         return true;
       }
     }
@@ -589,7 +593,7 @@ window.AppConfig = {
     try { localStorage.setItem(this._adminKey(), JSON.stringify(sess)); } catch (e) { /* 忽略 */ }
     return this.getAdminSession();
   },
-  clearAdminSession() { try { localStorage.removeItem(this._adminKey()); } catch (e) {} },
+  clearAdminSession() { try { localStorage.removeItem(this._adminKey()); } catch (e) { console.warn('[js/config.js:596] 异常(已忽略):', e); } },
   // 是否具备管理员特权：特权会话在 → true；否则看当前作业身份是否是管理员
   isAdmin() {
     const a = this.getAdminSession();
@@ -617,11 +621,11 @@ window.AppConfig = {
       } else {
         localStorage.removeItem(this._keeperLoginKey());
       }
-    } catch (e) {}
+    } catch (e) { console.warn('[js/config.js:624] 异常(已忽略):', e); }
   },
   // 彻底退出（连管理员特权一起清）
   logoutAll() {
-    try { localStorage.removeItem(this._keeperLoginKey()); } catch (e) {}
+    try { localStorage.removeItem(this._keeperLoginKey()); } catch (e) { console.warn('[js/config.js:628] 异常(已忽略):', e); }
     this.clearAdminSession();
   },
   // 🟢 v227.36：本机「已联网验证过的账号」缓存（支撑「首次联网验证 / 之后离线复用」）
@@ -714,9 +718,9 @@ window.AppConfig = {
       //   管理员改权限后，其他已登录设备一定拉到最新，而非被本地 TTL 缓存的脏数据糊弄。
       // 🔴 v228.84：同时清掉 _settingsKeyCache（**真正存值**的地方）—— 只清 _keyTsCache 只是让 TTL 失效，
       //   若值缓存仍在，_readSettingFile 仍会把旧值当「cached」返回（尤其 ⓪/⓪-1/失败回退分支），拉取形同虚设。
-      if (SyncManager._keyTsCache) { try { delete SyncManager._keyTsCache['keepers']; } catch (e) {} }
-      if (SyncManager._keyEpochCache) { try { delete SyncManager._keyEpochCache['keepers']; } catch (e) {} }
-      if (SyncManager._settingsKeyCache) { try { delete SyncManager._settingsKeyCache['keepers']; } catch (e) {} }
+      if (SyncManager._keyTsCache) { try { delete SyncManager._keyTsCache['keepers']; } catch (e) { console.warn('[js/config.js:721] 异常(已忽略):', e); } }
+      if (SyncManager._keyEpochCache) { try { delete SyncManager._keyEpochCache['keepers']; } catch (e) { console.warn('[js/config.js:722] 异常(已忽略):', e); } }
+      if (SyncManager._settingsKeyCache) { try { delete SyncManager._settingsKeyCache['keepers']; } catch (e) { console.warn('[js/config.js:723] 异常(已忽略):', e); } }
       SyncManager._bustUntil = Date.now() + 1500;   // 🟢 v228.84：直读绕过 CDN 旧值（无条件赋值，见 keepersWatchTick 注释）
       const cloud = await SyncManager.getSetting('keepers');
       // 🟢 v228.55：云端无值时区分「真没有」和「连不上」——
@@ -805,7 +809,7 @@ window.AppConfig = {
           url: cfg.url, key: cfg.key,
           bucket: cfg.bucket || (AppConfig.supabase && AppConfig.supabase.bucket) || 'workbench-data'
         }));
-      } catch (e) {}
+      } catch (e) { console.warn('[js/config.js:812] 异常(已忽略):', e); }
       if (typeof SyncManager === 'object' && SyncManager && typeof SyncManager.connect === 'function') {
         try { await SyncManager.connect(cfg.url, cfg.key, cfg.bucket); } catch (e) { console.warn('[cloudConfig] 自动连接失败(已忽略):', e && e.message); }
       }
@@ -827,7 +831,7 @@ window.AppConfig = {
       const sig = _hmacSha256Hex(payload, _cfgSigSecret());
       await SyncManager.setSetting('cloudConfig', { url: eff.url, key: eff.key, bucket: bucket, ts: ts, sig: sig });
       // 🟢 v228.94：捎带 bump keepersMeta，使「未跑数据同步心跳」的设备也能经 60s 权限看门狗感知桶切换
-      try { await this._bumpKeepersMeta(); } catch (e) {}
+      try { await this._bumpKeepersMeta(); } catch (e) { console.warn('[js/config.js:834] 异常(已忽略):', e); }
       return true;
     }
     catch (e) { console.warn('[cloudConfig] 上云失败(已忽略):', e && e.message); return false; }
@@ -837,6 +841,9 @@ window.AppConfig = {
 // 速查表：key → label（对象字面量内不能引用自身，定义后补全）
 AppConfig.MODULES_MAP = {};
 AppConfig.MODULES.forEach(function (m) { AppConfig.MODULES_MAP[m.key] = m.label; });
+// 🟢 v230.19：workTasks 不纳入 MODULES 授权体系，但补一条 label 映射，
+//   保证模块状态记忆等场景显示「我的任务」而非裸 key。
+AppConfig.MODULES_MAP.workTasks = '我的任务';
 
 console.log('[AppConfig] 已加载 ' + window.AppConfig.app.version + ' · Supabase URL: ' + window.AppConfig.supabase.url);
 

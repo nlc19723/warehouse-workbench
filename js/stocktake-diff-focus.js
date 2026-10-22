@@ -22,8 +22,8 @@
   'use strict';
 
   const NS = 'http://www.w3.org/2000/svg';
-  const esc = s => String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // 🟢 v230.20（审查收敛）：删除本地 esc 影子实现，统一用全局 esc（config.js 定义，
+  //   覆盖 & < > " ' 五种字符，比原本地实现多转义单引号——文本视觉一致、更安全）。
   const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
   const fmt = n => {
     const v = parseFloat(n);

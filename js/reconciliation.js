@@ -242,7 +242,7 @@ const ReconciliationModule = {
                 <td>${TableUtils.link('stock', i.存货编码 ?? '', i.存货编码 ?? '')}</td>
                 <td>${esc(i.存货名称 ?? '')}</td>
                 <td>${esc(i.规格型号 ?? '')}</td>
-                <td>${i.数量}</td>
+                <td>${TableUtils.formatNum(i.数量)}</td>
                 <td>${TableUtils.formatMoney(i.原币含税单价)}</td>
                 <td>${TableUtils.formatMoney(i.原币价税合计)}</td>
               </tr>

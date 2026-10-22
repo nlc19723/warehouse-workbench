@@ -149,6 +149,9 @@
   function onTouchStart(e) {
     if (refreshing || !mobile() || booting() || modalOpen()) return;
     if (!e.touches || !e.touches.length) return;
+    // 🟢 v229.98（AUDIT-229-98-06①）：多指守卫（与 mobile-gestures.js onStart 同款）——
+    //   第二根手指落下时 touches.length 变 2，若继续采样会让 startY 跳变、误判成下拉刷新。
+    if (e.touches.length !== 1) return;
     var t = e.touches[0];
     startX = t.clientX; startY = t.clientY;
     dy = 0;

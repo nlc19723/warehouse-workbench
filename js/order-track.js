@@ -115,6 +115,10 @@ const OrderTrackModule = {
   },
 
   resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     this.currentFilter = { keyword: '', supplier: '' };
     this.currentPage = 1;
     const kwInput = document.getElementById('trackKw');
@@ -176,7 +180,7 @@ const OrderTrackModule = {
                 <td>${TableUtils.link('stock', o._存货编码 ?? '', o._存货编码 ?? '')}</td>
                 <td>${esc(o.存货名称)}</td>
                 <td>${esc(o.规格型号 ?? '')}</td>
-                <td>${o.数量}</td>
+                <td>${TableUtils.formatNum(o.数量)}</td>
                 <td>${o.累计入库数量 || 0}</td>
                 <td><strong>${pendingQty}</strong></td>
                 <td>

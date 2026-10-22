@@ -3,9 +3,11 @@
 // 替换各模块旧的 TableUtils.initSmartSelect（拖拽求和气泡），
 // 让全表获得一致交互：
 //   · 左键点格 = 选单格；按住拖动 = 矩形连续框选；Shift+点击 = 从锚点扩展
+//     （v230.07：单击选中单格的基础交互已恢复；求和不离列——见下方 rangeSum）
 //   · Ctrl+C = 复制选区为 TSV（仅数据行，不含表头；存货编码等图标前缀如 🔍 已清洗）
 //   · Ctrl+A = 全选当前表；Esc = 清空
-//   · 底部选择条：已选 R 行 × C 列 · N 格 · 合计 ¥xxx + 复制选区/全选/清空
+//   · 选择条（v230.06：固定在内容区左沿，不再遮挡居中翻页栏）：
+//     已选 R 行 × C 列 · N 格 · 合计 ¥xxx（仅数量/金额类列，v230.06）+ 复制选区/全选/清空
 //   · 表内禁止原生文字选区（不再出现蓝色选块）
 //   · v229.66：监听 DOM 自动接管——页面任何时候出现的 .data-table 都会自动具备上述交互，
 //     不再依赖「容器渲染那一刻必须已有表格」（盘点/盘点记录/下钻浮层等延迟出表此前会漏接）
@@ -43,11 +45,16 @@
   }
 
   // 🟢 v229.66：一个容器可能含多张表（详情页/盘点），按点击的 td 反查所属表，避免永远取第一张
+  // 🟢 v230.06：同一容器同一表时保留 anchor（Shift+点击扩展跨 mousedown 事件依赖锚点，
+  //   旧实现每次重建 state 会把锚点清掉，导致 Shift+扩展失效）；切换容器/表才整体重置。
   function ensureStateFor(container, td) {
     const table = (td && td.closest && td.closest('table')) || container.querySelector('table');
     if (!table) return false;
-    const tbody = table.querySelector('tbody') || table;
-    state = { container, table, tbody, sel: null, anchor: null, dragging: false };
+    if (state && state.container === container && state.table === table && document.body.contains(container)) {
+      state.tbody = table.querySelector('tbody') || table;   // tbody 可能被模块重渲替换，取最新
+      return true;
+    }
+    state = { container, table, tbody: table.querySelector('tbody') || table, sel: null, anchor: null, dragging: false };
     return true;
   }
 
@@ -57,8 +64,9 @@
   }
 
   function applyHighlight() {
-    if (!state || !state.sel) return;
+    if (!state) return;
     clearHighlight(state.container);
+    if (!state.sel) return;
     const { r1, c1, r2, c2 } = state.sel;
     const rows = bodyRows(state.tbody);
     for (let r = r1; r <= r2 && r < rows.length; r++) {
@@ -70,14 +78,28 @@
     }
   }
 
+  // 🟢 v230.06：列类型判定——表头命中 NUMERIC_KEYWORDS 视为数量/金额类列，
+  //   与 TableUtils._detectNumericCols（汇总行）同一口径，避免「存货编码/订单号被求和」。
+  function isNumericColumn(th) {
+    if (!th || !TU || !Array.isArray(TU.NUMERIC_KEYWORDS)) return false;
+    const lbl = (th.querySelector && th.querySelector('.th-sort-label')) ? th.querySelector('.th-sort-label') : null;
+    const text = ((lbl ? lbl.textContent : th.textContent) || '').trim();
+    if (!text) return false;
+    return TU.NUMERIC_KEYWORDS.some((k) => text.includes(k));
+  }
+
+  // 🟢 v230.06：合计只累计数量/金额类列——存货编码 Q03010100101、订单号 20240308 等
+  //   纯编号列不再被解析成数字累加（用户反馈「非数量金额列也出合计，无意义」）。
   function rangeSum() {
     if (!state || !state.sel) return null;
     const { r1, c1, r2, c2 } = state.sel;
     const rows = bodyRows(state.tbody);
+    const ths = state.table.querySelectorAll('thead th');
     let sum = 0, any = false;
     for (let r = r1; r <= r2 && r < rows.length; r++) {
       const tds = rows[r].children;
       for (let c = c1; c <= c2 && c < tds.length; c++) {
+        if (!isNumericColumn(ths[c])) continue;
         const td = tds[c];
         if (!td) continue;
         const v = parseFloat(cellText(td).replace(/[^\d.\-]/g, ''));
@@ -126,6 +148,61 @@
 
   function removeBar() { if (bar) { bar.remove(); bar = null; } }
 
+  // 🟢 v230.06：选择条定位——水平贴内容区左沿（+16px，天然避开侧边栏 240px/56px 两种态），
+  //   解决旧实现 left:50% 底部居中与各模块居中翻页栏完全重叠的问题（用户反馈遮挡翻页键）。
+  //   垂直方向：默认贴底；若与吸底可见的分页栏矩形重叠，则上移到分页栏上方 8px，
+  //   做到「靠左且任何几何下都不遮挡翻页键」。
+  function findVisiblePagination() {
+    const bars = document.querySelectorAll('.pagination-bar');
+    for (const b of bars) {
+      if (!b.getClientRects || b.getClientRects().length === 0) continue;
+      const r = b.getBoundingClientRect();
+      if (r.width < 40 || r.height < 10) continue;          // 空容器/未渲染
+      if (r.bottom > 0 && r.top < window.innerHeight) return b;  // 视口内可见（吸底态）
+    }
+    return null;
+  }
+
+  function positionSelBar(barEl, container) {
+    if (!barEl) return;
+    const anchor = container || barEl._wbAnchor;
+    try {
+      let left = 16;   // CSS 兜底值；取不到容器几何时保持
+      if (anchor && anchor.getBoundingClientRect) {
+        const rect = anchor.getBoundingClientRect();
+        left = rect.left + 16;
+        const maxLeft = Math.max(8, window.innerWidth - 32);   // 右界兜底（超窄容器不越屏）
+        if (left > maxLeft) left = maxLeft;
+      }
+      barEl.style.left = left + 'px';
+
+      // 垂直避让：与吸底分页栏重叠时上移让位（浮条较宽，仅靠左移不足以保证不遮挡）
+      const pager = findVisiblePagination();
+      const bh = barEl.offsetHeight || 44;
+      const bw = barEl.offsetWidth || 380;
+      if (pager) {
+        const pr = pager.getBoundingClientRect();
+        const barBottom = 22, barTop = window.innerHeight - barBottom - bh;
+        const hOverlap = left < pr.right && (left + bw) > pr.left;
+        const vOverlap = barTop < pr.bottom && pr.top < (window.innerHeight - barBottom);
+        if (hOverlap && vOverlap) {
+          barEl.style.bottom = Math.max(8, window.innerHeight - pr.top + 8) + 'px';
+          return;
+        }
+      }
+      barEl.style.bottom = '22px';
+    } catch (e) { /* 几何读取失败时退回 CSS 默认 left:16px / bottom:22px */ }
+  }
+
+  // 窗口缩放 / 侧边栏收起展开（body class 变化，不触发 resize）时重定位所有可见选择条
+  function repositionAllSelBars() {
+    try {
+      if (bar) positionSelBar(bar, (state && state.container) || bar._wbAnchor);
+      const ia = document.getElementById('iaSelBar');
+      if (ia) positionSelBar(ia, ia._wbAnchor);
+    } catch (e) { /* noop */ }
+  }
+
   function updateBar() {
     if (!state || !state.sel) { removeBar(); return; }
     const { r1, c1, r2, c2 } = state.sel;
@@ -142,6 +219,7 @@
       });
       document.body.appendChild(bar);
     }
+    bar._wbAnchor = state.container;
     bar.innerHTML = `<div class="sel-bar-inner">` +
       `<span class="sel-bar-count">已选 <b>${rows}</b> 行 × <b>${cols}</b> 列 · ${cells} 格` +
       (sum !== null ? ` · 合计 <b>¥${fmtNum(sum)}</b>` : '') + `</span>` +
@@ -149,6 +227,7 @@
       `<button class="sel-btn" data-act="all">全选</button>` +
       `<button class="sel-btn ghost" data-act="clear">清空</button>` +
       `</div>`;
+    positionSelBar(bar, state.container);   // 内容就绪后再定位，几何实测才准
     requestAnimationFrame(() => bar.classList.add('show'));
   }
 
@@ -209,6 +288,10 @@
     if (e.shiftKey && state.anchor) {
       setSel(state.anchor, rc);
     } else {
+      // 🟢 v230.07：单击 = 选中该格（恢复基础交互：选中/复制单格）。
+      //   v230.06 曾把单击改为只设锚点不出选区，用户反馈「点击无反应也没浮条」——
+      //   选中单元格是表格基础能力。当初要杜绝的「乱求和」由列过滤兜底：
+      //   合计只对数量/金额类列计算（见 rangeSum），编码/订单号列点击只有选区、不出合计。
       state.anchor = { r: rc.r, c: rc.c };
       state.sel = { r1: rc.r, c1: rc.c, r2: rc.r, c2: rc.c };
     }
@@ -392,12 +475,25 @@
 
   ensureAutoBind();
 
+  // 🟢 v230.06：选择条为 fixed 定位，容器左边变化（窗口缩放 / 侧边栏收起展开）时必须重定位，
+  //   否则会停留在旧位置甚至遮挡翻页栏。侧边栏切换不触发 resize，故同时监听 body class。
+  //   注意：这两个监听必须在脚本加载时注册，不能放进 ensureDocBound——
+  //   inventory-alert 页只有 #alertTableArea（AUTO_SKIP），ensureDocBound 可能永不执行，
+  //   但其 #iaSelBar 同样需要跟随重定位。
+  window.addEventListener('resize', repositionAllSelBars);
+  try {
+    const bodyObs = new MutationObserver(repositionAllSelBars);
+    bodyObs.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  } catch (e) { /* 无 MutationObserver 环境降级：仅 resize 兜底 */ }
+
   if (TU) {
     TU.initExcelSelection = initExcelSelection;
     TU.initExcelSelectionAll = initExcelSelectionAll;
+    TU.positionSelBar = positionSelBar;      // 🟢 v230.06：供 inventory-alert 等自有选择条复用同一左沿定位
   }
   if (typeof window !== 'undefined') {
     window.initExcelSelection = initExcelSelection;
     window.initExcelSelectionAll = initExcelSelectionAll;
+    window.positionSelBar = positionSelBar;
   }
 })();

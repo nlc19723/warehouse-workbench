@@ -144,7 +144,7 @@ const BreachModule = {
                 <td>${esc(r.存货名称 ?? '')}</td>
                 <td>${esc(r.规格型号 ?? '')}</td>
                 <td>¥${TableUtils.formatMoney(r.单价)}</td>
-                <td>${r.数量}</td>
+                <td>${TableUtils.formatNum(r.数量)}</td>
                 <td>${esc(r.到货时间 ?? '')}</td>
                 <td><span class="tag ${parseFloat(r.延迟天数) >= 8 ? 'tag-danger' : 'tag-warning'}">${r.延迟天数 || 0} 天</span></td>
                 <td>${r.扣款比例 ? r.扣款比例 + '%' : ''}</td>
@@ -167,6 +167,10 @@ const BreachModule = {
     this.loadData();
   },
   resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     this.currentFilter = { keyword: '' };
     const input = document.getElementById('breachKw');
     if (input) input.value = '';

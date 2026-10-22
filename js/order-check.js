@@ -85,7 +85,7 @@ const OrderCheckModule = {
     const container = document.getElementById('ocDetailTable');
     let html = `
       <div id="ocTableContainer" data-table-key="orderChecks" style="min-width:100%;">
-        <table class="data-table" style="width:auto;table-layout:fixed;" data-table-key="orderCheck">
+        <table class="data-table" style="width:auto;table-layout:fixed;" data-table-key="orderChecks">
           <thead>
             <tr>
               <th style="width:40px;text-align:center;" data-col="idx">序号</th>
@@ -776,7 +776,18 @@ const OrderCheckModule = {
     if (!ok) return;
     this.hideAutocomplete();
     this._formDraft = null;          // 草稿一并作废，防止切模块回来被恢复
-    this.renderDetailRows();         // 重渲默认空白行
+    // 🟢 v230.12：清空 = 回到「干净的初始录入态」——先清本表持久化筛选，再重渲空白行。
+    //   根因：initSortableHeaders 会从 TablePrefs 恢复用户此前设过的列筛选；
+    //   清空后的空行全部不匹配残留条件 → 被整体 display:none →
+    //   用户看到「所有的行都被删除了」（残留筛选还跨刷新存活，不清页面也好不了）。
+    if (typeof TablePrefs !== 'undefined' && TablePrefs.clearFiltersFor) {
+      try { TablePrefs.clearFiltersFor('orderChecks'); } catch (e) { /* 忽略 */ }
+    }
+    this.renderDetailRows();         // 重渲默认空白行（此时恢复的是「无筛选」状态）
+    // 运行时注册表兜底复位：列筛选 / 高级筛选 / 多键排序 / 表头图标 / chips
+    if (typeof TableUtils !== 'undefined' && TableUtils._clearAllFor) {
+      try { TableUtils._clearAllFor('orderChecks'); } catch (e) { /* 忽略 */ }
+    }
     const banner = document.getElementById('ocKpiBanner');
     if (banner) { banner.style.display = 'none'; banner.innerHTML = ''; }
     this.showMsg('✅ 已清空当前录入表');

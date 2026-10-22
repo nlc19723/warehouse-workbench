@@ -59,38 +59,109 @@ const SupplierModule = {
     if (rt !== undefined && rt !== App._goToken) return;
     let suppliers = await DataStore.getSuppliers(this.currentFilter);
 
+    // 🟢 v209 AUDIT-305：每个供应商的「所属年度」= 年度合同到期时间的年份；
+    //   仅用于下方「已入库金额」运行时兜底（合同年度内已供口径，与年度合同金额比得出进度）。
+    //   🟢 v230.22：未入库金额已改为合同期间口径（见下方派生段），不再使用本 Map——
+    //   两列不同问：已入库=年度进度，未入库=合同期间内待收欠账。
+    const yearBySup = new Map();
+    suppliers.forEach(s => {
+      if (!s.供应商) return;
+      const y = s.年度合同到期时间 ? new Date(s.年度合同到期时间 + 'T00:00:00').getFullYear() : NaN;
+      if (!isNaN(y)) yearBySup.set(s.供应商, y);
+    });
+
     // 运行时补全：若已入库金额全为0，从入库表汇总
     const allZero = suppliers.length > 0 && suppliers.every(s => !s.年度已供入库金额 || s.年度已供入库金额 === 0);
     if (allZero) {
       try {
         const inbound = await DataStore.getRows('inbound');
-        // 🟢 v209 AUDIT-305：每个供应商的「所属年度」= 年度合同到期时间的年份；
-        //   只汇总该年度内的入库，避免跨年入库被计入导致占比远超 100%。
-        const yearBySup = new Map();
-        suppliers.forEach(s => {
-          if (!s.供应商) return;
-          const y = s.年度合同到期时间 ? new Date(s.年度合同到期时间 + 'T00:00:00').getFullYear() : NaN;
-          if (!isNaN(y)) yearBySup.set(s.供应商, y);
-        });
-        const map = new Map();
+        // 🟢 v230.20（AUDIT-230-03）：分组收集后走 TableUtils.sumMoney 定点汇总
+        //   （以「分」为整数单位累加），替代逐行浮点累加，规避尾差漂移。
+        const rowsBySup = new Map();
         inbound.forEach(row => {
           const sup = row.供应商;
           if (!sup) return;
           const yr = row.入库日期 ? new Date(row.入库日期 + 'T00:00:00').getFullYear() : NaN;
           const targetYr = yearBySup.get(sup);
           if (targetYr && !isNaN(yr) && yr !== targetYr) return; // 非合同所属年度 → 跳过（无年度信息则全计，降级兼容）
-          map.set(sup, (map.get(sup) || 0) + (parseFloat(row.原币价税合计) || 0));
+          if (!rowsBySup.has(sup)) rowsBySup.set(sup, []);
+          rowsBySup.get(sup).push(row);
+        });
+        const map = new Map();
+        rowsBySup.forEach((rowsOfSup, sup) => {
+          map.set(sup, TableUtils.sumMoney(rowsOfSup, r => r.原币价税合计));
         });
         suppliers.forEach(s => {
           if (map.has(s.供应商)) {
             s.年度已供入库金额 = map.get(s.供应商);
-            if (s.年度合同金额 > 0) s.年度已供入库金额占比 = s.年度已供入库金额 / s.年度合同金额;
+            // 🟢 v230.20（AUDIT-230-03）：占比定点规整（6 位）
+            if (s.年度合同金额 > 0) s.年度已供入库金额占比 = TableUtils.roundQty(s.年度已供入库金额 / s.年度合同金额, 6);
           }
         });
       } catch(e){
     /*ignore*/ console.warn('[supplier.js:83] 异常(已忽略):', e);
   }
     }
+
+    // 🟢 v230.22（用户二次反馈修订）：派生列「未入库金额(元)」= Σ(订单.未入库量 × 订单.原币含税单价)，
+    //   【仅计订单日期落在合同期间内的订单】。期间构造与 _calcPhaseAmounts（v229.18 入库侧）同源：
+    //   第 N 期 = [该期生效, 次期生效)，末期 = [末期生效, 末期生效 + 合同年限]；三期并集即合同全生命期。
+    //   口径演进：v230.13 按「年度合同到期时间的年份」过滤 → 跨年度合同（2026 签/2027-28 到期）
+    //   的 2026 订单被整段误杀（线上 10/10 零值根因）；v230.21 一度取消过滤改全量口径 →
+    //   用户反馈合同已过期后的未入订单不应计入（如共同君行 7,306 元，合同 2025-08-31 已过期），
+    //   且明确「要过滤，以年度生效~合同到期为区间」。本版以日期区间比较实现：跨年不误杀、过期不计。
+    //   降级规则：供应商无任何生效日期 → 不过滤全计（防误杀）；订单无日期 → 计入（真实欠账）。
+    //   不按审批状态过滤（未入库天然包含未批订单，未批也是未发生业务）。
+    //   数据源为订单表（IndexedDB，getRows 表级缓存命中零开销），纯派生、不落任何存储。
+    //   单价取 原币含税单价（与订单列表「含税单价」展示列同口径）。
+    try {
+      const orders = await DataStore.getRows('orders');
+      const parseTs = (v) => { if (!v) return null; const s = String(v); const d = new Date(s.includes('T') ? s : s + 'T00:00:00'); return isNaN(d.getTime()) ? null : d.getTime(); };
+      // 合同期间构造（与 _calcPhaseAmounts / v229.18 同源）：第 N 期=[该期生效, 次期生效)，末期=[末期生效, 末期+合同年限]
+      const rangesOfSup = (s) => {
+        const ps = [s.第一年度生效时间, s.第二年度生效时间, s.第三年度生效时间].map(parseTs).filter((t) => t != null);
+        if (!ps.length) return null;                       // 无期间信息 → 不过滤（降级全计，防误杀）
+        const single = (parseFloat(s.合同年限) || ps.length) / (parseInt(s.签订次数) || ps.length);
+        const rs = [];
+        for (let i = 0; i < ps.length; i++) {
+          const start = ps[i];
+          const sd = new Date(start);
+          const end = (i < ps.length - 1) ? ps[i + 1] : new Date(sd.getFullYear() + Math.round(single), sd.getMonth(), sd.getDate()).getTime();
+          rs.push([start, end]);
+        }
+        return rs;
+      };
+      const rangeBySup = new Map();
+      suppliers.forEach((s) => { if (s.供应商) rangeBySup.set(s.供应商, rangesOfSup(s)); });
+      const uninMap = new Map();
+      orders.forEach(o => {
+        const sup = o.供应商;
+        if (!sup) return;
+        const qty = parseFloat(o.未入库量);
+        if (!(qty > 0)) return;                     // 无未入库余量 → 不产生未入库金额（NaN 亦被排除）
+        const price = parseFloat(o.原币含税单价);
+        if (!(price > 0)) return;                   // 防 NaN 污染累加
+        const od = parseTs(o.日期);
+        const rs = rangeBySup.get(sup);
+        // 有期间信息且订单日期可解析但落在全部期间之外 → 不计（v230.22：合同期外欠账不列本期）
+        if (rs && od != null && !rs.some(([a, b]) => od >= a && od < b)) return;
+        // 🟢 v230.20（AUDIT-230-03）：按供应商分组收集，稍后统一 sumMoney 定点汇总
+        if (!uninMap.has(sup)) uninMap.set(sup, []);
+        uninMap.get(sup).push({ 未入库量: qty, 原币含税单价: price });
+      });
+      suppliers.forEach(s => {
+        const rowsOfSup = uninMap.get(s.供应商);
+        // 行值 = 未入库量 × 含税单价；sumMoney 逐行按分取整后累加
+        s.年度未供入库金额 = rowsOfSup ? TableUtils.sumMoney(rowsOfSup, r => r.未入库量 * r.原币含税单价) : 0;
+      });
+    } catch (e) {
+      console.warn('[supplier.js] 未入库金额派生(已忽略):', e && e.message);
+    }
+
+    // 🟢 v229.98（AUDIT-229-98-23）：留住「未被合同状态筛过」的全量，供顶部统计卡用。
+    //   原先统计卡吃的是筛选后的数据 → 选「已到期」后，即将到期/临近期/安全三项统计全变 0，
+    //   用户一筛选就失去了全局概览。
+    const allSuppliers = suppliers.slice();
 
     const contractWarn = document.getElementById('contractWarn')?.value;
     if (contractWarn) {
@@ -131,7 +202,10 @@ const SupplierModule = {
     });
 
     if (rt !== undefined && rt !== App._goToken) return;
-    this.renderContractStats(suppliers);
+    // 🟢 v229.98（AUDIT-229-98-23）：统计卡始终基于全量，不受合同状态筛选影响
+    this.renderContractStats(allSuppliers);
+    // 🟢 v229.98（AUDIT-229-98-24）：把「当前屏幕上的行」存下来给导出用（见 exportData）
+    this._filteredSuppliers = suppliers;
 
     const total = suppliers.length;
     const pageSize = this.pageSize === 'all' ? total : this.pageSize;
@@ -164,6 +238,7 @@ const SupplierModule = {
               <th>剩余天数</th>
               <th>合同最终到期</th>
               <th>年度合同金额(元)</th>
+              <th>未入库金额(元)</th>
               <th>已入库金额(元)</th>
               <th>已入库占比</th>
               <th>操作</th>
@@ -197,6 +272,7 @@ const SupplierModule = {
                   <td>${daysTag || ''}</td>
                   <td>${esc(s.最终到期时间 ?? '')}</td>
                   <td>${TableUtils.formatMoney(s.年度合同金额)}</td>
+                  <td>${TableUtils.formatMoney(s.年度未供入库金额 || 0)}</td>
                   <td>${TableUtils.formatMoney(s.年度已供入库金额)}</td>
                   <td>
                     <div style="display:flex;align-items:center;gap:6px;">
@@ -349,6 +425,10 @@ const SupplierModule = {
   },
 
   resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     this.currentFilter = {};
     this.currentPage = 1;
     this.pageSize = AppConfig.app.defaultPageSize;
@@ -544,7 +624,11 @@ const SupplierModule = {
   },
 
   async exportData() {
-    const suppliers = await DataStore.getSuppliers();
+    // 🟢 v229.98（AUDIT-229-98-24）：导出跟随当前筛选。
+    //   原先无条件取全量供应商，屏幕上筛了「即将到期」导出来却是全部 —— 屏幕与文件对不上。
+    //   优先用 loadData 存下的筛选结果；尚未加载过时退回按当前筛选条件取一次。
+    let suppliers = Array.isArray(this._filteredSuppliers) ? this._filteredSuppliers : null;
+    if (!suppliers) suppliers = await DataStore.getSuppliers(this.currentFilter);
     if (suppliers.length === 0) { WBModal.alert('没有数据可导出'); return; }
     // 🟢 v229.03：导出列 = 工作台表格当前 9 列（剩余天数/已入库占比与页面文案一致，操作列不导）
     const now = new Date();
@@ -562,6 +646,7 @@ const SupplierModule = {
         '合同到期日': s.年度合同到期时间 ?? '',
         '剩余天数': days,
         '合同金额(元)': s.年度合同金额 ?? '',
+        '未入库金额(元)': s.年度未供入库金额 ?? 0,
         '已入库金额(元)': s.年度已供入库金额 ?? '',
         '已入库占比': pct + '%',
         '招采部门': s.招采部门 ?? ''

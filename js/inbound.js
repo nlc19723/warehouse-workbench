@@ -204,6 +204,7 @@ const InboundModule = {
               <th>入库量</th>
               <th>含税单价</th>
               <th>含税金额</th>
+              <th>备注</th>
             </tr>`;
     const rowHtml = (i) => `
               <tr>
@@ -215,9 +216,10 @@ const InboundModule = {
                 <td>${TableUtils.link('stock', i.存货编码 ?? '', i.存货编码 ?? '')}</td>
                 <td><strong>${esc(i.存货名称 ?? '')}</strong></td>
                 <td>${esc(i.规格型号 ?? '')}</td>
-                <td>${i.数量}</td>
+                <td>${TableUtils.formatNum(i.数量)}</td>
                 <td>${TableUtils.formatMoney(i.原币含税单价)}</td>
                 <td>${TableUtils.formatMoney(i.原币价税合计)}</td>
+                <td class="inbound-note-cell"><span title="${esc(i.表体备注 ?? '')}">${esc(i.表体备注 ?? '')}</span></td>
               </tr>`;
     TableUtils.virtualTable(area, { items, rowHtml, thead, tableAttrs: 'data-table-key="inbound"', threshold: 150 });
 
@@ -382,6 +384,10 @@ const InboundModule = {
   },
 
   resetFilter() {
+    // 🟢 v229.98（AUDIT-229-98-11）：重置时一并清掉【表头列筛选】。
+    //   原先「重置」只清顶部筛选栏（关键词/下拉/日期），表头列筛选仍生效且跨刷新存活 ——
+    //   用户点了重置发现行数没变，误以为功能坏了。
+    if (typeof TableUtils !== 'undefined' && TableUtils.clearColumnFiltersInView) TableUtils.clearColumnFiltersInView();
     const dr = this.getDefaultDateRange();
     this.currentFilter = { startDate: dr.start, endDate: dr.end };
     this.currentPage = 1;
@@ -393,10 +399,11 @@ const InboundModule = {
 
   async exportData() {
     const result = await DataStore.getInbound(this.currentFilter, 1, 100000);
-    // 🟢 v229.03：导出列 = 工作台表格当前 11 列（列名与表头一致）
+    // 🟢 v229.03：导出列 = 工作台表格当前 12 列（列名与表头一致）；v229.88 末列新增「备注」(表体备注)
     const cols = [{ key: '表体订单号', title: '订单编号' }, '入库日期', '入库单号', '供应商',
       { key: '项目名称', title: '项目' }, '存货编码', '存货名称', '规格型号',
-      { key: '数量', title: '入库量' }, { key: '原币含税单价', title: '含税单价' }, { key: '原币价税合计', title: '含税金额' }];
+      { key: '数量', title: '入库量' }, { key: '原币含税单价', title: '含税单价' }, { key: '原币价税合计', title: '含税金额' },
+      { key: '表体备注', title: '备注' }];
     TableUtils.exportToExcel(result.items, `入库列表_${new Date().toISOString().split('T')[0]}.xlsx`, '入库列表', cols);
   },
 

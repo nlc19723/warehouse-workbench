@@ -63,7 +63,6 @@ class SearchSelect {
   }
 
   _build() {
-    console.log('[ESS] _build for', this.select.id);
     // 包裹容器
     const wrap = document.createElement('div');
     // 🟢 v229.14：显式 width 时加 ss-fixed（CSS 端 min-width:0），避免 .ss-wrap 150px 最小宽覆盖此 width；
@@ -100,8 +99,16 @@ class SearchSelect {
     input.setAttribute('spellcheck', 'false');
     input.setAttribute('aria-haspopup', 'listbox');
     input.setAttribute('aria-expanded', 'false');
-    input.readOnly = true;                 // 关闭态只读，点击打开后变可输入
+    // 🟢 v230.29（用户报障：移动端点击下拉框不弹输入法）：原本关闭态设 readOnly=true，
+    //   点击后再解除只读 —— 移动端系统已按「只读输入框」处理，不会唤起软键盘，
+    //   下拉框因此无法输入搜索。现改为输入框【始终可编辑】：点击/聚焦即打开面板并清空，
+    //   输入直接作为搜索词（关闭态显示已选值，一触即进入搜索态）。
+    input.setAttribute('inputmode', 'text');   // 明确提示移动端调出文本键盘
+    input.setAttribute('enterkeyhint', 'search');
+    input.readOnly = false;
     input.tabIndex = 0;
+    // 移动端部分浏览器 tap 只先触发 focus：未展开时一并打开面板（幂等，桌面端无副作用）
+    input.addEventListener('focus', () => { if (!this.open) this.openPanel(); });
 
     const panel = document.createElement('div');
     panel.className = 'ss-panel';
@@ -151,7 +158,8 @@ class SearchSelect {
     this.input.setAttribute('aria-expanded', this.open ? 'true' : 'false');
     if (this.open) return;            // 打开态：保留用户正在输入的搜索词，不回写所选文本
     this.input.value = txt;
-    this.input.readOnly = true;
+    // 🟢 v230.29：不再回写 readOnly=true（移动端只读输入框不弹输入法，见 _build 说明）
+    this.input.readOnly = false;
     this.input.classList.toggle('ss-placeholder', val === '');
     this.input.title = txt;
   }
@@ -276,7 +284,7 @@ class SearchSelect {
     this.panel.style.display = 'block';
     this._renderPanel(this._filter(''));
     this.input.focus();
-    try { this.input.select(); } catch (e) {}   // 桌面端选中全部便于覆盖；移动端无副作用
+    try { this.input.select(); } catch (e) { console.warn('[js/search-select.js:279] 异常(已忽略):', e); }   // 桌面端选中全部便于覆盖；移动端无副作用
   }
 
   close() {
