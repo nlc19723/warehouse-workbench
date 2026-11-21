@@ -1084,7 +1084,12 @@ body::after{
 .todo-dot{ width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .todo-dot.urgent{ background: var(--accent-coral); }
 .todo-dot.warning{ background: var(--status-warning); }
-.todo-text{ flex: 1; color: var(--text-main); font-size: 13px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 🟢 v230.33：补 min-width:0 —— flex:1 + nowrap 的子项缺它时不会收缩到内容以下，
+   长任务标题把「我的任务/待办事项」卡 min-content 撑到 448px，列向 flex stretch 又把
+   整列卡片拉到同宽 → 移动端整页横向溢出 68px，右侧被 overflow-x:hidden 裁切（报障截图）。 */
+.todo-text{ flex: 1; min-width: 0; color: var(--text-main); font-size: 13px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 防御：移动端数据卡列不允许被内容反向撑宽（超出部分本就被裁切不可达） */
+@media (max-width: 768px){ .data-widgets > .glass-card{ min-width: 0; max-width: 100%; } }
 .todo-meta{ font-size: 11px; color: var(--primary); white-space: nowrap; font-weight: 500; }
 .donut-container{ display: flex; align-items: center; gap: 18px; }
 .donut-chart{ position: relative; width: 90px; height: 90px; flex-shrink: 0; }
@@ -1159,12 +1164,16 @@ body::after{
   text-align: center;
   /* 🟢 v229.94：单元格内容溢出时「全部换行」而非被裁切/溢出——统一应用于全部数据表。
      默认即 normal（会换行），此处显式声明 + word-break 防长串（如英文/编码）不折行，
-     overflow:visible 确保内容永不因父容器裁掉；vertical-align:top 让多行内容顶部对齐更整齐。 */
+     overflow:visible 确保内容永不因父容器裁掉；vertical-align:middle 让多行内容垂直居中。
+     👉 v230.35：按需求「全部表格内容垂直居中」，原 top 改为 middle。 */
   white-space: normal;
   word-break: break-word;
   overflow: visible;
-  vertical-align: top;
+  vertical-align: middle;
 }
+/* 👉 v230.35：全部表格单元格垂直居中（覆盖主数据表 / 虚拟表 / Excel 选择表） */
+.vt-table tbody td,
+.excel-sel table td{ vertical-align: middle; }
 /* 🟢 v173：表格正文内的 strong / 实体链接保持与普通单元格一致的字重（400），
    避免「订单编号 / 供应商」等被加粗或着色的列看起来比普通列更大更重 */
 .data-table tbody td strong, .data-table tbody td a.entity-link{ font-weight: 400; }

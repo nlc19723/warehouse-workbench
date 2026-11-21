@@ -234,6 +234,7 @@ const App = {
       // 🟢 v228.89：数据链路收口信号 —— 无论界面模式如何都要置位，
       //   登录页可能在后台等它（_awaitBootThenEnter）。
       this._markBootDone();
+      window.__wbAppReady = true;   // 🟢 v230.34：启动数据层完成（登录/空态/工作台均算交互就绪，供看门狗判断）
       if (interactive && window.BootSplash) window.BootSplash.setProgress(92);
       // 🟢 v228.89：后台静默模式下，数据链路**到此为止** —— 不 hideLoading（本来就没亮）、
       //   不导航。界面归属由用户登录后的 showLoginView → _enterWorkbench 决定。
@@ -287,6 +288,7 @@ const App = {
       if (!interactive) return;   // 🟢 v228.89：后台模式无界面可恢复，只留日志
       hideLoading();
       if (window.BootSplash) window.BootSplash.complete();
+      window.__wbAppReady = true;   // 🟢 v230.34：异常兜底后仍标记就绪，避免看门狗误报
       // 🟢 v228.49-fix4：异常兜底同样不得把用户从已打开的模块踢回仪表盘
       const errNavAway = !!(this.currentModule && this.currentModule !== 'dashboard');
       // 🟢 v229.72：兜底分支同样走 _bootTarget()，保证「有下拉刷新意图」时落点一致

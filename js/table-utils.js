@@ -320,42 +320,74 @@ const TableStickyOverlay = {
   // 🟢 v229.45：会话级手动展开记忆（内存，不落盘）——同一模块内翻页/重渲染后保持用户手动展开态；
   //   模块切换（uninstallAll）时清空 → 「每次进入工作台默认收起」（v228.93）语义不变。
   _sessionExpand: {},
+
+  // 🟢 v230.42：按钮宿主权威解析 —— 永远是这张表自己的 .table-wrapper（无则 parentElement）。
+  //   用户报障（订单档案 0000013646）：initSortableHeaders→install(container) 与 initColumnResizers
+  //   补挂两条链路都可能把「最近带 id 的祖先」当 wrap 传进来。订单档案的 .table-wrapper 无 id，
+  //   外层 #contentArea 就成了 wrap；直接拿它 insertBefore，按钮被放到内容区顶部（返回按钮上方），
+  //   而不是表格正上方。两条链路最终都汇聚到 installColumnCollapse，故在此做唯一归一化。
+  _resolveCollapseHost(wrap, table) {
+    let host = null;
+    if (table && typeof table.closest === 'function') host = table.closest('.table-wrapper');
+    if (!host && table && table.parentElement) host = table.parentElement;
+    if (!host && wrap && typeof wrap.insertBefore === 'function') host = wrap;
+    return host;
+  },
+
   installColumnCollapse(wrap, table) {
+    const host = this._resolveCollapseHost(wrap, table);
+    if (!host || !table) return;
+    // 🟢 v230.42：清理「传入 wrap ≠ 真实 host」时可能残留的错位按钮/状态。
+    //   旧版或竞争链路可能已在 #contentArea 上挂了按钮并写了 _colCollapseBtn；
+    //   这里把折叠态迁到 host、删掉旧节点，保证同一张表只有一个按钮且位置正确。
+    if (wrap && wrap !== host) {
+      const stale = wrap._colCollapseBtn;
+      if (stale && stale !== host._colCollapseBtn && stale.parentNode) stale.parentNode.removeChild(stale);
+      if (wrap._colCollapsed !== undefined && host._colCollapsed === undefined) host._colCollapsed = wrap._colCollapsed;
+      delete wrap._colCollapseBtn;
+      delete wrap._colCollapsed;
+    }
     // 🟢 v228.03：豁免标记 —— 带 .no-col-collapse 的表格（如「违约扣款规则」这类静态说明表）
     //   移动端一律全部显示：不折叠任何列、不挂载「展开剩余 N 列」按钮。
-    if (table && table.classList && table.classList.contains('no-col-collapse')) {
-      this._resetCollapse(wrap, table);
+    if (table.classList && table.classList.contains('no-col-collapse')) {
+      this._resetCollapse(host, table);
       return;
     }
-    if (!this.isNarrow()) { this._resetCollapse(wrap, table); return; }
-    let btn = wrap._colCollapseBtn;
-    if (btn && btn.parentNode) {
-      // 🟢 v143：已初始化过（按钮存在且在 DOM 内）——直接复用已有按钮与闭包状态，
-      //   仅重新计算折叠/展开（响应容器尺寸变化）。不重新创建按钮、不覆盖 _colCollapsed，
-      //   避免同一表格被多条路径（initSortableHeaders→install 与 initColumnResizers 补挂）
-      //   用不同 wrap 重复处理导致按钮状态/折叠态不同步、点击无法展开。
-      this._applyCollapse(wrap, table);
-      return;
+    if (!this.isNarrow()) { this._resetCollapse(host, table); return; }
+    let btn = host._colCollapseBtn;
+    if (btn) {
+      // 🟢 v230.42：有按钮还不够，必须「紧邻 host 之前」。位置不对（竞争链路用了外层 wrap、
+      //   或节点已脱离文档）就废弃重建——click 闭包捕获的必须是正确的 host。
+      const inPlace = btn.parentNode && btn.parentNode === host.parentNode && btn.nextElementSibling === host;
+      if (inPlace) {
+        // 🟢 v143：已初始化过——直接复用已有按钮与闭包状态，仅重算折叠/展开，不重建按钮、
+        //   不覆盖 _colCollapsed，避免多条链路竞态导致按钮状态/折叠态不同步、点击无法展开。
+        this._applyCollapse(host, table);
+        return;
+      }
+      if (btn.parentNode) btn.parentNode.removeChild(btn);
+      btn = null;
+      delete host._colCollapseBtn;
     }
     btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'mobile-col-toggle';
-    if (wrap.parentNode) wrap.parentNode.insertBefore(btn, wrap);
-    wrap._colCollapseBtn = btn;
+    if (host.parentNode) host.parentNode.insertBefore(btn, host);
+    host._colCollapseBtn = btn;
     btn.addEventListener('click', () => {
-      wrap._colCollapsed = !wrap._colCollapsed;
+      host._colCollapsed = !host._colCollapsed;
       // 🟢 v229.45：记录用户手动意图 → 翻页重渲染后按 tableKey 恢复
       const sk = TableUtils._deriveTableKey(table);
-      if (sk) this._sessionExpand[sk] = !wrap._colCollapsed;
-      this._applyCollapse(wrap, table);   // 🟢 v228.93：仅当次会话展开，不落盘记忆（每次进入默认收起）
+      if (sk) this._sessionExpand[sk] = !host._colCollapsed;
+      this._applyCollapse(host, table);   // 🟢 v228.93：仅当次会话展开，不落盘记忆（每次进入默认收起）
     });
-    if (wrap._colCollapsed === undefined) {
-      // 🟢 v229.45：翻页/重渲染重建 wrap 时，若用户本会话手动展开过同 key 表格 → 保持展开；
+    if (host._colCollapsed === undefined) {
+      // 🟢 v229.45：翻页/重渲染重建 host 时，若用户本会话手动展开过同 key 表格 → 保持展开；
       //   否则维持 v228.93 默认收起
       const sk = TableUtils._deriveTableKey(table);
-      wrap._colCollapsed = !(sk && this._sessionExpand[sk] === true);
+      host._colCollapsed = !(sk && this._sessionExpand[sk] === true);
     }
-    this._applyCollapse(wrap, table);
+    this._applyCollapse(host, table);
   },
 
   // 🟢 v228.77：幂等写入助手 —— 值没变就不碰 DOM。
@@ -366,6 +398,10 @@ const TableStickyOverlay = {
   //   ② 每一轮都重跑 fitMobileTables → 高度被重写 → 内层 scrollTop 被钳 → 「回滚 2 行」。
   _setText(el, s) { if (el && el.textContent !== s) el.textContent = s; },
   _setCss(el, prop, v) { if (el && el.style[prop] !== v) el.style[prop] = v; },
+  // 🟢 v230.42：dataset 纳入幂等写入 —— 同值赋值也会产生 attribute mutation。
+  //   当前 app.js observer 只监听 childList，但与其他写入保持同一幂等约定，
+  //   避免后续监听扩展时重新引入自激环。
+  _setData(el, key, val) { if (el && el.dataset && el.dataset[key] !== val) el.dataset[key] = val; },
 
   _applyCollapse(wrap, table) {
     this._applyCollapseCore(wrap, table);
@@ -441,7 +477,7 @@ const TableStickyOverlay = {
         if (this._hasWidthSpec(table, ths)) { table.style.tableLayout = 'fixed'; table.style.width = 'auto'; table.style.minWidth = '0'; }
         else { table.style.tableLayout = 'auto'; table.style.width = ''; table.style.minWidth = ''; }
         // 🟢 v228.77：幂等写入（不替换文本节点 → 不再触发 MutationObserver 自激环）
-        if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, '收起 ▴'); btn.dataset.state = 'expanded'; }
+        if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, '收起 ▴'); this._setData(btn, 'state', 'expanded'); }
         return;
       }
       let hidden = 0;
@@ -455,7 +491,7 @@ const TableStickyOverlay = {
       if (visThs.length > 0) this._equalizeCols(table, visThs, wrap);
       else { table.style.width = ''; table.style.minWidth = '0'; }
       if (hidden === 0) { if (btn) this._setCss(btn, 'display', 'none'); }
-      else { if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, `展开剩余 ${hidden} 列 ▾`); btn.dataset.state = 'collapsed'; } }
+      else { if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, `展开剩余 ${hidden} 列 ▾`); this._setData(btn, 'state', 'collapsed'); } }
       return;
     }
 
@@ -472,7 +508,7 @@ const TableStickyOverlay = {
         table.style.width = '';
         table.style.minWidth = '';
       }
-      if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, '收起 ▴'); btn.dataset.state = 'expanded'; }
+      if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, '收起 ▴'); this._setData(btn, 'state', 'expanded'); }
       return;
     }
     let hidden = 0;
@@ -492,7 +528,7 @@ const TableStickyOverlay = {
     if (hidden === 0) {
       if (btn) this._setCss(btn, 'display', 'none');
     } else {
-      if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, `展开剩余 ${hidden} 列 ▾`); btn.dataset.state = 'collapsed'; }
+      if (btn) { this._setCss(btn, 'display', ''); this._setText(btn, `展开剩余 ${hidden} 列 ▾`); this._setData(btn, 'state', 'collapsed'); }
     }
   },
 
@@ -750,12 +786,24 @@ const TableStickyOverlay = {
       const thead = table.querySelector('thead');
       if (thead) { thead.style.position = ''; thead.style.top = ''; thead.style.left = ''; thead.style.zIndex = ''; }
     }
-    // 🟢 v139：清理列折叠按钮（挂在 wrap 的父节点上）
-    if (wrap._colCollapseBtn && wrap._colCollapseBtn.parentNode) {
-      wrap._colCollapseBtn.parentNode.removeChild(wrap._colCollapseBtn);
+    // 🟢 v230.42：清理列折叠按钮 —— 按钮宿主是「表格自身的 .table-wrapper」，
+    //   未必是 wrap 本身（订单档案等 wrap 为外层 #contentArea，按钮挂在内部各表的 wrapper 前）。
+    //   遍历 wrap 内所有表格解析真实宿主，连同 wrap 自身一起清，避免切模块时按钮/状态残留。
+    const collapseHosts = [];
+    if (wrap._colCollapseBtn) collapseHosts.push(wrap);
+    if (wrap.querySelectorAll) {
+      wrap.querySelectorAll('.data-table').forEach(tbl => {
+        const host = this._resolveCollapseHost(wrap, tbl);
+        if (host && collapseHosts.indexOf(host) < 0) collapseHosts.push(host);
+      });
     }
-    wrap._colCollapseBtn = null;
-    wrap._colCollapsed = undefined;
+    collapseHosts.forEach(host => {
+      if (host._colCollapseBtn && host._colCollapseBtn.parentNode) {
+        host._colCollapseBtn.parentNode.removeChild(host._colCollapseBtn);
+      }
+      host._colCollapseBtn = null;
+      host._colCollapsed = undefined;
+    });
     // 防御性：清掉属于这个 wrap 的全局监听记录
     window._overlayGlobalListeners = window._overlayGlobalListeners.filter(l => l.wrap !== wrap);
     if (window._installedWraps && typeof window._installedWraps.delete === 'function') {
@@ -972,11 +1020,19 @@ const TableUtils = {
   },
   _formatSummary(n, isMoney) {
     if (!isFinite(n)) n = 0;
-    let s;
+    // 🟢 v230.43：金额类合计/均值必须与数据行 formatMoney 同口径（恒定 2 位小数）。
+    //   旧逻辑金额 ≥10000 时 maximumFractionDigits:0 → 104154.07 显示成 ¥104,154，
+    //   与上方数据行的 104,154.07 不一致（用户报障）。改为金额恒定 2 位；
+    //   非金额列（数量/件数等）保持原逻辑：≥10000 取整，避免无意义的小数尾巴。
+    if (isMoney) {
+      const cents = Math.round(n * 100) / 100;   // 先按「分」规整，杜绝浮点尾巴
+      return '¥' + new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(cents);
+    }
     const abs = Math.abs(n);
-    if (abs >= 10000) s = n.toLocaleString('zh-CN', { maximumFractionDigits: 0 });
-    else s = (Math.round(n * 100) / 100).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
-    return isMoney ? '¥' + s : s;
+    const s = abs >= 10000
+      ? n.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+      : (Math.round(n * 100) / 100).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+    return s;
   },
 
   // —— 筛选 chips ——
@@ -2922,10 +2978,11 @@ const TableUtils = {
       // 🟢 v143：补挂移动端列折叠。v139 列折叠原本只通过 initSortableHeaders→TableStickyOverlay.install
       //   链路挂到部分模块；像 reconciliation 的 recSummary 内嵌表格、库存预警等未显式调 initSortableHeaders 的
       //   表格移动端就没有"展开剩余N列"按钮、超宽列被挤成竖条。这里统一补挂。
-      //   wrap 优先取最近带 id 的祖先容器（与 initSortableHeaders 的 containerId 语义一致，避免同一个表格被
-      //   不同 wrap 重复挂导致按钮状态不同步），其次 .table-wrapper，兜底 parentElement。
+      //   🟢 v230.42：wrap 必须优先取表格自身的 .table-wrapper —— 此前 `closest('[id]')` 优先，
+      //   订单档案这类 .table-wrapper 无 id 的页面会命中外层 #contentArea，按钮被插到页面顶部。
+      //   （installColumnCollapse 内部还会按表格做一次权威归一化，两道保险。）
       //   桌面端 isNarrow()=false → installColumnCollapse 内部走 _resetCollapse，仅清折叠态、不动 th.style.width，不影响 PC 列宽。
-      const wrap = t.closest('[id]') || t.closest('.table-wrapper') || t.parentElement;
+      const wrap = t.closest('.table-wrapper') || t.closest('[id]') || t.parentElement;
       if (wrap) {
         // 避免重复挂：如果该表格已被 initSortableHeaders→install（keepSticky 链路）处理过
         // （祖先容器带 _mobileStickyInstalled / _colCollapseBtn 标记），则跳过，避免同一表格
